@@ -1,0 +1,22 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "playwright": {
+      "type": "local",
+      "command": [
+        "npx",
+        "@playwright/mcp@latest"
+      ],
+      "enabled": true
+    },
+    "gmail": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@gongrzhe/server-gmail-autoauth-mcp"
+      ],
+      "enabled": true
+    }
+  }
+}

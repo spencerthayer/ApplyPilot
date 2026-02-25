@@ -473,7 +473,7 @@ class OpenCodeBackend(AgentBackend):
         servers: set[str] = set()
         for line in cleaned.splitlines():
             m = re.match(
-                r"^\s*[●*]?\s*[✓x]?\s*([A-Za-z0-9_-]+)\s+(connected|disconnected|error)\b",
+                r"^\s*[●*]?\s*[✓x✗]?\s*([A-Za-z0-9_-]+)\s+(connected|disconnected|error|failed)\b",
                 line.strip(),
             )
             if m:
