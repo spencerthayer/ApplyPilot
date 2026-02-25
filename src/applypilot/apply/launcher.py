@@ -27,22 +27,41 @@ from applypilot import config
 from applypilot.database import get_connection
 from applypilot.apply import chrome, dashboard, prompt as prompt_mod
 from applypilot.apply.chrome import (
-    launch_chrome, cleanup_worker, kill_all_chrome,
-    reset_worker_dir, cleanup_on_exit, _kill_process_tree,
+    launch_chrome,
+    cleanup_worker,
+    kill_all_chrome,
+    reset_worker_dir,
+    cleanup_on_exit,
+    _kill_process_tree,
     BASE_CDP_PORT,
 )
 from applypilot.apply.dashboard import (
-    init_worker, update_state, add_event, get_state,
-    render_full, get_totals,
+    init_worker,
+    update_state,
+    add_event,
+    get_state,
+    render_full,
+    get_totals,
 )
-from applypilot.apply.backends import get_backend, AgentBackend, InvalidBackendError, DEFAULT_BACKEND
+from applypilot.apply.backends import (
+    get_backend,
+    AgentBackend,
+    InvalidBackendError,
+    DEFAULT_BACKEND,
+    resolve_backend_name,
+    resolve_default_model,
+    resolve_default_agent,
+)
 
 logger = logging.getLogger(__name__)
+
 
 # Blocked sites loaded from config/sites.yaml
 def _load_blocked():
     from applypilot.config import load_blocked_sites
+
     return load_blocked_sites()
+
 
 # How often to poll the DB when the queue is empty (seconds)
 POLL_INTERVAL = config.DEFAULTS["poll_interval"]
@@ -64,6 +83,7 @@ if platform.system() != "Windows":
 # ---------------------------------------------------------------------------
 # MCP config
 # ---------------------------------------------------------------------------
+
 
 def _make_mcp_config(cdp_port: int) -> dict:
     """Build MCP config dict for a specific CDP port."""
@@ -89,8 +109,8 @@ def _make_mcp_config(cdp_port: int) -> dict:
 # Database operations
 # ---------------------------------------------------------------------------
 
-def acquire_job(target_url: str | None = None, min_score: int = 7,
-                worker_id: int = 0) -> dict | None:
+
+def acquire_job(target_url: str | None = None, min_score: int = 7, worker_id: int = 0) -> dict | None:
     """Atomically acquire the next job to apply to.
 
     Args:
@@ -107,7 +127,8 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
 
         if target_url:
             like = f"%{target_url.split('?')[0].rstrip('/')}%"
-            row = conn.execute("""
+            row = conn.execute(
+                """
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path
                 FROM jobs
@@ -115,7 +136,9 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   AND tailored_resume_path IS NOT NULL
                   AND apply_status != 'in_progress'
                 LIMIT 1
-            """, (target_url, target_url, like, like)).fetchone()
+            """,
+                (target_url, target_url, like, like),
+            ).fetchone()
         else:
             blocked_sites, blocked_patterns = _load_blocked()
             # Build parameterized filters to avoid SQL injection
@@ -129,7 +152,8 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             if blocked_patterns:
                 url_clauses = " ".join(f"AND url NOT LIKE ?" for _ in blocked_patterns)
                 params.extend(blocked_patterns)
-            row = conn.execute(f"""
+            row = conn.execute(
+                f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path
                 FROM jobs
@@ -141,7 +165,9 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   {url_clauses}
                 ORDER BY fit_score DESC, url
                 LIMIT 1
-            """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchone()
+            """,
+                [config.DEFAULTS["max_apply_attempts"]] + params,
+            ).fetchone()
 
         if not row:
             conn.rollback()
@@ -149,6 +175,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
 
         # Skip manual ATS sites (unsolvable CAPTCHAs)
         from applypilot.config import is_manual_ats
+
         apply_url = row["application_url"] or row["url"]
         if is_manual_ats(apply_url):
             conn.execute(
@@ -160,12 +187,15 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             return None
 
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute("""
+        conn.execute(
+            """
             UPDATE jobs SET apply_status = 'in_progress',
                            agent_id = ?,
                            last_attempted_at = ?
             WHERE url = ?
-        """, (f"worker-{worker_id}", now, row["url"]))
+        """,
+            (f"worker-{worker_id}", now, row["url"]),
+        )
         conn.commit()
 
         return dict(row)
@@ -174,27 +204,38 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
         raise
 
 
-def mark_result(url: str, status: str, error: str | None = None,
-                permanent: bool = False, duration_ms: int | None = None,
-                task_id: str | None = None) -> None:
+def mark_result(
+    url: str,
+    status: str,
+    error: str | None = None,
+    permanent: bool = False,
+    duration_ms: int | None = None,
+    task_id: str | None = None,
+) -> None:
     """Update a job's apply status in the database."""
     conn = get_connection()
     now = datetime.now(timezone.utc).isoformat()
     if status == "applied":
-        conn.execute("""
+        conn.execute(
+            """
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
                            apply_error = NULL, agent_id = NULL,
                            apply_duration_ms = ?, apply_task_id = ?
             WHERE url = ?
-        """, (now, duration_ms, task_id, url))
+        """,
+            (now, duration_ms, task_id, url),
+        )
     else:
         attempts = 99 if permanent else "COALESCE(apply_attempts, 0) + 1"
-        conn.execute(f"""
+        conn.execute(
+            f"""
             UPDATE jobs SET apply_status = ?, apply_error = ?,
                            apply_attempts = {attempts}, agent_id = NULL,
                            apply_duration_ms = ?, apply_task_id = ?
             WHERE url = ?
-        """, (status, error or "unknown", duration_ms, task_id, url))
+        """,
+            (status, error or "unknown", duration_ms, task_id, url),
+        )
     conn.commit()
 
 
@@ -212,8 +253,8 @@ def release_lock(url: str) -> None:
 # Utility modes (--gen, --mark-applied, --mark-failed, --reset-failed)
 # ---------------------------------------------------------------------------
 
-def gen_prompt(target_url: str, min_score: int = 7,
-               model: str = "sonnet", worker_id: int = 0) -> Path | None:
+
+def gen_prompt(target_url: str, min_score: int = 7, model: str = "sonnet", worker_id: int = 0) -> Path | None:
     """Generate a prompt file and print the Claude CLI command for manual debugging.
 
     Returns:
@@ -260,17 +301,23 @@ def mark_job(url: str, status: str, reason: str | None = None) -> None:
     conn = get_connection()
     now = datetime.now(timezone.utc).isoformat()
     if status == "applied":
-        conn.execute("""
+        conn.execute(
+            """
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
                            apply_error = NULL, agent_id = NULL
             WHERE url = ?
-        """, (now, url))
+        """,
+            (now, url),
+        )
     else:
-        conn.execute("""
+        conn.execute(
+            """
             UPDATE jobs SET apply_status = 'failed', apply_error = ?,
                            apply_attempts = 99, agent_id = NULL
             WHERE url = ?
-        """, (reason or "manual", url))
+        """,
+            (reason or "manual", url),
+        )
     conn.commit()
 
 
@@ -296,11 +343,13 @@ def reset_failed() -> int:
 # Per-job execution
 # ---------------------------------------------------------------------------
 
+
 def run_job(
     job: dict,
     port: int,
     worker_id: int = 0,
-    model: str = "sonnet",
+    model: str | None = None,
+    agent: str | None = None,
     dry_run: bool = False,
     backend: AgentBackend | None = None,
 ) -> tuple[str, int]:
@@ -310,7 +359,8 @@ def run_job(
         job: Job dictionary with all required fields.
         port: CDP port for browser connection.
         worker_id: Numeric worker identifier.
-        model: Model name (backend-specific).
+        model: Model name (backend-specific). Uses backend default if None.
+        agent: Agent name for OpenCode backend. Ignored by Claude backend.
         dry_run: Don't click Submit.
         backend: AgentBackend instance. If None, uses default Claude backend.
 
@@ -340,6 +390,9 @@ def run_job(
     # Get or create backend
     if backend is None:
         backend = get_backend(DEFAULT_BACKEND)
+    resolved_model = model or resolve_default_model(backend.name)
+    resolved_agent = agent or resolve_default_agent(backend.name)
+    required_mcp_servers = list(_make_mcp_config(port)["mcpServers"].keys())
 
     worker_dir = reset_worker_dir(worker_id)
 
@@ -348,24 +401,35 @@ def run_job(
         job=job,
         port=port,
         worker_id=worker_id,
-        model=model,
+        model=resolved_model,
+        agent=resolved_agent,
         dry_run=dry_run,
         prompt=agent_prompt,
         mcp_config_path=mcp_config_path,
         worker_dir=worker_dir,
+        required_mcp_servers=required_mcp_servers,
     )
+
 
 # ---------------------------------------------------------------------------
 # Permanent failure classification
 # ---------------------------------------------------------------------------
 
 PERMANENT_FAILURES: set[str] = {
-    "expired", "captcha", "login_issue",
-    "not_eligible_location", "not_eligible_salary",
-    "already_applied", "account_required",
-    "not_a_job_application", "unsafe_permissions",
-    "unsafe_verification", "sso_required",
-    "site_blocked", "cloudflare_blocked", "blocked_by_cloudflare",
+    "expired",
+    "captcha",
+    "login_issue",
+    "not_eligible_location",
+    "not_eligible_salary",
+    "already_applied",
+    "account_required",
+    "not_a_job_application",
+    "unsafe_permissions",
+    "unsafe_verification",
+    "sso_required",
+    "site_blocked",
+    "cloudflare_blocked",
+    "blocked_by_cloudflare",
 }
 
 PERMANENT_PREFIXES: tuple[str, ...] = ("site_blocked", "cloudflare", "blocked_by")
@@ -385,11 +449,18 @@ def _is_permanent_failure(result: str) -> bool:
 # Worker loop
 # ---------------------------------------------------------------------------
 
-def worker_loop(worker_id: int = 0, limit: int = 1,
-                target_url: str | None = None,
-                min_score: int = 7, headless: bool = False,
-                model: str = "sonnet", dry_run: bool = False,
-                backend_name: str | None = None) -> tuple[int, int]:
+
+def worker_loop(
+    worker_id: int = 0,
+    limit: int = 1,
+    target_url: str | None = None,
+    min_score: int = 7,
+    headless: bool = False,
+    model: str | None = None,
+    agent: str | None = None,
+    dry_run: bool = False,
+    backend_name: str | None = None,
+) -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
@@ -398,7 +469,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome headless.
-        model: Claude model name.
+        model: Backend model name override.
+        agent: OpenCode agent override.
         dry_run: Don't click Submit.
         backend_name: Backend identifier ('claude' or via APPLY_BACKEND env var).
 
@@ -421,19 +493,16 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
         if not continuous and jobs_done >= limit:
             break
 
-        update_state(worker_id, status="idle", job_title="", company="",
-                     last_action="waiting for job", actions=0)
+        update_state(worker_id, status="idle", job_title="", company="", last_action="waiting for job", actions=0)
 
-        job = acquire_job(target_url=target_url, min_score=min_score,
-                          worker_id=worker_id)
+        job = acquire_job(target_url=target_url, min_score=min_score, worker_id=worker_id)
         if not job:
             if not continuous:
                 add_event(f"[W{worker_id}] Queue empty")
                 update_state(worker_id, status="done", last_action="queue empty")
                 break
             empty_polls += 1
-            update_state(worker_id, status="idle",
-                         last_action=f"polling ({empty_polls})")
+            update_state(worker_id, status="idle", last_action=f"polling ({empty_polls})")
             if empty_polls == 1:
                 add_event(f"[W{worker_id}] Queue empty, polling every {POLL_INTERVAL}s...")
             # Use Event.wait for interruptible sleep
@@ -448,9 +517,9 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             add_event(f"[W{worker_id}] Launching Chrome...")
             chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
 
-            result, duration_ms = run_job(job, port=port, worker_id=worker_id,
-                                            model=model, dry_run=dry_run,
-                                            backend=backend)
+            result, duration_ms = run_job(
+                job, port=port, worker_id=worker_id, model=model, agent=agent, dry_run=dry_run, backend=backend
+            )
 
             if result == "skipped":
                 release_lock(job["url"])
@@ -459,16 +528,14 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             elif result == "applied":
                 mark_result(job["url"], "applied", duration_ms=duration_ms)
                 applied += 1
-                update_state(worker_id, jobs_applied=applied,
-                             jobs_done=applied + failed)
+                update_state(worker_id, jobs_applied=applied, jobs_done=applied + failed)
             else:
                 reason = result.split(":", 1)[-1] if ":" in result else result
-                mark_result(job["url"], "failed", reason,
-                            permanent=_is_permanent_failure(result),
-                            duration_ms=duration_ms)
+                mark_result(
+                    job["url"], "failed", reason, permanent=_is_permanent_failure(result), duration_ms=duration_ms
+                )
                 failed += 1
-                update_state(worker_id, jobs_failed=failed,
-                             jobs_done=applied + failed)
+                update_state(worker_id, jobs_failed=failed, jobs_done=applied + failed)
 
         except KeyboardInterrupt:
             release_lock(job["url"])
@@ -498,11 +565,20 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 # Main entry point (called from cli.py)
 # ---------------------------------------------------------------------------
 
-def main(limit: int = 1, target_url: str | None = None,
-         min_score: int = 7, headless: bool = False, model: str = "sonnet",
-         dry_run: bool = False, continuous: bool = False,
-         poll_interval: int = 60, workers: int = 1,
-         backend_name: str | None = None) -> None:
+
+def main(
+    limit: int = 1,
+    target_url: str | None = None,
+    min_score: int = 7,
+    headless: bool = False,
+    model: str | None = None,
+    agent: str | None = None,
+    dry_run: bool = False,
+    continuous: bool = False,
+    poll_interval: int = 60,
+    workers: int = 1,
+    backend_name: str | None = None,
+) -> None:
     """Launch the apply pipeline.
 
     Args:
@@ -510,7 +586,8 @@ def main(limit: int = 1, target_url: str | None = None,
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome in headless mode.
-        model: Claude model name.
+        model: Backend model override.
+        agent: OpenCode agent override.
         dry_run: Don't click Submit.
         continuous: Run forever, polling for new jobs.
         poll_interval: Seconds between DB polls when queue is empty.
@@ -521,9 +598,13 @@ def main(limit: int = 1, target_url: str | None = None,
     POLL_INTERVAL = poll_interval
     _stop_event.clear()
 
+    resolved_backend_name = resolve_backend_name(backend_name)
+    resolved_model = model or resolve_default_model(resolved_backend_name)
+    resolved_agent = agent or resolve_default_agent(resolved_backend_name)
+
     # Validate backend early to fail fast
     try:
-        get_backend(backend_name)
+        get_backend(resolved_backend_name)
     except InvalidBackendError as e:
         console = Console()
         console.print(f"[red bold]Error: {e}[/red bold]")
@@ -545,6 +626,11 @@ def main(limit: int = 1, target_url: str | None = None,
 
     worker_label = f"{workers} worker{'s' if workers > 1 else ''}"
     console.print(f"Launching apply pipeline ({mode_label}, {worker_label}, poll every {POLL_INTERVAL}s)...")
+    console.print(
+        f"[dim]Backend: {resolved_backend_name} | Model: {resolved_model}"
+        + (f" | Agent: {resolved_agent}" if resolved_agent else "")
+        + "[/dim]"
+    )
     console.print("[dim]Ctrl+C = skip current job(s) | Ctrl+C x2 = stop[/dim]")
 
     # Double Ctrl+C handler
@@ -595,22 +681,21 @@ def main(limit: int = 1, target_url: str | None = None,
                     target_url=target_url,
                     min_score=min_score,
                     headless=headless,
-                    model=model,
+                    model=resolved_model,
+                    agent=resolved_agent,
                     dry_run=dry_run,
-                    backend_name=backend_name,
+                    backend_name=resolved_backend_name,
                 )
             else:
                 # Multi-worker — distribute limit across workers
                 if effective_limit:
                     base = effective_limit // workers
                     extra = effective_limit % workers
-                    limits = [base + (1 if i < extra else 0)
-                              for i in range(workers)]
+                    limits = [base + (1 if i < extra else 0) for i in range(workers)]
                 else:
                     limits = [0] * workers  # continuous mode
 
-                with ThreadPoolExecutor(max_workers=workers,
-                                        thread_name_prefix="apply-worker") as executor:
+                with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="apply-worker") as executor:
                     futures = {
                         executor.submit(
                             worker_loop,
@@ -619,9 +704,10 @@ def main(limit: int = 1, target_url: str | None = None,
                             target_url=target_url,
                             min_score=min_score,
                             headless=headless,
-                            model=model,
+                            model=resolved_model,
+                            agent=resolved_agent,
                             dry_run=dry_run,
-                            backend_name=backend_name,
+                            backend_name=resolved_backend_name,
                         ): i
                         for i in range(workers)
                     }
@@ -643,10 +729,7 @@ def main(limit: int = 1, target_url: str | None = None,
             live.update(render_full())
 
         totals = get_totals()
-        console.print(
-            f"\n[bold]Done: {total_applied} applied, {total_failed} failed "
-            f"(${totals['cost']:.3f})[/bold]"
-        )
+        console.print(f"\n[bold]Done: {total_applied} applied, {total_failed} failed (${totals['cost']:.3f})[/bold]")
         console.print(f"Logs: {config.LOG_DIR}")
 
     except KeyboardInterrupt:

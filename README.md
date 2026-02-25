@@ -144,9 +144,16 @@ ApplyPilot supports multiple LLM backends. The baseline-first approach for LLMs 
   - opencode: Use the OpenCode backend and its MCP integrations (recommended)
   - claude: Use Claude Code CLI for auto-apply (current code default when APPLY_BACKEND is not set)
 
+- Backend defaults are configurable:
+  - `APPLY_CLAUDE_MODEL` (default: `haiku`)
+  - `APPLY_OPENCODE_MODEL` (fallback: `LLM_MODEL`, then `gpt-4o-mini`)
+  - `APPLY_OPENCODE_AGENT` (passed as `--agent` to `opencode run`)
+
   Example (use OpenCode):
 
   export APPLY_BACKEND=opencode
+  export APPLY_OPENCODE_MODEL="gh/claude-sonnet-4.5"
+  export APPLY_OPENCODE_AGENT="coder"
 
 4) OpenCode MCP prerequisite
 - When using the opencode backend you must register the OpenCode MCP provider before first run. Run:
@@ -154,6 +161,10 @@ ApplyPilot supports multiple LLM backends. The baseline-first approach for LLMs 
   opencode mcp add my-mcp --provider=openai --url "$LLM_URL" --api-key "$LLM_API_KEY" --model "$LLM_MODEL"
 
 - Replace the provider and flags according to your MCP. This registers the gateway so OpenCode can reach it at runtime. Note: OpenCode manages MCP servers globally in its own config; you cannot pass an MCP config file per invocation.
+- For parity with Claude apply flow, ensure `opencode mcp list` contains both MCP server names:
+  - `playwright`
+  - `gmail`
+  ApplyPilot validates this baseline before running the OpenCode backend.
 
 5) Claude fallback / code default
 - The code default backend when APPLY_BACKEND is not set is `claude`. If you plan to rely on the default behavior or explicitly set APPLY_BACKEND=claude, ensure Claude Code CLI is installed and configured. Claude remains supported as a fallback orchestration backend.

@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from applypilot.apply.backends import ClaudeBackend, OpenCodeBackend
+from applypilot.apply.backends import BackendError, ClaudeBackend, OpenCodeBackend
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +91,7 @@ def _run_claude_with_output(
             port=9222,
             worker_id=0,
             model="test-model",
+            agent=None,
             dry_run=True,
             prompt="test prompt",
             mcp_config_path=mcp_config,
@@ -122,6 +123,7 @@ def _run_opencode_with_output(
             port=9222,
             worker_id=0,
             model="test-model",
+            agent=None,
             dry_run=True,
             prompt="test prompt",
             mcp_config_path=mcp_config,
@@ -439,6 +441,7 @@ class TestProcessFailureEdgeCases:
                 port=9222,
                 worker_id=0,
                 model="test",
+                agent=None,
                 dry_run=True,
                 prompt="test",
                 mcp_config_path=tmp_path / "mcp.json",
@@ -471,6 +474,7 @@ class TestProcessFailureEdgeCases:
                 port=9222,
                 worker_id=0,
                 model="test",
+                agent=None,
                 dry_run=True,
                 prompt="test",
                 mcp_config_path=tmp_path / "mcp.json",
@@ -478,3 +482,74 @@ class TestProcessFailureEdgeCases:
             )
         assert status.startswith("failed:")
         assert "spawn failed" in status
+
+
+class TestOpenCodeMcpParity:
+    """OpenCode backend enforces MCP baseline parity with Claude flow."""
+
+    def test_build_command_includes_agent_when_set(self):
+        backend = OpenCodeBackend()
+        with patch.object(backend, "_find_binary", return_value="/usr/bin/opencode"):
+            cmd = backend._build_command("o4-mini", Path("/tmp/w"), "coder")
+        assert "--agent" in cmd
+        assert "coder" in cmd
+
+    def test_missing_required_mcp_servers_raises(self):
+        backend = OpenCodeBackend()
+        with patch.object(backend, "_list_mcp_servers", return_value={"search"}):
+            with pytest.raises(BackendError, match="Missing server"):
+                backend._ensure_required_mcp_servers(["playwright", "gmail"])
+
+
+class TestPromptParity:
+    """Both backends receive the exact same launcher-built prompt string."""
+
+    def test_claude_prompt_forwarded_to_stdin(self, tmp_path):
+        backend = ClaudeBackend()
+        prompt = "PROMPT_PAYLOAD_CLAUDE"
+        mock_proc = _fake_popen(["RESULT:FAILED:manual"], returncode=0)
+        with (
+            patch("subprocess.Popen", return_value=mock_proc),
+            patch("applypilot.apply.dashboard.update_state"),
+            patch("applypilot.apply.dashboard.add_event"),
+            patch("applypilot.apply.dashboard.get_state", return_value=None),
+        ):
+            backend.run_job(
+                job=_make_job(),
+                port=9222,
+                worker_id=0,
+                model="haiku",
+                agent=None,
+                dry_run=True,
+                prompt=prompt,
+                mcp_config_path=tmp_path / "mcp.json",
+                worker_dir=tmp_path,
+                required_mcp_servers=["playwright", "gmail"],
+            )
+        mock_proc.stdin.write.assert_called_once_with(prompt)
+
+    def test_opencode_prompt_forwarded_to_stdin(self, tmp_path):
+        backend = OpenCodeBackend()
+        prompt = "PROMPT_PAYLOAD_OPENCODE"
+        mock_proc = _fake_popen(["RESULT:FAILED:manual"], returncode=0)
+        with (
+            patch("subprocess.Popen", return_value=mock_proc),
+            patch.object(backend, "_find_binary", return_value="/usr/bin/opencode"),
+            patch.object(backend, "_list_mcp_servers", return_value={"playwright", "gmail"}),
+            patch("applypilot.apply.dashboard.update_state"),
+            patch("applypilot.apply.dashboard.add_event"),
+            patch("applypilot.apply.dashboard.get_state", return_value=None),
+        ):
+            backend.run_job(
+                job=_make_job(),
+                port=9222,
+                worker_id=0,
+                model="gh/claude-sonnet-4.5",
+                agent="coder",
+                dry_run=True,
+                prompt=prompt,
+                mcp_config_path=tmp_path / "mcp.json",
+                worker_dir=tmp_path,
+                required_mcp_servers=["playwright", "gmail"],
+            )
+        mock_proc.stdin.write.assert_called_once_with(prompt)

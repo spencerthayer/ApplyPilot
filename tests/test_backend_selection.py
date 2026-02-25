@@ -21,6 +21,8 @@ from applypilot.apply.backends import (
     OpenCodeBackend,
     get_available_backends,
     get_backend,
+    resolve_default_agent,
+    resolve_default_model,
 )
 
 
@@ -192,3 +194,32 @@ class TestBackendInterface:
             b = get_backend(name)
             assert b.get_active_proc(0) is None
             assert b.get_active_proc(99) is None
+
+
+class TestBackendDefaults:
+    """Backend-aware model and agent default resolution."""
+
+    def test_default_model_for_claude(self, monkeypatch):
+        monkeypatch.delenv("APPLY_CLAUDE_MODEL", raising=False)
+        assert resolve_default_model("claude") == "haiku"
+
+    def test_default_model_for_claude_env_override(self, monkeypatch):
+        monkeypatch.setenv("APPLY_CLAUDE_MODEL", "sonnet")
+        assert resolve_default_model("claude") == "sonnet"
+
+    def test_default_model_for_opencode_uses_llm_model(self, monkeypatch):
+        monkeypatch.delenv("APPLY_OPENCODE_MODEL", raising=False)
+        monkeypatch.setenv("LLM_MODEL", "gh/claude-sonnet-4.5")
+        assert resolve_default_model("opencode") == "gh/claude-sonnet-4.5"
+
+    def test_default_model_for_opencode_env_override(self, monkeypatch):
+        monkeypatch.setenv("APPLY_OPENCODE_MODEL", "o4-mini")
+        monkeypatch.setenv("LLM_MODEL", "ignored")
+        assert resolve_default_model("opencode") == "o4-mini"
+
+    def test_default_agent_for_opencode_env(self, monkeypatch):
+        monkeypatch.setenv("APPLY_OPENCODE_AGENT", "coder")
+        assert resolve_default_agent("opencode") == "coder"
+
+    def test_default_agent_for_claude(self):
+        assert resolve_default_agent("claude") is None

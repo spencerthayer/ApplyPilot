@@ -14,10 +14,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 if TYPE_CHECKING:
     from typing import Any
@@ -27,6 +28,9 @@ logger = logging.getLogger(__name__)
 # Supported backend identifiers
 VALID_BACKENDS: frozenset[str] = frozenset({"claude", "opencode"})
 DEFAULT_BACKEND: str = "claude"
+DEFAULT_CLAUDE_MODEL: str = "haiku"
+DEFAULT_OPENCODE_MODEL: str = "gpt-4o-mini"
+ANSI_ESCAPE_RE = re.compile(r"\x1B\[[0-9;]*[A-Za-z]")
 
 
 class BackendError(Exception):
@@ -62,10 +66,12 @@ class AgentBackend(ABC):
         port: int,
         worker_id: int,
         model: str,
+        agent: str | None,
         dry_run: bool,
         prompt: str,
         mcp_config_path: Path,
         worker_dir: Path,
+        required_mcp_servers: Sequence[str] | None = None,
         update_callback: Any | None = None,
     ) -> tuple[str, int]:
         """Execute the agent for a single job application.
@@ -167,10 +173,12 @@ class ClaudeBackend(AgentBackend):
         port: int,
         worker_id: int,
         model: str,
+        agent: str | None,
         dry_run: bool,
         prompt: str,
         mcp_config_path: Path,
         worker_dir: Path,
+        required_mcp_servers: Sequence[str] | None = None,
         update_callback: Any | None = None,
     ) -> tuple[str, int]:
         """Execute Claude Code for a single job application.
@@ -228,15 +236,19 @@ class ClaudeBackend(AgentBackend):
                 cwd=str(worker_dir),
             )
             self._active_procs[worker_id] = proc
+            if proc.stdin is None or proc.stdout is None:
+                raise BackendError("Claude backend process streams unavailable")
+            stdin = proc.stdin
+            stdout = proc.stdout
 
-            proc.stdin.write(prompt)
-            proc.stdin.close()
+            stdin.write(prompt)
+            stdin.close()
 
             text_parts: list[str] = []
             with open(worker_log, "a", encoding="utf-8") as lf:
                 lf.write(log_header)
 
-                for line in proc.stdout:
+                for line in stdout:
                     line = line.strip()
                     if not line:
                         continue
@@ -388,7 +400,6 @@ class ClaudeBackend(AgentBackend):
         self._active_procs.clear()
 
 
-
 class OpenCodeBackend(AgentBackend):
     """OpenCode CLI backend implementation.
 
@@ -425,6 +436,7 @@ class OpenCodeBackend(AgentBackend):
         self,
         model: str,
         worker_dir: Path,
+        agent: str | None,
     ) -> list[str]:
         """Build the OpenCode CLI command arguments.
 
@@ -436,12 +448,51 @@ class OpenCodeBackend(AgentBackend):
         cmd = [
             binary,
             "run",
-            "--format", "json",
-            "--dir", str(worker_dir),
+            "--format",
+            "json",
+            "--dir",
+            str(worker_dir),
         ]
         if model:
             cmd.extend(["--model", model])
+        if agent:
+            cmd.extend(["--agent", agent])
         return cmd
+
+    def _list_mcp_servers(self) -> set[str]:
+        binary = self._find_binary()
+        proc = subprocess.run(
+            [binary, "mcp", "list"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=self._prepare_environment(),
+        )
+        output = proc.stdout or ""
+        cleaned = ANSI_ESCAPE_RE.sub("", output)
+        servers: set[str] = set()
+        for line in cleaned.splitlines():
+            m = re.match(
+                r"^\s*[●*]?\s*[✓x]?\s*([A-Za-z0-9_-]+)\s+(connected|disconnected|error)\b",
+                line.strip(),
+            )
+            if m:
+                servers.add(m.group(1))
+        return servers
+
+    def _ensure_required_mcp_servers(self, required: Sequence[str] | None) -> None:
+        if not required:
+            return
+        configured = self._list_mcp_servers()
+        missing = [name for name in required if name not in configured]
+        if not missing:
+            return
+        raise BackendError(
+            "OpenCode MCP baseline mismatch. Missing server(s): "
+            + ", ".join(missing)
+            + ". Configure matching MCP servers before apply. "
+            "Expected baseline: " + ", ".join(required) + ". Example: `opencode mcp add <name> -- <command>`"
+        )
 
     def _prepare_environment(self) -> dict[str, str]:
         """Prepare environment for OpenCode process."""
@@ -454,10 +505,12 @@ class OpenCodeBackend(AgentBackend):
         port: int,
         worker_id: int,
         model: str,
+        agent: str | None,
         dry_run: bool,
         prompt: str,
         mcp_config_path: Path,
         worker_dir: Path,
+        required_mcp_servers: Sequence[str] | None = None,
         update_callback: Any | None = None,
     ) -> tuple[str, int]:
         """Execute OpenCode for a single job application.
@@ -473,7 +526,8 @@ class OpenCodeBackend(AgentBackend):
         from applypilot import config
         from applypilot.apply.dashboard import add_event, get_state, update_state
 
-        cmd = self._build_command(model, worker_dir)
+        self._ensure_required_mcp_servers(required_mcp_servers)
+        cmd = self._build_command(model, worker_dir, agent)
         env = self._prepare_environment()
 
         update_state(
@@ -486,10 +540,7 @@ class OpenCodeBackend(AgentBackend):
             actions=0,
             last_action="starting (opencode)",
         )
-        add_event(
-            f"[W{worker_id}] Starting (opencode): "
-            f"{job['title'][:40]} @ {job.get('site', '')}"
-        )
+        add_event(f"[W{worker_id}] Starting (opencode): {job['title'][:40]} @ {job.get('site', '')}")
 
         worker_log = config.LOG_DIR / f"worker-{worker_id}.log"
         ts_header = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -518,15 +569,19 @@ class OpenCodeBackend(AgentBackend):
                 cwd=str(worker_dir),
             )
             self._active_procs[worker_id] = proc
+            if proc.stdin is None or proc.stdout is None:
+                raise BackendError("OpenCode backend process streams unavailable")
+            stdin = proc.stdin
+            stdout = proc.stdout
 
-            proc.stdin.write(prompt)
-            proc.stdin.close()
+            stdin.write(prompt)
+            stdin.close()
 
             text_parts: list[str] = []
             with open(worker_log, "a", encoding="utf-8") as lf:
                 lf.write(log_header)
 
-                for line in proc.stdout:
+                for line in stdout:
                     line = line.strip()
                     if not line:
                         continue
@@ -543,18 +598,13 @@ class OpenCodeBackend(AgentBackend):
                         elif msg_type == "tool_use":
                             part = msg.get("part", {})
                             name = (
-                                part.get("name", "")
-                                .replace("mcp__playwright__", "")
-                                .replace("mcp__gmail__", "gmail:")
+                                part.get("name", "").replace("mcp__playwright__", "").replace("mcp__gmail__", "gmail:")
                             )
                             inp = part.get("input", {})
                             if "url" in inp:
                                 desc = f"{name} {inp['url'][:60]}"
                             elif "ref" in inp:
-                                desc = (
-                                    f"{name} "
-                                    f"{inp.get('element', inp.get('text', ''))}"
-                                )[:50]
+                                desc = (f"{name} {inp.get('element', inp.get('text', ''))}")[:50]
                             elif "fields" in inp:
                                 desc = f"{name} ({len(inp['fields'])} fields)"
                             elif "paths" in inp:
@@ -600,10 +650,7 @@ class OpenCodeBackend(AgentBackend):
             duration_ms = int((time.time() - start) * 1000)
 
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            job_log = (
-                config.LOG_DIR
-                / f"opencode_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
-            )
+            job_log = config.LOG_DIR / f"opencode_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
             job_log.write_text(output, encoding="utf-8")
 
             if stats:
@@ -617,10 +664,7 @@ class OpenCodeBackend(AgentBackend):
 
             for result_status in ["APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"]:
                 if f"RESULT:{result_status}" in output:
-                    add_event(
-                        f"[W{worker_id}] {result_status} ({elapsed}s): "
-                        f"{job['title'][:30]}"
-                    )
+                    add_event(f"[W{worker_id}] {result_status} ({elapsed}s): {job['title'][:30]}")
                     update_state(
                         worker_id,
                         status=result_status.lower(),
@@ -639,19 +683,14 @@ class OpenCodeBackend(AgentBackend):
                         reason = _clean_reason(reason)
                         PROMOTE_TO_STATUS = {"captcha", "expired", "login_issue"}
                         if reason in PROMOTE_TO_STATUS:
-                            add_event(
-                                f"[W{worker_id}] {reason.upper()} ({elapsed}s): "
-                                f"{job['title'][:30]}"
-                            )
+                            add_event(f"[W{worker_id}] {reason.upper()} ({elapsed}s): {job['title'][:30]}")
                             update_state(
                                 worker_id,
                                 status=reason,
                                 last_action=f"{reason.upper()} ({elapsed}s)",
                             )
                             return reason, duration_ms
-                        add_event(
-                            f"[W{worker_id}] FAILED ({elapsed}s): {reason[:30]}"
-                        )
+                        add_event(f"[W{worker_id}] FAILED ({elapsed}s): {reason[:30]}")
                         update_state(
                             worker_id,
                             status="failed",
@@ -661,9 +700,7 @@ class OpenCodeBackend(AgentBackend):
                 return "failed:unknown", duration_ms
 
             add_event(f"[W{worker_id}] NO RESULT ({elapsed}s)")
-            update_state(
-                worker_id, status="failed", last_action=f"no result ({elapsed}s)"
-            )
+            update_state(worker_id, status="failed", last_action=f"no result ({elapsed}s)")
             return "failed:no_result_line", duration_ms
 
         except BackendError:
@@ -673,9 +710,7 @@ class OpenCodeBackend(AgentBackend):
             duration_ms = int((time.time() - start) * 1000)
             elapsed = int(time.time() - start)
             add_event(f"[W{worker_id}] TIMEOUT ({elapsed}s)")
-            update_state(
-                worker_id, status="failed", last_action=f"TIMEOUT ({elapsed}s)"
-            )
+            update_state(worker_id, status="failed", last_action=f"TIMEOUT ({elapsed}s)")
             return "failed:timeout", duration_ms
         except Exception as e:
             duration_ms = int((time.time() - start) * 1000)
@@ -724,6 +759,7 @@ class OpenCodeBackend(AgentBackend):
                 self._kill_process_tree(proc.pid)
         self._active_procs.clear()
 
+
 def get_backend(backend_name: str | None = None) -> AgentBackend:
     """Factory function to get the appropriate backend instance.
     Args:
@@ -732,9 +768,7 @@ def get_backend(backend_name: str | None = None) -> AgentBackend:
         An AgentBackend instance.
         InvalidBackendError: If the backend identifier is not supported.
     """
-    if backend_name is None:
-        backend_name = os.environ.get("APPLY_BACKEND", DEFAULT_BACKEND)
-    backend_name = backend_name.lower().strip()
+    backend_name = resolve_backend_name(backend_name)
     if backend_name not in VALID_BACKENDS:
         raise InvalidBackendError(backend_name, VALID_BACKENDS)
     if backend_name == "claude":
@@ -748,3 +782,21 @@ def get_backend(backend_name: str | None = None) -> AgentBackend:
 def get_available_backends() -> frozenset[str]:
     """Return the set of available backend identifiers."""
     return VALID_BACKENDS
+
+
+def resolve_backend_name(backend_name: str | None = None) -> str:
+    if backend_name is None:
+        backend_name = os.environ.get("APPLY_BACKEND", DEFAULT_BACKEND)
+    return backend_name.lower().strip()
+
+
+def resolve_default_model(backend_name: str) -> str:
+    if backend_name == "opencode":
+        return os.environ.get("APPLY_OPENCODE_MODEL") or os.environ.get("LLM_MODEL") or DEFAULT_OPENCODE_MODEL
+    return os.environ.get("APPLY_CLAUDE_MODEL") or DEFAULT_CLAUDE_MODEL
+
+
+def resolve_default_agent(backend_name: str) -> str | None:
+    if backend_name == "opencode":
+        return os.environ.get("APPLY_OPENCODE_AGENT")
+    return None
