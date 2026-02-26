@@ -10,6 +10,7 @@ from applypilot.tailoring.models import (
 )
 from applypilot.tailoring.quality_gates import MetricsGate, QualityGate, RelevanceGate
 from applypilot.tailoring.state_machine import SmartTailoringEngine
+from applypilot.tailoring.comprehensive_engine import ComprehensiveTailoringEngine
 
 __all__ = [
     "Bullet",
@@ -21,5 +22,6 @@ __all__ = [
     "RelevanceGate",
     "Resume",
     "SmartTailoringEngine",
+    "ComprehensiveTailoringEngine",
     "TailoringResult",
 ]
