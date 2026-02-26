@@ -16,18 +16,22 @@ import httpx
 
 log = logging.getLogger(__name__)
 
+# Default model constants
+DEFAULT_FLASH_MODEL = "gemini-2.0-flash"  # Fast, cheap for most tasks
+DEFAULT_PRO_MODEL = "gemini-2.5-pro"      # High quality for creative tasks
+
 # Task-specific model environment variables with their defaults
 # Each task can override the generic LLM_MODEL via TASK_MODEL env var
 # Priority: TASK_MODEL > LLM_MODEL > provider_default
 TASK_MODEL_DEFAULTS = {
-    "scoring": "gemini-2.0-flash",      # Fast, cheap for job scoring
-    "tailoring": "gemini-2.5-pro",      # High quality for resume writing
-    "cover_letter": "gemini-2.0-flash", # Standard for cover letters
-    "jd_parse": "gemini-2.0-flash",     # Fast for JD extraction
-    "resume_match": "gemini-2.0-flash", # Fast for gap analysis
-    "validation": "gemini-2.0-flash",   # Fast for validation checks
-    "enrichment": "gemini-2.0-flash",   # Fast for job enrichment
-    "smart_extract": "gemini-2.0-flash", # Fast for smart extraction
+    "scoring": DEFAULT_FLASH_MODEL,       # Fast, cheap for job scoring
+    "tailoring": DEFAULT_PRO_MODEL,       # High quality for resume writing
+    "cover_letter": DEFAULT_FLASH_MODEL,  # Standard for cover letters
+    "jd_parse": DEFAULT_FLASH_MODEL,      # Fast for JD extraction
+    "resume_match": DEFAULT_FLASH_MODEL,  # Fast for gap analysis
+    "validation": DEFAULT_FLASH_MODEL,    # Fast for validation checks
+    "enrichment": DEFAULT_FLASH_MODEL,    # Fast for job enrichment
+    "smart_extract": DEFAULT_FLASH_MODEL, # Fast for smart extraction
 }
 
 # Task to environment variable mapping
