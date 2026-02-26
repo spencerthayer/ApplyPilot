@@ -16,11 +16,81 @@ import httpx
 
 log = logging.getLogger(__name__)
 
+# Task-specific model environment variables with their defaults
+# Each task can override the generic LLM_MODEL via TASK_MODEL env var
+# Priority: TASK_MODEL > LLM_MODEL > provider_default
+TASK_MODEL_DEFAULTS = {
+    "scoring": "gemini-2.0-flash",      # Fast, cheap for job scoring
+    "tailoring": "gemini-2.5-pro",      # High quality for resume writing
+    "cover_letter": "gemini-2.0-flash", # Standard for cover letters
+    "jd_parse": "gemini-2.0-flash",     # Fast for JD extraction
+    "resume_match": "gemini-2.0-flash", # Fast for gap analysis
+    "validation": "gemini-2.0-flash",   # Fast for validation checks
+    "enrichment": "gemini-2.0-flash",   # Fast for job enrichment
+    "smart_extract": "gemini-2.0-flash", # Fast for smart extraction
+}
+
+# Task to environment variable mapping
+TASK_MODEL_ENV_VARS = {
+    "scoring": "SCORING_MODEL",
+    "tailoring": "TAILORING_MODEL",
+    "cover_letter": "COVER_LETTER_MODEL",
+    "jd_parse": "JD_PARSE_MODEL",
+    "resume_match": "RESUME_MATCH_MODEL",
+    "validation": "VALIDATION_MODEL",
+    "enrichment": "ENRICHMENT_MODEL",
+    "smart_extract": "SMART_EXTRACT_MODEL",
+}
+
+
+def _get_task_model(task: str | None, provider: str) -> str | None:
+    """Get model name for a specific task.
+    
+    Priority order:
+    1. TASK_MODEL env var (e.g., TAILORING_MODEL)
+    2. LLM_MODEL env var (generic override)
+    3. Task default from TASK_MODEL_DEFAULTS
+    4. Provider default (handled by _detect_provider)
+    
+    Args:
+        task: Task name (e.g., 'scoring', 'tailoring') or None for generic
+        provider: Provider identifier ('gemini', 'openai', 'gateway')
+        
+    Returns:
+        Model name or None to use provider default
+    """
+    if not task:
+        return None
+    
+    # 1. Check task-specific env var
+    env_var = TASK_MODEL_ENV_VARS.get(task)
+    if env_var:
+        task_model = os.environ.get(env_var)
+        if task_model:
+            return task_model
+    
+    # 2. Check generic LLM_MODEL override
+    generic_model = os.environ.get("LLM_MODEL")
+    if generic_model:
+        return generic_model
+    
+    # 3. Use task default (with provider-specific adjustments)
+    default_model = TASK_MODEL_DEFAULTS.get(task)
+    if default_model and provider == "openai":
+        # Map Gemini defaults to OpenAI equivalents
+        model_mapping = {
+            "gemini-2.0-flash": "gpt-5-mini",
+            "gemini-2.5-pro": "gpt-5",
+        }
+        return model_mapping.get(default_model, "gpt-5-mini")
+    
+    return default_model
+
 # ---------------------------------------------------------------------------
 # Provider detection
 # ---------------------------------------------------------------------------
 
-def _detect_provider() -> tuple[str, str, str]:
+def _detect_provider(task: str | None = None) -> tuple[str, str, str]:
     """Return (base_url, model, api_key) based on environment variables.
     Priority order (router-first):
       1. LLM_URL  – gateway / OpenAI-compatible endpoint
@@ -28,24 +98,30 @@ def _detect_provider() -> tuple[str, str, str]:
       3. OPENAI_API_KEY – OpenAI
     Reads env at call time (not module import time) so that load_env() called
     in _bootstrap() is always visible here.
+    
+    Args:
+        task: Optional task name for task-specific model selection
     """
     llm_url = os.environ.get("LLM_URL", "")
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     model_override = os.environ.get("LLM_MODEL", "")
+    
     # 1. Gateway / OpenAI-compatible (highest priority)
     if llm_url:
+        task_model = _get_task_model(task, "gateway")
         return (
             llm_url.rstrip("/"),
-            model_override or "local-model",
+            task_model or model_override or "local-model",
             os.environ.get("LLM_API_KEY", ""),
         )
 
     # 2. Gemini fallback
     if gemini_key:
+        task_model = _get_task_model(task, "gemini")
         return (
             "https://generativelanguage.googleapis.com/v1beta/openai",
-            model_override or "gemini-2.0-flash",
+            task_model or model_override or "gemini-2.0-flash",
             gemini_key,
         )
 
@@ -293,6 +369,62 @@ _instance: LLMClient | None = None
 
 def get_client() -> LLMClient:
     """Return (or create) the module-level LLMClient singleton."""
+    global _instance
+    if _instance is None:
+        base_url, model, api_key = _detect_provider()
+        log.info("LLM provider: %s  model: %s", base_url, model)
+        _instance = LLMClient(base_url, model, api_key)
+    return _instance
+
+
+# Task-specific client cache to avoid recreating clients for same task
+_task_clients: dict[str, LLMClient] = {}
+
+
+def get_client_for_task(task: str) -> LLMClient:
+    """Return (or create) an LLMClient for a specific task.
+    
+    This allows different tasks to use different models based on their
+    requirements (e.g., fast/cheap for scoring, high-quality for tailoring).
+    
+    Priority for model selection:
+    1. TASK_MODEL env var (e.g., TAILORING_MODEL=gpt-4)
+    2. LLM_MODEL env var (generic override)
+    3. Task default from TASK_MODEL_DEFAULTS
+    4. Provider default
+    
+    Args:
+        task: Task name (e.g., 'scoring', 'tailoring', 'cover_letter')
+        
+    Returns:
+        LLMClient configured for the specific task
+        
+    Example:
+        client = get_client_for_task('tailoring')
+        response = client.ask(prompt)
+    """
+    global _task_clients
+    
+    # Return cached client for this task if exists
+    if task in _task_clients:
+        return _task_clients[task]
+    
+    # Create new client with task-specific model
+    base_url, model, api_key = _detect_provider(task)
+    log.info("LLM provider for %s: %s  model: %s", task, base_url, model)
+    client = LLMClient(base_url, model, api_key)
+    
+    # Cache it
+    _task_clients[task] = client
+    return client
+
+
+def get_client() -> LLMClient:
+    """Return (or create) the module-level LLMClient singleton.
+    
+    Note: This uses the generic model selection (no task-specific overrides).
+    For task-specific model selection, use get_client_for_task(task).
+    """
     global _instance
     if _instance is None:
         base_url, model, api_key = _detect_provider()
