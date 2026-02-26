@@ -121,21 +121,21 @@ API keys and runtime config: `GEMINI_API_KEY`, `LLM_MODEL`, `CAPSOLVER_API_KEY` 
 
 ## Backend and Gateway configuration (Gemini first, OpenCode backend)
 
-ApplyPilot supports multiple LLM backends. The baseline-first approach for LLMs is Gemini. For the auto-apply orchestration, Claude Code is the default backend (APPLY_BACKEND unset or set to "claude"). OpenCode is supported as an alternative backend; set APPLY_BACKEND=opencode to use it. Configure your environment carefully and never commit real keys.
+ApplyPilot supports multiple LLM backends. The baseline-first approach for LLMs is Gemini. For the auto-apply orchestration, Claude Code is the default backend (APPLY_BACKEND unset or set to "claude"). OpenCode is supported as an alternative backend; set APPLY_BACKEND=opencode to use it. OpenAI-compatible endpoints (for self-hosted gateways, LiteLLM, Ollama, or AI routers) are supported via LLM_URL environment variable. Configure your environment carefully and never commit real keys.
 
 1) Baseline LLM (Gemini)
 - Set GEMINI_API_KEY to use Google Gemini for scoring, tailoring, and cover letters. This is the recommended default and is used automatically when present.
 
-2) Gateway compatibility (9router / OpenAI-compatible gateways)
-- If you need a proxy or gateway that speaks the OpenAI-compatible API (for example, 9router, self-hosted gateways, or Ollama with a REST wrapper), set these env vars in your `.env` or runtime environment:
+2) OpenAI-Compatible Gateway Support
+- For self-hosted gateways, LiteLLM, Ollama, or AI routers that provide OpenAI-compatible APIs, set these env vars in your `.env` or runtime environment:
 
-  - LLM_URL: Base URL of your gateway, for example `https://my-9router.example.com/v1`
+  - LLM_URL: Base URL of your gateway, for example `https://my-gateway.example.com/v1`
   - LLM_API_KEY: API key for that gateway (keep secret)
   - LLM_MODEL: Model name exposed by the gateway, for example `gpt-4o-mini`
 
 - Example (do not paste real keys):
 
-  export LLM_URL="https://my-9router.example.com/v1"
+  export LLM_URL="https://my-gateway.example.com/v1"
   export LLM_API_KEY="sk-xxxxxxxx"
   export LLM_MODEL="gpt-4o-mini"
 
@@ -175,8 +175,8 @@ ApplyPilot supports multiple LLM backends. The baseline-first approach for LLMs 
 - Rotate keys regularly and treat gateway keys like production secrets.
 - When sharing examples, replace any keys with `sk-xxxxxxxx` or `GEMINI_API_KEY=xxxxx` placeholders.
 
-7) 9router example variables
-- 9router and similar gateways expect the following env variables for compatibility with ApplyPilot's AI stages: `LLM_URL`, `LLM_API_KEY`, `LLM_MODEL`. Make sure the gateway exposes an OpenAI-compatible v1 completions/chat endpoint.
+7) OpenAI-Compatible Endpoint Variables
+- Gateways and routers providing OpenAI-compatible endpoints should set: `LLM_URL`, `LLM_API_KEY`, `LLM_MODEL`. Ensure the gateway exposes an OpenAI-compatible v1 completions/chat endpoint. Note: Anthropic API-compatible endpoints would require different environment variables.
 
 8) Verification
 - After setting env vars and optionally registering MCPs for opencode, run `applypilot doctor`. It will report configured providers and flag missing MCP registration or missing CLI binaries. If doctor reports issues, follow its guidance.
