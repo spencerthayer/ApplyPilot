@@ -303,3 +303,396 @@ employers:
     tenant: "canadiansolar"
     site_id: "CanadianSolar"
     base_url: "https://canadiansolar.wd5.myworkdayjobs.com"
+
+
+  # ── AI/ML Companies ─────────────────────────────────────────────────────
+
+  openai:
+    name: "OpenAI"
+    tenant: "openai"
+    site_id: "OpenAI"
+    base_url: "https://openai.wd1.myworkdayjobs.com"
+
+  anthropic:
+    name: "Anthropic"
+    tenant: "anthropic"
+    site_id: "Anthropic"
+    base_url: "https://anthropic.wd1.myworkdayjobs.com"
+
+  cohere:
+    name: "Cohere"
+    tenant: "cohere"
+    site_id: "Cohere"
+    base_url: "https://cohere.wd1.myworkdayjobs.com"
+
+  scale_ai:
+    name: "Scale AI"
+    tenant: "scale"
+    site_id: "Scale"
+    base_url: "https://scale.wd1.myworkdayjobs.com"
+
+  databricks:
+    name: "Databricks"
+    tenant: "databricks"
+    site_id: "Databricks"
+    base_url: "https://databricks.wd1.myworkdayjobs.com"
+
+  snowflake:
+    name: "Snowflake"
+    tenant: "snowflake"
+    site_id: "Snowflake"
+    base_url: "https://snowflake.wd1.myworkdayjobs.com"
+
+  palantir:
+    name: "Palantir"
+    tenant: "palantir"
+    site_id: "Palantir"
+    base_url: "https://palantir.wd1.myworkdayjobs.com"
+
+  datadog:
+    name: "Datadog"
+    tenant: "datadog"
+    site_id: "Datadog"
+    base_url: "https://datadog.wd1.myworkdayjobs.com"
+
+  hashicorp:
+    name: "HashiCorp"
+    tenant: "hashicorp"
+    site_id: "HashiCorp"
+    base_url: "https://hashicorp.wd1.myworkdayjobs.com"
+
+  mongodb:
+    name: "MongoDB"
+    tenant: "mongodb"
+    site_id: "MongoDB"
+    base_url: "https://mongodb.wd1.myworkdayjobs.com"
+
+  confluent:
+    name: "Confluent"
+    tenant: "confluent"
+    site_id: "Confluent"
+    base_url: "https://confluent.wd1.myworkdayjobs.com"
+
+  cloudflare:
+    name: "Cloudflare"
+    tenant: "cloudflare"
+    site_id: "Cloudflare"
+    base_url: "https://cloudflare.wd1.myworkdayjobs.com"
+
+  plaid:
+    name: "Plaid"
+    tenant: "plaid"
+    site_id: "Plaid"
+    base_url: "https://plaid.wd1.myworkdayjobs.com"
+
+  stripe:
+    name: "Stripe"
+    tenant: "stripe"
+    site_id: "Stripe"
+    base_url: "https://stripe.wd1.myworkdayjobs.com"
+
+  square:
+    name: "Square"
+    tenant: "square"
+    site_id: "Square"
+    base_url: "https://square.wd1.myworkdayjobs.com"
+
+  block:
+    name: "Block"
+    tenant: "block"
+    site_id: "Block"
+    base_url: "https://block.wd1.myworkdayjobs.com"
+
+  robinhood:
+    name: "Robinhood"
+    tenant: "robinhood"
+    site_id: "Robinhood"
+    base_url: "https://robinhood.wd1.myworkdayjobs.com"
+
+  coinbase:
+    name: "Coinbase"
+    tenant: "coinbase"
+    site_id: "Coinbase"
+    base_url: "https://coinbase.wd1.myworkdayjobs.com"
+
+  chainalysis:
+    name: "Chainalysis"
+    tenant: "chainalysis"
+    site_id: "Chainalysis"
+    base_url: "https://chainalysis.wd1.myworkdayjobs.com"
+
+  flexport:
+    name: "Flexport"
+    tenant: "flexport"
+    site_id: "Flexport"
+    base_url: "https://flexport.wd1.myworkdayjobs.com"
+
+  ginkgo_bioworks:
+    name: "Ginkgo Bioworks"
+    tenant: "ginkgobioworks"
+    site_id: "GinkgoBioworks"
+    base_url: "https://ginkgobioworks.wd1.myworkdayjobs.com"
+
+  insitro:
+    name: "Insitro"
+    tenant: "insitro"
+    site_id: "Insitro"
+    base_url: "https://insitro.wd1.myworkdayjobs.com"
+
+  recursiv:
+    name: "Recursion"
+    tenant: "recursion"
+    site_id: "Recursion"
+    base_url: "https://recursion.wd1.myworkdayjobs.com"
+
+  tempus:
+    name: "Tempus"
+    tenant: "tempus"
+    site_id: "Tempus"
+    base_url: "https://tempus.wd1.myworkdayjobs.com"
+
+  23andme:
+    name: "23andMe"
+    tenant: "23andme"
+    site_id: "23andMe"
+    base_url: "https://23andme.wd1.myworkdayjobs.com"
+
+  benchling:
+    name: "Benchling"
+    tenant: "benchling"
+    site_id: "Benchling"
+    base_url: "https://benchling.wd1.myworkdayjobs.com"
+
+  samsara:
+    name: "Samsara"
+    tenant: "samsara"
+    site_id: "Samsara"
+    base_url: "https://samsara.wd1.myworkdayjobs.com"
+
+  astranis:
+    name: "Astranis"
+    tenant: "astranis"
+    site_id: "Astranis"
+    base_url: "https://astranis.wd1.myworkdayjobs.com"
+
+  planet:
+    name: "Planet Labs"
+    tenant: "planet"
+    site_id: "Planet"
+    base_url: "https://planet.wd1.myworkdayjobs.com"
+
+  anduril:
+    name: "Anduril"
+    tenant: "anduril"
+    site_id: "Anduril"
+    base_url: "https://anduril.wd1.myworkdayjobs.com"
+
+  shield_ai:
+    name: "Shield AI"
+    tenant: "shieldai"
+    site_id: "ShieldAI"
+    base_url: "https://shieldai.wd1.myworkdayjobs.com"
+
+  applied_intuition:
+    name: "Applied Intuition"
+    tenant: "appliedintuition"
+    site_id: "AppliedIntuition"
+    base_url: "https://appliedintuition.wd1.myworkdayjobs.com"
+
+  aurora:
+    name: "Aurora Innovation"
+    tenant: "aurora"
+    site_id: "Aurora"
+    base_url: "https://aurora.wd1.myworkdayjobs.com"
+
+  nuro:
+    name: "Nuro"
+    tenant: "nuro"
+    site_id: "Nuro"
+    base_url: "https://nuro.wd1.myworkdayjobs.com"
+
+  zoox:
+    name: "Zoox"
+    tenant: "zoox"
+    site_id: "Zoox"
+    base_url: "https://zoox.wd1.myworkdayjobs.com"
+
+  wayve:
+    name: "Wayve"
+    tenant: "wayve"
+    site_id: "Wayve"
+    base_url: "https://wayve.wd1.myworkdayjobs.com"
+
+  weave:
+    name: "Weave"
+    tenant: "weave"
+    site_id: "Weave"
+    base_url: "https://weave.wd1.myworkdayjobs.com"
+
+  moveworks:
+    name: "Moveworks"
+    tenant: "moveworks"
+    site_id: "Moveworks"
+    base_url: "https://moveworks.wd1.myworkdayjobs.com"
+
+  cresta:
+    name: "Cresta"
+    tenant: "cresta"
+    site_id: "Cresta"
+    base_url: "https://cresta.wd1.myworkdayjobs.com"
+
+  observe:
+    name: "Observe"
+    tenant: "observe"
+    site_id: "Observe"
+    base_url: "https://observe.wd1.myworkdayjobs.com"
+
+  bigpanda:
+    name: "BigPanda"
+    tenant: "bigpanda"
+    site_id: "BigPanda"
+    base_url: "https://bigpanda.wd1.myworkdayjobs.com"
+
+  launchdarkly:
+    name: "LaunchDarkly"
+    tenant: "launchdarkly"
+    site_id: "LaunchDarkly"
+    base_url: "https://launchdarkly.wd1.myworkdayjobs.com"
+
+  amplitude:
+    name: "Amplitude"
+    tenant: "amplitude"
+    site_id: "Amplitude"
+    base_url: "https://amplitude.wd1.myworkdayjobs.com"
+
+  mixpanel:
+    name: "Mixpanel"
+    tenant: "mixpanel"
+    site_id: "Mixpanel"
+    base_url: "https://mixpanel.wd1.myworkdayjobs.com"
+
+  clearbit:
+    name: "Clearbit"
+    tenant: "clearbit"
+    site_id: "Clearbit"
+    base_url: "https://clearbit.wd1.myworkdayjobs.com"
+
+  crunchbase:
+    name: "Crunchbase"
+    tenant: "crunchbase"
+    site_id: "Crunchbase"
+    base_url: "https://crunchbase.wd1.myworkdayjobs.com"
+
+  gong:
+    name: "Gong"
+    tenant: "gong"
+    site_id: "Gong"
+    base_url: "https://gong.wd1.myworkdayjobs.com"
+
+  chorus:
+    name: "Chorus.ai"
+    tenant: "chorus"
+    site_id: "Chorus"
+    base_url: "https://chorus.wd1.myworkdayjobs.com"
+
+  zoominfo:
+    name: "ZoomInfo"
+    tenant: "zoominfo"
+    site_id: "ZoomInfo"
+    base_url: "https://zoominfo.wd1.myworkdayjobs.com"
+
+  outreach:
+    name: "Outreach"
+    tenant: "outreach"
+    site_id: "Outreach"
+    base_url: "https://outreach.wd1.myworkdayjobs.com"
+
+  salesloft:
+    name: "SalesLoft"
+    tenant: "salesloft"
+    site_id: "SalesLoft"
+    base_url: "https://salesloft.wd1.myworkdayjobs.com"
+
+  apollo:
+    name: "Apollo.io"
+    tenant: "apollo"
+    site_id: "Apollo"
+    base_url: "https://apollo.wd1.myworkdayjobs.com"
+
+  loom:
+    name: "Loom"
+    tenant: "loom"
+    site_id: "Loom"
+    base_url: "https://loom.wd1.myworkdayjobs.com"
+
+  miro:
+    name: "Miro"
+    tenant: "miro"
+    site_id: "Miro"
+    base_url: "https://miro.wd1.myworkdayjobs.com"
+
+  figma:
+    name: "Figma"
+    tenant: "figma"
+    site_id: "Figma"
+    base_url: "https://figma.wd1.myworkdayjobs.com"
+
+  notion:
+    name: "Notion"
+    tenant: "notion"
+    site_id: "Notion"
+    base_url: "https://notion.wd1.myworkdayjobs.com"
+
+  asana:
+    name: "Asana"
+    tenant: "asana"
+    site_id: "Asana"
+    base_url: "https://asana.wd1.myworkdayjobs.com"
+
+  monday:
+    name: "monday.com"
+    tenant: "monday"
+    site_id: "Monday"
+    base_url: "https://monday.wd1.myworkdayjobs.com"
+
+  clickup:
+    name: "ClickUp"
+    tenant: "clickup"
+    site_id: "ClickUp"
+    base_url: "https://clickup.wd1.myworkdayjobs.com"
+
+  airtable:
+    name: "Airtable"
+    tenant: "airtable"
+    site_id: "Airtable"
+    base_url: "https://airtable.wd1.myworkdayjobs.com"
+
+  retool:
+    name: "Retool"
+    tenant: "retool"
+    site_id: "Retool"
+    base_url: "https://retool.wd1.myworkdayjobs.com"
+
+  zapier:
+    name: "Zapier"
+    tenant: "zapier"
+    site_id: "Zapier"
+    base_url: "https://zapier.wd1.myworkdayjobs.com"
+
+  workato:
+    name: "Workato"
+    tenant: "workato"
+    site_id: "Workato"
+    base_url: "https://workato.wd1.myworkdayjobs.com"
+
+  n8n:
+    name: "n8n"
+    tenant: "n8n"
+    site_id: "n8n"
+    base_url: "https://n8n.wd1.myworkdayjobs.com"
+
+  make:
+    name: "Make"
+    tenant: "make"
+    site_id: "Make"
+    base_url: "https://make.wd1.myworkdayjobs.com"
