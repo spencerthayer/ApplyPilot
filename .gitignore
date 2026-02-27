@@ -39,3 +39,13 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Agent working directories (don't commit)
+.sisyphus/
+
+# User-specific config files (generated at init)
+opencode.json
+claude.json
+
+# Draft/working files
+.github/draft-*.md
