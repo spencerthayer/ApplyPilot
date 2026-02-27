@@ -26,6 +26,12 @@ from applypilot.config import (
     SEARCH_CONFIG_PATH,
     ensure_dirs,
 )
+from applypilot.apply.backends import (
+    AgentBackendError,
+    get_backend,
+    detect_backends,
+    get_preferred_backend,
+)
 
 console = Console()
 
@@ -353,6 +359,92 @@ def _setup_auto_apply() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Agent Configuration
+# ---------------------------------------------------------------------------
+
+def _setup_agents() -> None:
+    """Configure AI agent backends using the unified AgentBackend abstraction."""
+    console.print(Panel(
+        "[bold]Step 6: Agent Configuration (optional)[/bold]\n"
+        "ApplyPilot can use multiple AI agent backends for auto-apply.\n"
+        "OpenCode is the preferred backend with MCP server support."
+    ))
+
+    # Detect available backends
+    available_backends = detect_backends()
+    
+    if not available_backends:
+        console.print("[yellow]No agent backends found on PATH.[/yellow]")
+        console.print(
+            "Install OpenCode from: [bold]https://opencode.ai[/bold]\n"
+            "Or Claude Code from: [bold]https://claude.ai/code[/bold]\n"
+            "Then re-run [bold]applypilot init[/bold] to configure MCP servers."
+        )
+        return
+
+    # Get preferred backend (opencode > claude)
+    preferred = get_preferred_backend()
+    console.print(f"[green]Detected backends: {', '.join(available_backends)}[/green]")
+    console.print(f"[green]Preferred backend: {preferred}[/green]")
+
+    # Get the backend instance
+    try:
+        backend = get_backend(preferred)
+    except AgentBackendError as e:
+        console.print(f"[red]Failed to initialize backend: {e}[/red]")
+        return
+
+    # Setup the backend (configures MCP servers)
+    console.print(f"[dim]Setting up {preferred} backend...[/dim]")
+    
+    # For OpenCode, offer to import from Claude
+    import_from = None
+    if preferred == "opencode" and "claude" in available_backends:
+        if Confirm.ask(
+            "Import MCP servers from Claude Code config?",
+            default=True,
+        ):
+            import_from = "claude"
+    
+    result = backend.setup(import_from=import_from)
+    
+    if result["success"]:
+        console.print(
+            f"[green]{preferred.title()} backend configured successfully![/green]"
+        )
+        if result["servers_added"]:
+            console.print(
+                f"[green]Added {len(result['servers_added'])} MCP server(s):[/green] {', '.join(result['servers_added'])}"
+            )
+        if result["servers_existing"]:
+            console.print(
+                f"[dim]Already registered:[/dim] {', '.join(result['servers_existing'])}"
+            )
+    else:
+        console.print("[yellow]Some issues occurred during setup:[/yellow]")
+        for error in result["errors"]:
+            console.print(f"  [red]-[/red] {error}")
+    
+    # Verify required servers
+    try:
+        existing = set(backend.list_mcp_servers())
+        required_servers = ["playwright", "gmail"]
+        missing = [s for s in required_servers if s not in existing]
+        
+        if not missing:
+            console.print("[green]✓ All required MCP servers are ready![/green]")
+        else:
+            console.print(
+                f"[yellow]⚠ Missing MCP servers:[/yellow] {', '.join(missing)}"
+            )
+            console.print(
+                "[dim]Run manually: opencode mcp add <name> -- <command>[/dim]"
+            )
+    except AgentBackendError as e:
+        console.print(f"[yellow]Could not verify MCP servers: {e}[/yellow]")
+
+
+# ---------------------------------------------------------------------------
 # Main entry
 # ---------------------------------------------------------------------------
 
@@ -390,6 +482,10 @@ def run_wizard() -> None:
 
     # Step 5: Auto-apply (Claude Code detection)
     _setup_auto_apply()
+    console.print()
+
+    # Step 6: Agent Configuration (OpenCode MCP setup)
+    _setup_agents()
     console.print()
 
     # Done — show tier status
