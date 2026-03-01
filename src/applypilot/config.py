@@ -25,10 +25,6 @@ LOG_DIR = APP_DIR / "logs"
 CHROME_WORKER_DIR = APP_DIR / "chrome-workers"
 APPLY_WORKER_DIR = APP_DIR / "apply-workers"
 
-# OpenCode configuration directory
-OPENCODE_DIR = APP_DIR / ".opencode"
-OPENCODE_CONFIG_PATH = OPENCODE_DIR / "opencode.jsonc"
-
 # Package-shipped config (YAML registries)
 PACKAGE_DIR = Path(__file__).parent
 CONFIG_DIR = PACKAGE_DIR / "config"
@@ -90,7 +86,7 @@ def get_chrome_user_data() -> Path:
 
 def ensure_dirs():
     """Create all required directories."""
-    for d in [APP_DIR, TAILORED_DIR, COVER_LETTER_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR, OPENCODE_DIR]:
+    for d in [APP_DIR, TAILORED_DIR, COVER_LETTER_DIR, LOG_DIR, CHROME_WORKER_DIR, APPLY_WORKER_DIR]:
         d.mkdir(parents=True, exist_ok=True)
 
 
@@ -211,14 +207,7 @@ def get_tier() -> int:
     """
     load_env()
 
-    has_provider_source = any(
-        os.environ.get(k)
-        for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_URL")
-    )
-    has_model_and_generic_key = bool((os.environ.get("LLM_MODEL") or "").strip()) and bool(
-        (os.environ.get("LLM_API_KEY") or "").strip()
-    )
-    has_llm = has_provider_source or has_model_and_generic_key
+    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
     if not has_llm:
         return 1
 
@@ -253,28 +242,17 @@ def check_tier(required: int, feature: str) -> None:
     _console = Console(stderr=True)
 
     missing: list[str] = []
-    has_provider_source = any(
-        os.environ.get(k)
-        for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LLM_URL")
-    )
-    has_model_and_generic_key = bool((os.environ.get("LLM_MODEL") or "").strip()) and bool(
-        (os.environ.get("LLM_API_KEY") or "").strip()
-    )
-    if required >= 2 and not (has_provider_source or has_model_and_generic_key):
-        missing.append(
-            "LLM config — run [bold]applypilot init[/bold] or set one of "
-            "GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / LLM_URL "
-            "(or set LLM_MODEL with LLM_API_KEY)"
-        )
+    if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")):
+        missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY")
     if required >= 3:
-        # Check backends: OpenCode preferred, Claude as fallback.
+        # Check which backends are installed
         opencode_bin = shutil.which("opencode")
         claude_bin = shutil.which("claude")
 
         # Neither backend present -> actionable guidance for both
         if not opencode_bin and not claude_bin:
             missing.append("OpenCode CLI — install and run 'opencode mcp add' to configure MCP (preferred)")
-            missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold] (fallback)")
+            missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold]")
         # OpenCode missing but Claude present -> suggest OpenCode as recommended
         elif not opencode_bin and claude_bin:
             missing.append("OpenCode CLI (recommended) — install and run 'opencode mcp add' to configure MCP")
