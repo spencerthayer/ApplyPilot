@@ -13,11 +13,45 @@ from rich import box
 
 from applypilot import __version__
 
+<<<<<<< HEAD
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
     datefmt="%H:%M:%S",
 )
+=======
+
+def _configure_logging() -> None:
+    """Set consistent logging output for CLI runs."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    # Keep LiteLLM internals quiet by default; warnings/errors still surface.
+    for name in ("LiteLLM", "litellm"):
+        noisy = logging.getLogger(name)
+        noisy.handlers.clear()
+        noisy.setLevel(logging.WARNING)
+        noisy.propagate = True
+
+    # Route verbose tailor/cover loggers to a file instead of the terminal.
+    # Per-attempt warnings and validation details are useful for debugging
+    # but too noisy for normal CLI output.
+    from applypilot.config import LOG_DIR
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _file_fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
+    for logger_name in ("applypilot.scoring.tailor", "applypilot.scoring.cover_letter"):
+        file_log = logging.getLogger(logger_name)
+        file_log.propagate = False  # suppress terminal output
+        fh = logging.FileHandler(LOG_DIR / f"{logger_name.split('.')[-1]}.log", encoding="utf-8")
+        fh.setFormatter(_file_fmt)
+        file_log.addHandler(fh)
+
+
+_configure_logging()
+>>>>>>> pr-24-litellm
 
 app = typer.Typer(
     name="applypilot",
