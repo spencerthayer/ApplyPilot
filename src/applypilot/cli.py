@@ -13,14 +13,6 @@ from rich import box
 
 from applypilot import __version__
 
-<<<<<<< HEAD
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%H:%M:%S",
-)
-=======
-
 def _configure_logging() -> None:
     """Set consistent logging output for CLI runs."""
     logging.basicConfig(
@@ -51,7 +43,6 @@ def _configure_logging() -> None:
 
 
 _configure_logging()
->>>>>>> pr-24-litellm
 
 app = typer.Typer(
     name="applypilot",
