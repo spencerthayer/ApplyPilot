@@ -39,3 +39,6 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Memory/search cache (may contain sensitive data)
+.memsearch/
