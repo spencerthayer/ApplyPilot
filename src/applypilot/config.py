@@ -1,9 +1,14 @@
 """ApplyPilot configuration: paths, platform detection, user data."""
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 import os
 import platform
 import shutil
+import subprocess
 from pathlib import Path
+
+from applypilot.llm_provider import has_llm_provider, llm_config_hint
 
 # User data directory — all user-specific files live here
 APP_DIR = Path(os.environ.get("APPLYPILOT_DIR", Path.home() / ".applypilot"))
@@ -28,6 +33,38 @@ APPLY_WORKER_DIR = APP_DIR / "apply-workers"
 # Package-shipped config (YAML registries)
 PACKAGE_DIR = Path(__file__).parent
 CONFIG_DIR = PACKAGE_DIR / "config"
+
+AUTO_APPLY_AGENT_CHOICES = ("auto", "codex", "claude")
+AUTO_APPLY_AGENT_PRIORITY_CHOICES = ("codex", "claude")
+AUTO_APPLY_AGENT_LABELS = {
+    "auto": "Auto-detect",
+    "codex": "Codex CLI",
+    "claude": "Claude Code CLI",
+}
+DEFAULT_AUTO_APPLY_AGENT = "auto"
+DEFAULT_AUTO_APPLY_AGENT_PRIORITY = ("codex", "claude")
+DEFAULT_CLAUDE_AUTO_APPLY_MODEL = "haiku"
+
+
+@dataclass(frozen=True)
+class AutoApplyAgentStatus:
+    """Availability details for an auto-apply browser agent."""
+
+    key: str
+    label: str
+    binary_path: str | None
+    available: bool
+    note: str
+    auth_ok: bool = False
+
+
+@dataclass(frozen=True)
+class AutoApplyAgentSelection:
+    """Resolved auto-apply agent and model settings."""
+
+    requested: str
+    resolved: str | None
+    model: str | None
 
 
 def get_chrome_path() -> str:
@@ -180,6 +217,159 @@ def load_env():
     load_dotenv()
 
 
+def _env(environ: Mapping[str, str] | None) -> Mapping[str, str]:
+    return os.environ if environ is None else environ
+
+
+def get_auto_apply_agent_setting(environ: Mapping[str, str] | None = None) -> str:
+    """Return the configured auto-apply agent preference."""
+
+    env = _env(environ)
+    value = env.get("AUTO_APPLY_AGENT", DEFAULT_AUTO_APPLY_AGENT).strip().lower()
+    if value not in AUTO_APPLY_AGENT_CHOICES:
+        return DEFAULT_AUTO_APPLY_AGENT
+    return value
+
+
+def get_auto_apply_agent_priority(environ: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    """Return the fallback order used when AUTO_APPLY_AGENT=auto."""
+
+    env = _env(environ)
+    configured = env.get("AUTO_APPLY_AGENT_PRIORITY", "").strip()
+    if not configured:
+        return DEFAULT_AUTO_APPLY_AGENT_PRIORITY
+
+    ordered: list[str] = []
+    for raw_part in configured.split(","):
+        part = raw_part.strip().lower()
+        if part in AUTO_APPLY_AGENT_PRIORITY_CHOICES and part not in ordered:
+            ordered.append(part)
+
+    for part in DEFAULT_AUTO_APPLY_AGENT_PRIORITY:
+        if part not in ordered:
+            ordered.append(part)
+
+    return tuple(ordered)
+
+
+def get_auto_apply_model_setting(
+    agent: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    """Return the configured auto-apply agent model override."""
+
+    env = _env(environ)
+    configured = env.get("AUTO_APPLY_MODEL", "").strip()
+    if configured:
+        return configured
+    if agent == "claude":
+        return DEFAULT_CLAUDE_AUTO_APPLY_MODEL
+    return None
+
+
+def get_codex_login_status(timeout: int = 10) -> tuple[bool, str]:
+    """Return whether Codex CLI is logged in plus a short status note."""
+
+    codex_bin = shutil.which("codex")
+    if not codex_bin:
+        return False, "Install Codex CLI and run `codex login`"
+
+    try:
+        result = subprocess.run(
+            [codex_bin, "login", "status"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"Codex login check failed: {exc}"
+
+    output_lines = [
+        line.strip()
+        for line in f"{result.stdout}\n{result.stderr}".splitlines()
+        if line.strip()
+    ]
+    status_line = next((line for line in reversed(output_lines) if "Logged in" in line), "")
+    if result.returncode == 0 and status_line:
+        return True, status_line
+
+    if output_lines:
+        return False, output_lines[-1]
+    return False, "Run `codex login`"
+
+
+def get_auto_apply_agent_statuses() -> dict[str, AutoApplyAgentStatus]:
+    """Return availability diagnostics for supported auto-apply backends."""
+
+    codex_bin = shutil.which("codex")
+    codex_logged_in, codex_note = get_codex_login_status() if codex_bin else (
+        False,
+        "Install Codex CLI and run `codex login`",
+    )
+    claude_bin = shutil.which("claude")
+
+    return {
+        "codex": AutoApplyAgentStatus(
+            key="codex",
+            label=AUTO_APPLY_AGENT_LABELS["codex"],
+            binary_path=codex_bin,
+            available=bool(codex_bin) and codex_logged_in,
+            note=codex_note if codex_bin else "Install Codex CLI and run `codex login`",
+            auth_ok=codex_logged_in,
+        ),
+        "claude": AutoApplyAgentStatus(
+            key="claude",
+            label=AUTO_APPLY_AGENT_LABELS["claude"],
+            binary_path=claude_bin,
+            available=claude_bin is not None,
+            note=claude_bin or "Install from https://claude.ai/code",
+            auth_ok=claude_bin is not None,
+        ),
+    }
+
+
+def resolve_auto_apply_agent(
+    preferred: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> AutoApplyAgentSelection:
+    """Resolve the auto-apply backend and optional model override."""
+
+    requested = preferred.lower() if preferred else get_auto_apply_agent_setting(environ)
+    if requested not in AUTO_APPLY_AGENT_CHOICES:
+        requested = DEFAULT_AUTO_APPLY_AGENT
+
+    statuses = get_auto_apply_agent_statuses()
+    resolved: str | None = None
+    if requested == "auto":
+        for candidate in get_auto_apply_agent_priority(environ):
+            if statuses[candidate].available:
+                resolved = candidate
+                break
+    elif statuses[requested].available:
+        resolved = requested
+
+    return AutoApplyAgentSelection(
+        requested=requested,
+        resolved=resolved,
+        model=get_auto_apply_model_setting(resolved, environ),
+    )
+
+
+def has_auto_apply_backend() -> bool:
+    """Return whether any supported auto-apply backend is ready to use."""
+
+    statuses = get_auto_apply_agent_statuses()
+    return any(status.available for status in statuses.values())
+
+
+def describe_auto_apply_backend_requirement() -> str:
+    """Return a short human-readable Tier 3 requirement hint."""
+
+    return "supported auto-apply agent CLI (Codex logged in or Claude installed)"
+
+
 # ---------------------------------------------------------------------------
 # Tier system — feature gating by installed dependencies
 # ---------------------------------------------------------------------------
@@ -201,23 +391,23 @@ def get_tier() -> int:
     """Detect the current tier based on available dependencies.
 
     Tier 1 (Discovery):            Python + pip
-    Tier 2 (AI Scoring & Tailoring): + LLM API key
-    Tier 3 (Full Auto-Apply):       + Claude Code CLI + Chrome
+    Tier 2 (AI Scoring & Tailoring): + LLM provider
+    Tier 3 (Full Auto-Apply):       + auto-apply agent CLI + Chrome + Node.js
     """
     load_env()
 
-    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
-    if not has_llm:
+    if not has_llm_provider():
         return 1
 
-    has_claude = shutil.which("claude") is not None
+    has_agent = has_auto_apply_backend()
+    has_npx = shutil.which("npx") is not None
     try:
         get_chrome_path()
         has_chrome = True
     except FileNotFoundError:
         has_chrome = False
 
-    if has_claude and has_chrome:
+    if has_agent and has_chrome and has_npx:
         return 3
 
     return 2
@@ -238,15 +428,29 @@ def check_tier(required: int, feature: str) -> None:
     _console = Console(stderr=True)
 
     missing: list[str] = []
-    if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")):
-        missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY")
+    if required >= 2 and not has_llm_provider():
+        missing.append(f"LLM provider — {llm_config_hint()}")
     if required >= 3:
-        if not shutil.which("claude"):
-            missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold]")
+        statuses = get_auto_apply_agent_statuses()
+        if not any(status.available for status in statuses.values()):
+            missing.append(
+                "Auto-apply agent CLI — install Codex CLI and run `codex login`, "
+                "or install Claude Code CLI from [bold]https://claude.ai/code[/bold]"
+            )
+            codex_status = statuses["codex"]
+            claude_status = statuses["claude"]
+            if codex_status.binary_path and not codex_status.available:
+                missing.append(f"Codex CLI login — {codex_status.note}")
+            if not codex_status.binary_path:
+                missing.append("Codex CLI — install Codex CLI and run `codex login`")
+            if not claude_status.available:
+                missing.append(f"Claude Code CLI — {claude_status.note}")
         try:
             get_chrome_path()
         except FileNotFoundError:
             missing.append("Chrome/Chromium — install or set CHROME_PATH")
+        if not shutil.which("npx"):
+            missing.append("Node.js (npx) — install Node.js 18+")
 
     _console.print(
         f"\n[red]'{feature}' requires {TIER_LABELS.get(required, f'Tier {required}')} (Tier {required}).[/red]\n"

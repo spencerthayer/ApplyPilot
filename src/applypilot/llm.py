@@ -3,6 +3,7 @@ Unified LLM client for ApplyPilot.
 
 Auto-detects provider from environment:
   GEMINI_API_KEY  -> Google Gemini (default: gemini-2.0-flash)
+  OPENROUTER_API_KEY -> OpenRouter (default: google/gemini-2.0-flash-001)
   OPENAI_API_KEY  -> OpenAI (default: gpt-4o-mini)
   LLM_URL         -> Local llama.cpp / Ollama compatible endpoint
 
@@ -10,10 +11,11 @@ LLM_MODEL env var overrides the model name for any provider.
 """
 
 import logging
-import os
 import time
 
 import httpx
+
+from applypilot.llm_provider import detect_llm_provider, llm_config_hint
 
 log = logging.getLogger(__name__)
 
@@ -27,36 +29,11 @@ def _detect_provider() -> tuple[str, str, str]:
     Reads env at call time (not module import time) so that load_env() called
     in _bootstrap() is always visible here.
     """
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-    local_url = os.environ.get("LLM_URL", "")
-    model_override = os.environ.get("LLM_MODEL", "")
+    selection = detect_llm_provider()
+    if selection is not None:
+        return selection.base_url, selection.model, selection.api_key
 
-    if gemini_key and not local_url:
-        return (
-            "https://generativelanguage.googleapis.com/v1beta/openai",
-            model_override or "gemini-2.0-flash",
-            gemini_key,
-        )
-
-    if openai_key and not local_url:
-        return (
-            "https://api.openai.com/v1",
-            model_override or "gpt-4o-mini",
-            openai_key,
-        )
-
-    if local_url:
-        return (
-            local_url.rstrip("/"),
-            model_override or "local-model",
-            os.environ.get("LLM_API_KEY", ""),
-        )
-
-    raise RuntimeError(
-        "No LLM provider configured. "
-        "Set GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL in your environment."
-    )
+    raise RuntimeError(f"No LLM provider configured. {llm_config_hint()}")
 
 
 # ---------------------------------------------------------------------------

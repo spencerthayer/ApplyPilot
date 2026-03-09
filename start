@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+
+clear
+printf 'Datetime: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+activate_script="$script_dir/.venv/bin/activate"
+
+if [[ ! -f "$activate_script" ]]; then
+  printf 'Missing virtualenv activate script at %s\n' "$activate_script" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  source "$activate_script"
+  printf 'Virtualenv active: %s\n' "$VIRTUAL_ENV"
+  return 0
+fi
+
+launch_shell="${SHELL:-/bin/bash}"
+
+if [[ ! -x "$launch_shell" ]]; then
+  launch_shell="/bin/bash"
+fi
+
+case "$(basename "$launch_shell")" in
+  zsh)
+    zdotdir="$(mktemp -d "${TMPDIR:-/tmp}/applypilot-start-zsh.XXXXXX")"
+    rcfile="$zdotdir/.zshrc"
+    cat >"$rcfile" <<EOF
+if [[ -f ~/.zshrc ]]; then
+  source ~/.zshrc
+fi
+source "$activate_script"
+printf 'Virtualenv active: %s\n' "\$VIRTUAL_ENV"
+rm -f -- "$rcfile"
+rmdir -- "$zdotdir" 2>/dev/null || true
+EOF
+    exec env ZDOTDIR="$zdotdir" "$launch_shell" -i
+    ;;
+  bash)
+    rcfile="$(mktemp "${TMPDIR:-/tmp}/applypilot-start-bash.XXXXXX")"
+    cat >"$rcfile" <<EOF
+if [[ -f ~/.bashrc ]]; then
+  source ~/.bashrc
+fi
+source "$activate_script"
+printf 'Virtualenv active: %s\n' "\$VIRTUAL_ENV"
+rm -f -- "$rcfile"
+EOF
+    exec "$launch_shell" --init-file "$rcfile" -i
+    ;;
+  *)
+    exec /bin/bash --init-file <(printf 'source "%s"\nprintf '\''Virtualenv active: %%s\\n'\'' \"$VIRTUAL_ENV\"\n' "$activate_script") -i
+    ;;
+esac

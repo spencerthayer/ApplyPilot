@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import typer
@@ -47,6 +48,31 @@ def _version_callback(value: bool) -> None:
     if value:
         console.print(f"[bold]applypilot[/bold] {__version__}")
         raise typer.Exit()
+
+
+def _resolve_auto_apply_settings(agent: Optional[str], agent_model: Optional[str]) -> tuple[str, str | None]:
+    """Resolve the selected auto-apply backend and model override."""
+
+    from applypilot.config import AUTO_APPLY_AGENT_CHOICES, resolve_auto_apply_agent
+
+    if agent is not None and agent not in AUTO_APPLY_AGENT_CHOICES:
+        console.print(
+            f"[red]Invalid --agent value:[/red] '{agent}'. "
+            f"Choose from: {', '.join(AUTO_APPLY_AGENT_CHOICES)}"
+        )
+        raise typer.Exit(code=1)
+
+    selection = resolve_auto_apply_agent(preferred=agent)
+    if selection.resolved is None:
+        requested = selection.requested
+        console.print(
+            f"[red]Selected auto-apply agent unavailable:[/red] {requested}\n"
+            "Install Codex CLI and run [bold]codex login[/bold], or install Claude Code CLI."
+        )
+        raise typer.Exit(code=1)
+
+    effective_model = agent_model.strip() if agent_model and agent_model.strip() else selection.model
+    return selection.resolved, effective_model
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +173,14 @@ def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
     min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
-    model: str = typer.Option("haiku", "--model", "-m", help="Claude model name."),
+    agent: Optional[str] = typer.Option(None, "--agent", help="Auto-apply agent: auto, codex, or claude."),
+    agent_model: Optional[str] = typer.Option(
+        None,
+        "--agent-model",
+        "--model",
+        "-m",
+        help="Browser agent model override. '--model' is kept as a deprecated alias.",
+    ),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
@@ -164,7 +197,7 @@ def apply(
     from applypilot.config import check_tier, PROFILE_PATH as _profile_path
     from applypilot.database import get_connection
 
-    # --- Utility modes (no Chrome/Claude needed) ---
+    # --- Utility modes (no Chrome/browser agent needed) ---
 
     if mark_applied:
         from applypilot.apply.launcher import mark_job
@@ -186,8 +219,9 @@ def apply(
 
     # --- Full apply mode ---
 
-    # Check 1: Tier 3 required (Claude Code CLI + Chrome)
+    # Check 1: Tier 3 required (browser agent CLI + Chrome + Node.js)
     check_tier(3, "auto-apply")
+    resolved_agent, resolved_model = _resolve_auto_apply_settings(agent, agent_model)
 
     # Check 2: Profile exists
     if not _profile_path.exists():
@@ -211,23 +245,19 @@ def apply(
             raise typer.Exit(code=1)
 
     if gen:
-        from applypilot.apply.launcher import gen_prompt, BASE_CDP_PORT
+        from applypilot.apply.agent_backends import build_manual_command
+        from applypilot.apply.launcher import gen_prompt
         target = url or ""
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
             raise typer.Exit(code=1)
-        prompt_file = gen_prompt(target, min_score=min_score, model=model)
+        prompt_file = gen_prompt(target, min_score=min_score)
         if not prompt_file:
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
-        mcp_path = _profile_path.parent / ".mcp-apply-0.json"
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
         console.print(f"\n[bold]Run manually:[/bold]")
-        console.print(
-            f"  claude --model {model} -p "
-            f"--mcp-config {mcp_path} "
-            f"--permission-mode bypassPermissions < {prompt_file}"
-        )
+        console.print(f"  {build_manual_command(resolved_agent, prompt_file, 0, resolved_model)}")
         return
 
     from applypilot.apply.launcher import main as apply_main
@@ -237,7 +267,8 @@ def apply(
     console.print("\n[bold blue]Launching Auto-Apply[/bold blue]")
     console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
     console.print(f"  Workers:  {workers}")
-    console.print(f"  Model:    {model}")
+    console.print(f"  Agent:    {resolved_agent}")
+    console.print(f"  Model:    {resolved_model or '(default)'}")
     console.print(f"  Headless: {headless}")
     console.print(f"  Dry run:  {dry_run}")
     if url:
@@ -249,7 +280,8 @@ def apply(
         target_url=url,
         min_score=min_score,
         headless=headless,
-        model=model,
+        agent=resolved_agent,
+        model=resolved_model,
         dry_run=dry_run,
         continuous=continuous,
         workers=workers,
@@ -338,8 +370,11 @@ def doctor() -> None:
     import shutil
     from applypilot.config import (
         load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
-        SEARCH_CONFIG_PATH, ENV_PATH, get_chrome_path,
+        SEARCH_CONFIG_PATH, get_auto_apply_agent_setting,
+        get_auto_apply_agent_statuses, get_chrome_path,
+        resolve_auto_apply_agent,
     )
+    from applypilot.llm_provider import format_llm_provider_status, llm_config_hint
 
     load_env()
 
@@ -360,7 +395,7 @@ def doctor() -> None:
     if RESUME_PATH.exists():
         results.append(("resume.txt", ok_mark, str(RESUME_PATH)))
     elif RESUME_PDF_PATH.exists():
-        results.append(("resume.txt", warn_mark, "Only PDF found — plain-text needed for AI stages"))
+        results.append(("resume.txt", warn_mark, "Only PDF found - plain-text needed for AI stages"))
     else:
         results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
 
@@ -368,7 +403,7 @@ def doctor() -> None:
     if SEARCH_CONFIG_PATH.exists():
         results.append(("searches.yaml", ok_mark, str(SEARCH_CONFIG_PATH)))
     else:
-        results.append(("searches.yaml", warn_mark, "Will use example config — run 'applypilot init'"))
+        results.append(("searches.yaml", warn_mark, "Will use example config - run 'applypilot init'"))
 
     # jobspy (discovery dep installed separately)
     try:
@@ -378,31 +413,38 @@ def doctor() -> None:
         results.append(("python-jobspy", warn_mark,
                         "pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex"))
 
-    # --- Tier 2 checks ---
-    import os
-    has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
-    has_openai = bool(os.environ.get("OPENAI_API_KEY"))
-    has_local = bool(os.environ.get("LLM_URL"))
-    if has_gemini:
-        model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
-        results.append(("LLM API key", ok_mark, f"Gemini ({model})"))
-    elif has_openai:
-        model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-        results.append(("LLM API key", ok_mark, f"OpenAI ({model})"))
-    elif has_local:
-        results.append(("LLM API key", ok_mark, f"Local: {os.environ.get('LLM_URL')}"))
+    # --- Tier 2 checks (built-in LLM layer) ---
+    llm_status = format_llm_provider_status()
+    if llm_status:
+        results.append(("Built-in LLM", ok_mark, llm_status))
     else:
-        results.append(("LLM API key", fail_mark,
-                        "Set GEMINI_API_KEY in ~/.applypilot/.env (run 'applypilot init')"))
+        results.append(("Built-in LLM", fail_mark, llm_config_hint()))
 
-    # --- Tier 3 checks ---
-    # Claude Code CLI
-    claude_bin = shutil.which("claude")
-    if claude_bin:
-        results.append(("Claude Code CLI", ok_mark, claude_bin))
+    # --- Tier 3 checks (auto-apply agent layer) ---
+    requested_agent = get_auto_apply_agent_setting()
+    resolved_agent = resolve_auto_apply_agent()
+    if resolved_agent.resolved:
+        note = f"{requested_agent} -> {resolved_agent.resolved}"
     else:
-        results.append(("Claude Code CLI", fail_mark,
-                        "Install from https://claude.ai/code (needed for auto-apply)"))
+        note = requested_agent
+    if resolved_agent.model:
+        note += f" ({resolved_agent.model})"
+    results.append(("Auto-apply agent", ok_mark if resolved_agent.resolved else warn_mark, note))
+
+    agent_statuses = get_auto_apply_agent_statuses()
+
+    codex_status = agent_statuses["codex"]
+    if codex_status.binary_path:
+        results.append(("Codex CLI", ok_mark, codex_status.binary_path))
+        results.append(("Codex login", ok_mark if codex_status.available else fail_mark, codex_status.note))
+    else:
+        results.append(("Codex CLI", fail_mark, codex_status.note))
+
+    claude_status = agent_statuses["claude"]
+    if claude_status.binary_path:
+        results.append(("Claude Code CLI", ok_mark, claude_status.binary_path))
+    else:
+        results.append(("Claude Code CLI", "[dim]optional[/dim]", claude_status.note))
 
     # Chrome
     try:
@@ -442,13 +484,19 @@ def doctor() -> None:
     # Tier summary
     from applypilot.config import get_tier, TIER_LABELS
     tier = get_tier()
-    console.print(f"[bold]Current tier: Tier {tier} — {TIER_LABELS[tier]}[/bold]")
+    console.print(f"[bold]Current tier: Tier {tier} - {TIER_LABELS[tier]}[/bold]")
 
     if tier == 1:
-        console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, cover letters (needs LLM API key)[/dim]")
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  -> Tier 2 unlocks: scoring, tailoring, cover letters (needs an LLM provider)[/dim]")
+        console.print(
+            "[dim]  -> Tier 3 unlocks: auto-apply "
+            "(needs Codex logged in or Claude installed, plus Chrome + Node.js)[/dim]"
+        )
     elif tier == 2:
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print(
+            "[dim]  -> Tier 3 unlocks: auto-apply "
+            "(needs Codex logged in or Claude installed, plus Chrome + Node.js)[/dim]"
+        )
 
     console.print()
 
