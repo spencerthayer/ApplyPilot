@@ -4,7 +4,7 @@ Interactive flow that creates ~/.applypilot/ with:
   - resume.txt (and optionally resume.pdf)
   - profile.json
   - searches.yaml
-  - .env (LLM API key)
+  - .env (LLM provider config)
 """
 
 from __future__ import annotations
@@ -27,8 +27,23 @@ from applypilot.config import (
     SEARCH_CONFIG_PATH,
     ensure_dirs,
 )
+from applypilot.llm_provider import LLM_PROVIDER_SPECS, WIZARD_PROVIDER_ORDER
 
 console = Console()
+
+_PROVIDER_CREDENTIAL_PROMPTS = {
+    "gemini": "Gemini API key (from aistudio.google.com)",
+    "openrouter": "OpenRouter API key (from openrouter.ai/keys)",
+    "openai": "OpenAI API key",
+    "local": "Local LLM endpoint URL",
+}
+
+_PROVIDER_MODEL_PROMPTS = {
+    "gemini": "Model",
+    "openrouter": "Model",
+    "openai": "Model",
+    "local": "Model name",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +248,20 @@ def _setup_searches() -> None:
 # AI Features
 # ---------------------------------------------------------------------------
 
+
+def _build_ai_env_lines(provider: str, credential: str, model: str) -> list[str]:
+    """Build the .env lines for the selected AI provider."""
+
+    spec = LLM_PROVIDER_SPECS[provider]
+    return [
+        "# ApplyPilot configuration",
+        "",
+        f"{spec.env_key}={credential}",
+        f"LLM_MODEL={model}",
+        "",
+    ]
+
+
 def _setup_ai_features() -> None:
     """Ask about AI scoring/tailoring — optional LLM configuration."""
     console.print(Panel(
@@ -245,32 +274,22 @@ def _setup_ai_features() -> None:
         console.print("[dim]Discovery-only mode. You can configure AI later with [bold]applypilot init[/bold].[/dim]")
         return
 
-    console.print("Supported providers: [bold]Gemini[/bold] (recommended, free tier), OpenAI, local (Ollama/llama.cpp)")
+    console.print(
+        "Supported providers: [bold]Gemini[/bold] (recommended, free tier), "
+        "OpenRouter (flexible multi-model), OpenAI, local (Ollama/llama.cpp)"
+    )
     provider = Prompt.ask(
         "Provider",
-        choices=["gemini", "openai", "local"],
+        choices=list(WIZARD_PROVIDER_ORDER),
         default="gemini",
     )
 
-    env_lines = ["# ApplyPilot configuration", ""]
-
-    if provider == "gemini":
-        api_key = Prompt.ask("Gemini API key (from aistudio.google.com)")
-        model = Prompt.ask("Model", default="gemini-2.0-flash")
-        env_lines.append(f"GEMINI_API_KEY={api_key}")
-        env_lines.append(f"LLM_MODEL={model}")
-    elif provider == "openai":
-        api_key = Prompt.ask("OpenAI API key")
-        model = Prompt.ask("Model", default="gpt-4o-mini")
-        env_lines.append(f"OPENAI_API_KEY={api_key}")
-        env_lines.append(f"LLM_MODEL={model}")
-    elif provider == "local":
-        url = Prompt.ask("Local LLM endpoint URL", default="http://localhost:8080/v1")
-        model = Prompt.ask("Model name", default="local-model")
-        env_lines.append(f"LLM_URL={url}")
-        env_lines.append(f"LLM_MODEL={model}")
-
-    env_lines.append("")
+    if provider == "local":
+        credential = Prompt.ask(_PROVIDER_CREDENTIAL_PROMPTS[provider], default="http://localhost:8080/v1")
+    else:
+        credential = Prompt.ask(_PROVIDER_CREDENTIAL_PROMPTS[provider])
+    model = Prompt.ask(_PROVIDER_MODEL_PROMPTS[provider], default=LLM_PROVIDER_SPECS[provider].default_model)
+    env_lines = _build_ai_env_lines(provider, credential, model)
     ENV_PATH.write_text("\n".join(env_lines), encoding="utf-8")
     console.print(f"[green]AI configuration saved to {ENV_PATH}[/green]")
 
@@ -378,7 +397,7 @@ def run_wizard() -> None:
 
     unlock_hint = ""
     if tier == 1:
-        unlock_hint = "\n[dim]To unlock Tier 2: configure an LLM API key (re-run [bold]applypilot init[/bold]).[/dim]"
+        unlock_hint = "\n[dim]To unlock Tier 2: configure an LLM provider (re-run [bold]applypilot init[/bold]).[/dim]"
     elif tier == 2:
         unlock_hint = "\n[dim]To unlock Tier 3: install Claude Code CLI + Chrome.[/dim]"
 
