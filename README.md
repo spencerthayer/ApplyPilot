@@ -1,5 +1,7 @@
 <!-- logo here -->
 
+> **⚠️ ApplyPilot** is the original open-source project, created by [Pickle-Pixel](https://github.com/Pickle-Pixel) and first published on GitHub on **February 17, 2026**. We are **not affiliated** with applypilot.app, useapplypilot.com, or any other product using the "ApplyPilot" name. These sites are **not associated with this project** and may misrepresent what they offer. If you're looking for the autonomous, open-source job application agent — you're in the right place.
+
 # ApplyPilot
 
 **Applied to 1,000 jobs in 2 days. Fully autonomous. Open source.**
@@ -26,15 +28,17 @@ Three commands. That's it.
 
 ```bash
 pip install applypilot
-pip install --no-deps python-jobspy    # separate install (broken numpy pin in metadata)
-pip install pydantic tls-client requests markdownify regex  # jobspy runtime deps skipped by --no-deps
+pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex
 applypilot init          # one-time setup: resume, profile, preferences, API keys
+applypilot doctor        # verify your setup — shows what's installed and what's missing
 applypilot run           # discover > enrich > score > tailor > cover letters
 applypilot run -w 4      # same but parallel (4 threads for discovery/enrichment)
 applypilot apply         # autonomous browser-driven submission
 applypilot apply -w 3    # parallel apply (3 Chrome instances)
 applypilot apply --dry-run  # fill forms without submitting
 ```
+
+> **Why two install commands?** `python-jobspy` pins an exact numpy version in its metadata that conflicts with pip's resolver, but works fine at runtime with any modern numpy. The `--no-deps` flag bypasses the resolver; the second command installs jobspy's actual runtime dependencies. Everything except `python-jobspy` installs normally.
 
 ---
 
@@ -158,11 +162,14 @@ applypilot apply --gen --url URL       # generate prompt file for manual debuggi
 
 ```
 applypilot init                         # First-time setup wizard
+applypilot doctor                       # Verify setup, diagnose missing requirements
 applypilot run [stages...]              # Run pipeline stages (or 'all')
 applypilot run --workers 4              # Parallel discovery/enrichment
 applypilot run --stream                 # Concurrent stages (streaming mode)
 applypilot run --min-score 8            # Override score threshold
 applypilot run --dry-run                # Preview without executing
+applypilot run --validation lenient     # Relax validation (recommended for Gemini free tier)
+applypilot run --validation strict      # Strictest validation (retries on any banned word)
 applypilot apply                        # Launch auto-apply
 applypilot apply --workers 3            # Parallel browser workers
 applypilot apply --dry-run              # Fill forms without submitting
