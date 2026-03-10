@@ -24,6 +24,35 @@ log = logging.getLogger(__name__)
 GREENHOUSE_API_BASE = "https://boards-api.greenhouse.io/v1/boards"
 
 
+def _validate_employer_registry(data: dict, source: str) -> dict:
+    """Validate the parsed Greenhouse registry shape."""
+    if not isinstance(data, dict):
+        raise ValueError(f"Invalid Greenhouse config at {source}: expected a mapping at the top level.")
+
+    extra_keys = sorted(key for key in data.keys() if key != "employers")
+    if extra_keys:
+        joined = ", ".join(extra_keys[:5])
+        raise ValueError(
+            f"Invalid Greenhouse config at {source}: unexpected top-level keys outside 'employers' ({joined})."
+        )
+
+    employers = data.get("employers")
+    if not isinstance(employers, dict):
+        raise ValueError(f"Invalid Greenhouse config at {source}: 'employers' must be a mapping.")
+
+    for employer_key, employer in employers.items():
+        if not isinstance(employer, dict):
+            raise ValueError(
+                f"Invalid Greenhouse config at {source}: employer '{employer_key}' must map to an object."
+            )
+        if not str(employer.get("name", "")).strip():
+            raise ValueError(
+                f"Invalid Greenhouse config at {source}: employer '{employer_key}' is missing a non-empty name."
+            )
+
+    return employers
+
+
 def load_employers() -> dict:
     """Load Greenhouse employer registry.
 
@@ -34,12 +63,8 @@ def load_employers() -> dict:
     user_path = APP_DIR / "greenhouse.yaml"
     if user_path.exists():
         log.info("Loading user Greenhouse config from %s", user_path)
-        try:
-            data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
-            if data and "employers" in data:
-                return data.get("employers", {})
-        except Exception as e:
-            log.warning("Failed to load user config: %s", e)
+        data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
+        return _validate_employer_registry(data or {}, str(user_path))
 
     # Fall back to package config
     package_path = CONFIG_DIR / "greenhouse.yaml"
@@ -47,12 +72,8 @@ def load_employers() -> dict:
         log.warning("greenhouse.yaml not found at %s", package_path)
         return {}
 
-    try:
-        data = yaml.safe_load(package_path.read_text(encoding="utf-8"))
-        return data.get("employers", {})
-    except Exception as e:
-        log.error("Failed to load package config: %s", e)
-        return {}
+    data = yaml.safe_load(package_path.read_text(encoding="utf-8"))
+    return _validate_employer_registry(data or {}, str(package_path))
 
 
 def _load_location_filter(search_cfg: dict | None = None):

@@ -113,3 +113,28 @@ def test_chat_sets_local_api_base_and_api_key(monkeypatch) -> None:
 
     assert captured["api_base"] == "http://127.0.0.1:8080/v1"
     assert captured["api_key"] == "local-key"
+
+
+def test_openrouter_primary_entry_preserves_remote_base_url(monkeypatch) -> None:
+    client = LLMClient(
+        LLMConfig(
+            provider="openrouter",
+            api_base=None,
+            model="openrouter/openai/gpt-oss-120b:free",
+            api_key="router-key",
+            base_url="https://openrouter.ai/api/v1",
+        )
+    )
+    captured: dict[str, object] = {}
+
+    def _fake_completion(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        return _mock_response("ok")
+
+    monkeypatch.setattr(llm_module.litellm, "completion", _fake_completion)
+    response = client.chat([{"role": "user", "content": "hello"}], max_output_tokens=64)
+
+    assert response == "ok"
+    assert client._primary_entry().base_url == "https://openrouter.ai/api/v1"
+    assert captured["api_base"] == "https://openrouter.ai/api/v1"
+    assert captured["base_url"] == "https://openrouter.ai/api/v1"

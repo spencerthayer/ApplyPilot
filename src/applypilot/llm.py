@@ -346,7 +346,7 @@ class LLMClient:
         return ModelEntry(
             name=_raw_model_name(self.model),
             provider=self.provider,
-            base_url=self.config.api_base or "",
+            base_url=self.config.base_url or self.config.api_base or "",
             api_key=self.api_key,
         )
 
@@ -388,6 +388,7 @@ class LLMClient:
             "drop_params": options.get("drop_params", True),
             "api_key": entry.api_key or None,
             "api_base": entry.base_url or None,
+            "base_url": entry.base_url or None,
         }
         if temperature is not None:
             kwargs["temperature"] = temperature

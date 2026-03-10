@@ -8,9 +8,10 @@ search configuration YAML (searches.yaml) rather than being hardcoded.
 """
 
 import logging
+import inspect
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 
 from jobspy import scrape_jobs
 
@@ -53,6 +54,9 @@ from applypilot import config
 from applypilot.database import commit_with_retry, get_connection, init_db
 
 log = logging.getLogger(__name__)
+_SCRAPE_JOBS_PARAMS = set(inspect.signature(scrape_jobs).parameters)
+_HOURS_OLD_SUPPORTED = "hours_old" in _SCRAPE_JOBS_PARAMS
+_HOURS_OLD_WARNING_EMITTED = False
 
 
 def _clean(val) -> str | None:
@@ -101,9 +105,10 @@ def parse_proxy(proxy_str: str) -> dict:
 
 def _scrape_with_retry(kwargs: dict, max_retries: int = 2, backoff: float = 5.0):
     """Call scrape_jobs with retry on transient failures."""
+    normalized_kwargs = _normalize_scrape_kwargs(kwargs)
     for attempt in range(max_retries + 1):
         try:
-            return scrape_jobs(**kwargs)
+            return scrape_jobs(**normalized_kwargs)
         except Exception as e:
             err = str(e).lower()
             transient = any(k in err for k in ("timeout", "429", "proxy", "connection", "reset", "refused"))
@@ -113,6 +118,101 @@ def _scrape_with_retry(kwargs: dict, max_retries: int = 2, backoff: float = 5.0)
                 time.sleep(wait)
             else:
                 raise
+
+
+def _normalize_scrape_kwargs(kwargs: dict) -> dict:
+    """Adapt ApplyPilot kwargs to the installed JobSpy signature."""
+    normalized: dict = {}
+
+    for key, value in kwargs.items():
+        if key == "proxies":
+            if "proxies" in _SCRAPE_JOBS_PARAMS:
+                normalized["proxies"] = value
+            elif "proxy" in _SCRAPE_JOBS_PARAMS:
+                if isinstance(value, list):
+                    normalized["proxy"] = value[0] if value else None
+                else:
+                    normalized["proxy"] = value
+            continue
+
+        if key in _SCRAPE_JOBS_PARAMS:
+            normalized[key] = value
+
+    if "hours_old" in kwargs and not _HOURS_OLD_SUPPORTED:
+        _warn_hours_old_fallback()
+
+    return normalized
+
+
+def _warn_hours_old_fallback() -> None:
+    global _HOURS_OLD_WARNING_EMITTED
+    if _HOURS_OLD_WARNING_EMITTED:
+        return
+    _HOURS_OLD_WARNING_EMITTED = True
+    log.warning(
+        "Installed JobSpy does not support server-side hours_old filtering; applying best-effort local recency checks."
+    )
+
+
+def _coerce_posted_datetime(value) -> datetime | None:
+    """Convert a JobSpy date_posted cell into a timezone-aware datetime."""
+    if value is None:
+        return None
+
+    try:
+        if hasattr(value, "to_pydatetime"):
+            value = value.to_pydatetime()
+    except Exception:
+        pass
+
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, date):
+        dt = datetime.combine(value, dtime.min)
+    else:
+        raw = str(value).strip()
+        if not raw or raw == "nan":
+            return None
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y"):
+                try:
+                    dt = datetime.strptime(raw, fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _apply_local_hours_filter(df, hours_old: int) -> tuple[object, int, bool]:
+    """Apply a best-effort local recency filter using the date_posted column."""
+    if hours_old <= 0 or "date_posted" not in df.columns:
+        return df, 0, False
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_old)
+    kept_rows: list[bool] = []
+    seen_posted_value = False
+
+    for value in df["date_posted"]:
+        posted_dt = _coerce_posted_datetime(value)
+        if posted_dt is None:
+            kept_rows.append(True)
+            continue
+        seen_posted_value = True
+        kept_rows.append(posted_dt >= cutoff)
+
+    if not seen_posted_value:
+        return df, 0, False
+
+    filtered_df = df[kept_rows]
+    removed = len(df) - len(filtered_df)
+    return filtered_df, removed, True
 
 
 # -- Location filtering ------------------------------------------------------
@@ -331,6 +431,10 @@ def _run_one_search(
         log.info("[%s] 0 results", label)
         return {"new": 0, "existing": 0, "errors": 0, "filtered": 0, "total": 0, "label": label}
 
+    recency_filtered = 0
+    if not _HOURS_OLD_SUPPORTED:
+        df, recency_filtered, _ = _apply_local_hours_filter(df, hours_old)
+
     # Filter by location before storing
     before = len(df)
     df = df[
@@ -351,9 +455,18 @@ def _run_one_search(
     msg = f"[{label}] {before} results -> {new} new, {existing} dupes"
     if filtered:
         msg += f", {filtered} filtered (location)"
+    if recency_filtered:
+        msg += f", {recency_filtered} filtered (recency)"
     log.info(msg)
 
-    return {"new": new, "existing": existing, "errors": 0, "filtered": filtered, "total": before, "label": label}
+    return {
+        "new": new,
+        "existing": existing,
+        "errors": 0,
+        "filtered": filtered + recency_filtered,
+        "total": before,
+        "label": label,
+    }
 
 
 # -- Single query search -----------------------------------------------------
@@ -398,10 +511,16 @@ def search_jobs(
         kwargs["linkedin_fetch_description"] = True
 
     try:
-        df = scrape_jobs(**kwargs)
+        df = _scrape_with_retry(kwargs)
     except Exception as e:
         log.error("JobSpy search failed: %s", e)
         return {"error": str(e), "total": 0, "new": 0, "existing": 0}
+
+    recency_filtered = 0
+    if not _HOURS_OLD_SUPPORTED:
+        df, recency_filtered, _ = _apply_local_hours_filter(df, hours_old)
+        if recency_filtered:
+            log.info("JobSpy recency filter removed %d stale results locally", recency_filtered)
 
     total = len(df)
     log.info("JobSpy returned %d results", total)

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+
 import pytest
 
 from applypilot import config
 from applypilot.llm_provider import (
     detect_llm_provider,
     format_llm_provider_status,
-    llm_config_hint,
 )
 from applypilot.wizard.init import _build_ai_env_lines
 
@@ -140,3 +142,11 @@ def test_check_tier_missing_message_mentions_all_supported_llm_envs(
         assert snippet in combined
     assert "OPENROUTER_API_KEY" in combined
     assert "LLM_URL" in combined
+
+
+def test_pyproject_lists_tenacity_runtime_dependency() -> None:
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+
+    dependencies = data["project"]["dependencies"]
+    assert any(dep.startswith("tenacity") for dep in dependencies)

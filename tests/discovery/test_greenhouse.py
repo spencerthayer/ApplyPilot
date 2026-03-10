@@ -1,18 +1,9 @@
 """Unit tests for Greenhouse ATS discovery module."""
 
-import os
-import sys
 import sqlite3
-from datetime import datetime, timezone
 from unittest.mock import Mock, patch
 
 import pytest
-
-# Ensure src is on sys.path for tests when running from repo root
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-SRC = os.path.join(ROOT, "src")
-if SRC not in sys.path:
-    sys.path.insert(0, SRC)
 
 from applypilot.discovery.greenhouse import (
     GREENHOUSE_API_BASE,
@@ -37,12 +28,29 @@ class TestLoadEmployers:
         # Check for known employers
         assert "scaleai" in employers
         assert employers["scaleai"]["name"] == "Scale AI"
+        assert "notionhq" in employers
+        assert employers["notionhq"]["name"] == "Notion"
 
     def test_returns_empty_dict_if_file_missing(self, tmp_path):
         """Test graceful handling of missing config file."""
         with patch("applypilot.discovery.greenhouse.CONFIG_DIR", tmp_path):
             employers = load_employers()
             assert employers == {}
+
+    def test_raises_for_malformed_registry_shape(self, tmp_path):
+        bad_config = tmp_path / "greenhouse.yaml"
+        bad_config.write_text(
+            "employers:\n"
+            "  scaleai:\n"
+            "    name: Scale AI\n"
+            "rogue_key:\n"
+            "  name: Rogue\n",
+            encoding="utf-8",
+        )
+
+        with patch("applypilot.discovery.greenhouse.CONFIG_DIR", tmp_path):
+            with pytest.raises(ValueError, match="unexpected top-level keys"):
+                load_employers()
 
 
 class TestLocationFiltering:

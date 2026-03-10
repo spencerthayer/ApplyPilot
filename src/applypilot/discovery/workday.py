@@ -12,6 +12,7 @@ import logging
 import re
 import sqlite3
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -24,6 +25,15 @@ from applypilot.config import CONFIG_DIR
 from applypilot.database import commit_with_retry, get_connection, init_db
 
 log = logging.getLogger(__name__)
+_QUARANTINE_HTTP_STATUSES = {401, 404, 422}
+
+
+class WorkdayEmployerFailure(RuntimeError):
+    """A Workday employer failed in a way that should count as an error."""
+
+    def __init__(self, message: str, *, quarantine: bool = False):
+        super().__init__(message)
+        self.quarantine = quarantine
 
 
 # -- Employer registry from YAML --------------------------------------------
@@ -207,7 +217,18 @@ def search_employer(
     while True:
         try:
             data = workday_search(employer, search_text, limit=page_size, offset=offset)
+        except urllib.error.HTTPError as e:
+            message = f"HTTP Error {e.code}: {e.reason}"
+            if offset == 0:
+                quarantine = e.code in _QUARANTINE_HTTP_STATUSES
+                log.error("%s: API error at offset %d: %s", employer["name"], offset, message)
+                raise WorkdayEmployerFailure(message, quarantine=quarantine) from e
+            log.error("%s: API error at offset %d: %s", employer["name"], offset, message)
+            break
         except Exception as e:
+            if offset == 0:
+                log.error("%s: API error at offset %d: %s", employer["name"], offset, e)
+                raise WorkdayEmployerFailure(str(e)) from e
             log.error("%s: API error at offset %d: %s", employer["name"], offset, e)
             break
 
@@ -358,10 +379,30 @@ def _process_one(
             accept_locs=accept_locs,
             reject_locs=reject_locs,
         )
+    except WorkdayEmployerFailure as e:
+        log.error("%s: ERROR searching '%s': %s", emp["name"], search_text, e)
+        return {
+            "employer": emp["name"],
+            "employer_key": employer_key,
+            "query": search_text,
+            "found": 0,
+            "new": 0,
+            "existing": 0,
+            "error": str(e),
+            "quarantine": e.quarantine,
+        }
     except Exception as e:
         log.error("%s: ERROR searching '%s': %s", emp["name"], search_text, e)
-        return {"employer": emp["name"], "query": search_text,
-                "found": 0, "new": 0, "existing": 0, "error": str(e)}
+        return {
+            "employer": emp["name"],
+            "employer_key": employer_key,
+            "query": search_text,
+            "found": 0,
+            "new": 0,
+            "existing": 0,
+            "error": str(e),
+            "quarantine": False,
+        }
 
     if not jobs:
         return {"employer": emp["name"], "query": search_text,
@@ -412,6 +453,7 @@ def scrape_employers(
     total_existing = 0
     total_found = 0
     errors = 0
+    quarantined: set[str] = set()
     t0 = time.time()
 
     valid_keys = [k for k in employer_keys if k in employers]
@@ -435,6 +477,8 @@ def scrape_employers(
                 total_found += result["found"]
                 if "error" in result:
                     errors += 1
+                if result.get("quarantine") and result.get("employer_key"):
+                    quarantined.add(result["employer_key"])
 
                 if completed % 10 == 0 or completed == len(valid_keys):
                     elapsed = time.time() - t0
@@ -454,6 +498,8 @@ def scrape_employers(
             total_found += result["found"]
             if "error" in result:
                 errors += 1
+            if result.get("quarantine") and result.get("employer_key"):
+                quarantined.add(result["employer_key"])
 
             if completed % 10 == 0 or completed == len(valid_keys):
                 elapsed = time.time() - t0
@@ -461,10 +507,16 @@ def scrape_employers(
                          search_text, completed, len(valid_keys), total_new, total_existing, errors, elapsed)
 
     elapsed = time.time() - t0
-    log.info("[%s] Done: %d found, %d new, %d dupes in %.0fs",
-             search_text, total_found, total_new, total_existing, elapsed)
+    log.info("[%s] Done: %d found, %d new, %d dupes, %d errors in %.0fs",
+             search_text, total_found, total_new, total_existing, errors, elapsed)
 
-    return {"found": total_found, "new": total_new, "existing": total_existing}
+    return {
+        "found": total_found,
+        "new": total_new,
+        "existing": total_existing,
+        "errors": errors,
+        "quarantined": quarantined,
+    }
 
 
 # -- Public entry point ------------------------------------------------------
@@ -517,9 +569,15 @@ def run_workday_discovery(employers: dict | None = None, workers: int = 1) -> di
     grand_new = 0
     grand_existing = 0
     grand_found = 0
+    grand_errors = 0
+    quarantined_employers: set[str] = set()
 
     for i, query in enumerate(queries, 1):
         log.info("Query %d/%d: \"%s\"", i, len(queries), query)
+        active_employers = [key for key in employers.keys() if key not in quarantined_employers]
+        if not active_employers:
+            log.warning("All Workday employers are quarantined; stopping remaining queries.")
+            break
         result = scrape_employers(
             search_text=query,
             employers=employers,
@@ -527,17 +585,21 @@ def run_workday_discovery(employers: dict | None = None, workers: int = 1) -> di
             accept_locs=accept_locs,
             reject_locs=reject_locs,
             workers=workers,
+            employer_keys=active_employers,
         )
         grand_new += result["new"]
         grand_existing += result["existing"]
         grand_found += result["found"]
+        grand_errors += result.get("errors", 0)
+        quarantined_employers.update(result.get("quarantined", set()))
 
-    log.info("Workday crawl done: %d found, %d new, %d existing across %d queries x %d employers",
-             grand_found, grand_new, grand_existing, len(queries), len(employers))
+    log.info("Workday crawl done: %d found, %d new, %d existing, %d errors across %d queries x %d employers",
+             grand_found, grand_new, grand_existing, grand_errors, len(queries), len(employers))
 
     return {
         "found": grand_found,
         "new": grand_new,
         "existing": grand_existing,
+        "errors": grand_errors,
         "queries": len(queries),
     }

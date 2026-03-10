@@ -58,7 +58,7 @@ def _setup_file_logging(stages: list[str]) -> logging.FileHandler | None:
 STAGE_ORDER = ("discover", "enrich", "score", "tailor", "cover", "pdf")
 
 STAGE_META: dict[str, dict] = {
-    "discover": {"desc": "Job discovery (JobSpy + Workday + smart extract + HN)"},
+    "discover": {"desc": "Job discovery (JobSpy + Workday + Greenhouse + smart extract + HN)"},
     "enrich": {"desc": "Detail enrichment (full descriptions + apply URLs)"},
     "score": {"desc": "LLM scoring (fit 1-10)"},
     "tailor": {"desc": "Resume tailoring (LLM + validation)"},
@@ -88,6 +88,7 @@ DISCOVERY_SOURCES: dict[str, str] = {
     "linkedin":     "LinkedIn only (via JobSpy)",
     "indeed":       "Indeed only (via JobSpy)",
     "workday":      "Workday corporate career sites",
+    "greenhouse":   "Greenhouse ATS career sites",
     "smartextract": "Smart extract (AI-powered scraping, incl. Dice via sites.yaml)",
     "hackernews":   "Hacker News 'Who is Hiring?' thread",
 }
@@ -127,7 +128,7 @@ def resolve_source_names(names: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _run_discover(workers: int = 1, sources: list[str] | None = None) -> dict:
-    """Stage: Job discovery — JobSpy, Workday, smart-extract, and HN scrapers.
+    """Stage: Job discovery — JobSpy, Workday, Greenhouse, smart-extract, and HN scrapers.
 
     Args:
         workers: Thread count for sources that support parallelism.
@@ -196,16 +197,16 @@ def _run_discover(workers: int = 1, sources: list[str] | None = None) -> dict:
             console.print(f"  [red]HN error:[/red] {e}")
             stats["hackernews"] = f"error: {e}"
 
-    # Greenhouse ATS scraper
-    console.print("  [cyan]Greenhouse ATS scraper (AI startups)...[/cyan]")
-    try:
-        from applypilot.discovery.greenhouse import search_all
-        new, existing = search_all("", workers=workers)
-        stats["greenhouse"] = f"ok ({new} new, {existing} existing)"
-    except Exception as e:
-        log.error("Greenhouse scraper failed: %s", e)
-        console.print(f"  [red]Greenhouse error:[/red] {e}")
-        stats["greenhouse"] = f"error: {e}"
+    if "greenhouse" in active:
+        console.print("  [cyan]Greenhouse ATS scraper (AI startups)...[/cyan]")
+        try:
+            from applypilot.discovery.greenhouse import search_all
+            new, existing = search_all("", workers=workers)
+            stats["greenhouse"] = f"ok ({new} new, {existing} existing)"
+        except Exception as e:
+            log.error("Greenhouse scraper failed: %s", e)
+            console.print(f"  [red]Greenhouse error:[/red] {e}")
+            stats["greenhouse"] = f"error: {e}"
 
     return stats
 
