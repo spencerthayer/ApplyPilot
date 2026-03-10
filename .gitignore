@@ -14,9 +14,13 @@ chrome-workers/
 apply-workers/
 apply_logs/
 logs/
+tmp_*
 
 # MCP configs (per-machine)
 .mcp*.json
+
+# Playwright MCP
+.playwright-mcp/
 
 # Python
 __pycache__/

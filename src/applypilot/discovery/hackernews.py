@@ -6,7 +6,7 @@ structured job listings from each top-level comment.
 Flow:
   1. Find the latest "Ask HN: Who is Hiring?" thread via HN Algolia API
   2. Fetch all top-level comment IDs from the HN Firebase API
-  3. Pre-filter comments by location keywords (Remote / Seattle / etc.)
+  3. Pre-filter comments by location keywords (from search config)
   4. Use LLM to extract structured fields from each matching comment
   5. Store results in the ApplyPilot jobs DB
 
@@ -222,7 +222,7 @@ def run_hn_discovery(
 
     Args:
         accept_keywords: Location keywords for pre-filtering comments.
-                         Defaults to Remote + Seattle metro.
+                         Defaults to Remote + locations from search config.
         max_comments: Max top-level comments to process (HN threads can
                       have 1000+; most relevant are in the first 500).
         delay: Seconds between HN API requests to be polite.
