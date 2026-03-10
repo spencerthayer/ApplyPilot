@@ -43,3 +43,5 @@ Thumbs.db
 
 # Memory/search cache (may contain sensitive data)
 .memsearch/
+
+.cursor/
