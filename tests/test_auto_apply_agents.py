@@ -79,10 +79,10 @@ def test_resolve_auto_apply_agent_honors_priority_env(monkeypatch) -> None:
     assert selection.resolved == "claude"
 
 
-def test_get_auto_apply_agent_priority_falls_back_on_invalid_values() -> None:
+def test_get_auto_apply_agent_priority_ignores_invalid_and_appends_missing_defaults() -> None:
     assert config.get_auto_apply_agent_priority(
         {"AUTO_APPLY_AGENT_PRIORITY": "invalid,claude,claude"}
-    ) == ("claude", "codex")
+    ) == ("claude", "codex", "opencode")
 
 
 def test_auto_apply_model_setting_is_separate_from_llm_model() -> None:
