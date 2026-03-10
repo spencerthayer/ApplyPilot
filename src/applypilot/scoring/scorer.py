@@ -10,7 +10,7 @@ import re
 import time
 from datetime import datetime, timezone
 
-from applypilot.config import RESUME_PATH
+from applypilot.config import RESUME_JSON_PATH, RESUME_PATH, load_resume_text
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 
@@ -213,6 +213,17 @@ def score_job(resume_text: str, job: dict) -> dict:
         return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}"}
 
 
+def _load_scoring_resume_text() -> str:
+    """Load resume text while preserving canonical precedence and legacy test overrides."""
+
+    if RESUME_JSON_PATH.exists():
+        return load_resume_text()
+    try:
+        return load_resume_text(RESUME_PATH)
+    except TypeError:
+        return load_resume_text()
+
+
 def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     """Score unscored jobs that have full descriptions.
     Jobs are first evaluated against deterministic exclusion rules. Excluded
@@ -226,11 +237,11 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
         {"scored": int, "errors": int, "elapsed": float, "distribution": list,
          "excluded": int}
     """
-    if not RESUME_PATH.exists():
-        log.error("Resume file not found: %s. Run 'applypilot init' first.", RESUME_PATH)
+    try:
+        resume_text = _load_scoring_resume_text()
+    except FileNotFoundError:
+        log.error("Resume file not found. Run 'applypilot init' first.")
         return {"scored": 0, "errors": 0, "elapsed": 0.0, "distribution": [], "excluded": 0}
-
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
     conn = get_connection()
 
     if rescore:

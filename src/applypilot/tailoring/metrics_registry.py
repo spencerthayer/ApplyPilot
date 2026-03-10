@@ -1,6 +1,6 @@
 """Metrics provenance validation module.
 
-Loads verified metrics from ~/.applypilot/profile.json and validates
+Loads verified metrics from the canonical ApplyPilot profile contract and validates
 text against them to prevent metric fabrication.
 """
 
@@ -9,6 +9,9 @@ import os
 import re
 from dataclasses import dataclass
 from typing import List, Set
+
+from applypilot.config import load_profile
+from applypilot.resume_json import normalize_profile_data
 
 
 @dataclass
@@ -23,7 +26,7 @@ class MetricsRegistry:
     """Registry of verified metrics loaded from user profile.
 
     Parses work_history[].key_metrics[] and resume_facts.real_metrics[]
-    from profile.json to build a searchable registry of verified metrics.
+    from the normalized profile contract to build a searchable registry of verified metrics.
     """
 
     # Regex patterns for extracting metrics from text
@@ -36,23 +39,35 @@ class MetricsRegistry:
         """Initialize registry by loading metrics from profile.
 
         Args:
-            profile_path: Path to profile.json. Defaults to ~/.applypilot/profile.json
+            profile_path: Optional path to a profile.json or resume.json file.
         """
         self._verified_metrics: Set[str] = set()
-        self._load_profile(profile_path or os.path.expanduser("~/.applypilot/profile.json"))
+        self._load_profile(profile_path)
 
-    def _load_profile(self, path: str) -> None:
-        """Load and parse metrics from profile.json.
+    def _load_profile(self, path: str | None) -> None:
+        """Load and parse metrics from canonical or legacy profile storage.
 
         Extracts metrics from:
         - work_history[].key_metrics[] (array of strings per job)
         - resume_facts.real_metrics[] (array of strings)
         """
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                profile = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return
+        profile = {}
+        if path:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    profile = normalize_profile_data(json.load(f))
+            except (FileNotFoundError, json.JSONDecodeError):
+                return
+        else:
+            try:
+                profile = load_profile()
+            except FileNotFoundError:
+                legacy_path = os.path.expanduser("~/.applypilot/profile.json")
+                try:
+                    with open(legacy_path, "r", encoding="utf-8") as f:
+                        profile = normalize_profile_data(json.load(f))
+                except (FileNotFoundError, json.JSONDecodeError):
+                    return
 
         # Parse work_history[].key_metrics[]
         for job in profile.get("work_history", []):

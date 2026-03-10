@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
+from applypilot.config import COVER_LETTER_DIR, load_profile, load_resume_text
 from applypilot.database import get_connection
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
@@ -203,10 +203,11 @@ def run_cover_letters(min_score: int = 7, limit: int = 20, validation_mode: str 
         {"generated": int, "errors": int, "elapsed": float}
     """
     profile = load_profile()
-    if not RESUME_PATH.exists():
-        log.error("Resume file not found: %s. Run 'applypilot init' first.", RESUME_PATH)
+    try:
+        resume_text = load_resume_text()
+    except FileNotFoundError:
+        log.error("Resume file not found. Run 'applypilot init' first.")
         return {"generated": 0, "errors": 0, "elapsed": 0.0}
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
     conn = get_connection()
 
     # Fetch jobs that have tailored resumes but no cover letter yet

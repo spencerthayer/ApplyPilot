@@ -259,6 +259,7 @@ def test_kill_active_agent_processes_only_kills_running(monkeypatch) -> None:
 
 def test_doctor_reports_auto_apply_agent_layer(monkeypatch, tmp_path: Path) -> None:
     profile = tmp_path / "profile.json"
+    resume_json = tmp_path / "resume.json"
     resume = tmp_path / "resume.txt"
     searches = tmp_path / "searches.yaml"
     profile.write_text("{}", encoding="utf-8")
@@ -269,6 +270,7 @@ def test_doctor_reports_auto_apply_agent_layer(monkeypatch, tmp_path: Path) -> N
     monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=200))
     monkeypatch.setattr(config, "load_env", lambda: None)
     monkeypatch.setattr(config, "PROFILE_PATH", profile)
+    monkeypatch.setattr(config, "RESUME_JSON_PATH", resume_json)
     monkeypatch.setattr(config, "RESUME_PATH", resume)
     monkeypatch.setattr(config, "RESUME_PDF_PATH", tmp_path / "resume.pdf")
     monkeypatch.setattr(config, "SEARCH_CONFIG_PATH", searches)

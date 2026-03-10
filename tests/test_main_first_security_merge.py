@@ -148,7 +148,7 @@ def test_generate_dashboard_escapes_attribute_bound_values(monkeypatch, tmp_path
 
 
 def test_run_scoring_returns_safe_summary_when_resume_is_missing(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(scorer, "RESUME_PATH", tmp_path / "missing_resume.txt")
+    monkeypatch.setattr(scorer, "load_resume_text", lambda: (_ for _ in ()).throw(FileNotFoundError()))
 
     result = scorer.run_scoring()
 
@@ -156,7 +156,7 @@ def test_run_scoring_returns_safe_summary_when_resume_is_missing(monkeypatch, tm
 
 
 def test_run_tailoring_returns_safe_summary_when_resume_is_missing(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(tailor, "RESUME_PATH", tmp_path / "missing_resume.txt")
+    monkeypatch.setattr(tailor, "load_resume_text", lambda: (_ for _ in ()).throw(FileNotFoundError()))
     monkeypatch.setattr(tailor, "load_profile", lambda: {"personal": {}})
 
     result = tailor.run_tailoring()

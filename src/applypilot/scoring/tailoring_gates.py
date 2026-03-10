@@ -4,9 +4,9 @@ This module implements quality gates between the 12 tailoring steps. Each gate
 validates the output of a step before proceeding to the next, preventing wasted
 work on poor inputs.
 
-Quality gates are configured in profile.json under tailoring_config.quality_gates.
-Each gate can be enabled/disabled independently and has step-specific validation
-parameters.
+Quality gates are configured on the normalized profile contract under
+tailoring_config.quality_gates. Each gate can be enabled/disabled
+independently and has step-specific validation parameters.
 
 Example:
     >>> from applypilot.scoring.tailoring_gates import run_quality_gate

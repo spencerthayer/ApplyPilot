@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import re
@@ -12,6 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from applypilot.llm_provider import has_llm_provider, llm_config_hint
+from applypilot.resume_json import (
+    CanonicalResumeSource,
+    ResumeJsonError,
+    build_resume_text_from_json,
+    load_resume_json_from_path,
+    normalize_profile_data,
+)
 
 # User data directory — all user-specific files live here
 APP_DIR = Path(os.environ.get("APPLYPILOT_DIR", Path.home() / ".applypilot"))
@@ -19,6 +27,7 @@ APP_DIR = Path(os.environ.get("APPLYPILOT_DIR", Path.home() / ".applypilot"))
 # Core paths
 DB_PATH = APP_DIR / "applypilot.db"
 PROFILE_PATH = APP_DIR / "profile.json"
+RESUME_JSON_PATH = APP_DIR / "resume.json"
 RESUME_PATH = APP_DIR / "resume.txt"
 RESUME_PDF_PATH = APP_DIR / "resume.pdf"
 SEARCH_CONFIG_PATH = APP_DIR / "searches.yaml"
@@ -142,13 +151,67 @@ def ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 
-def load_profile() -> dict:
-    """Load user profile from ~/.applypilot/profile.json."""
-    import json
+def get_resume_source() -> CanonicalResumeSource:
+    """Report whether ApplyPilot is using canonical, legacy, or missing resume artifacts."""
 
+    if RESUME_JSON_PATH.exists():
+        try:
+            load_resume_json_from_path(RESUME_JSON_PATH)
+        except (ResumeJsonError, FileNotFoundError) as exc:
+            return CanonicalResumeSource(mode="canonical_invalid", path=RESUME_JSON_PATH, detail=str(exc))
+        return CanonicalResumeSource(mode="canonical", path=RESUME_JSON_PATH, detail="Using canonical resume.json")
+
+    if PROFILE_PATH.exists() or RESUME_PATH.exists():
+        return CanonicalResumeSource(mode="legacy", path=PROFILE_PATH if PROFILE_PATH.exists() else RESUME_PATH)
+
+    return CanonicalResumeSource(mode="missing", path=None)
+
+
+def load_resume_json(path: Path | None = None) -> dict:
+    """Load and validate a canonical JSON Resume document."""
+
+    candidate = Path(path) if path is not None else RESUME_JSON_PATH
+    return load_resume_json_from_path(candidate)
+
+
+def load_profile() -> dict:
+    """Load normalized user profile data from canonical or legacy storage."""
+
+    source = get_resume_source()
+    if source.mode == "canonical":
+        return normalize_profile_data(load_resume_json(source.path))
+    if source.mode == "canonical_invalid":
+        raise ResumeJsonError(source.detail)
     if not PROFILE_PATH.exists():
-        raise FileNotFoundError(f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first.")
-    return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        raise FileNotFoundError(
+            f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
+        )
+    try:
+        payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Malformed profile JSON at {PROFILE_PATH}: line {exc.lineno}, column {exc.colno}: {exc.msg}"
+        ) from exc
+    return normalize_profile_data(payload)
+
+
+def load_resume_text(path: Path | None = None) -> str:
+    """Load deterministic resume text from canonical or legacy storage."""
+
+    if path is not None:
+        candidate = Path(path)
+        if candidate.suffix.lower() == ".json":
+            return build_resume_text_from_json(load_resume_json(candidate))
+        return candidate.read_text(encoding="utf-8")
+
+    source = get_resume_source()
+    if source.mode == "canonical":
+        return build_resume_text_from_json(load_resume_json(source.path))
+    if source.mode == "canonical_invalid":
+        raise ResumeJsonError(source.detail)
+    if RESUME_PATH.exists():
+        return RESUME_PATH.read_text(encoding="utf-8")
+    raise FileNotFoundError(f"Resume text not found at {RESUME_PATH}. Run `applypilot init` first.")
 
 
 def load_search_config() -> dict:

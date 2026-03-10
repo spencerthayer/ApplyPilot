@@ -1,8 +1,8 @@
 """ApplyPilot first-time setup wizard.
 
 Interactive flow that creates ~/.applypilot/ with:
-  - resume.txt (and optionally resume.pdf)
-  - profile.json
+  - resume.json (preferred canonical source)
+  - profile.json + resume.txt (legacy fallback, optional)
   - searches.yaml
   - .env (LLM provider config)
 """
@@ -25,12 +25,18 @@ from applypilot.config import (
     ENV_PATH,
     FILES_DIR,
     PROFILE_PATH,
+    RESUME_JSON_PATH,
     RESUME_PATH,
     RESUME_PDF_PATH,
     SEARCH_CONFIG_PATH,
     ensure_dirs,
 )
 from applypilot.llm_provider import LLM_PROVIDER_SPECS, WIZARD_PROVIDER_ORDER
+from applypilot.resume_json import (
+    DEFAULT_RENDER_THEME,
+    load_resume_json_from_path,
+    normalize_profile_from_resume_json,
+)
 
 console = Console()
 
@@ -92,6 +98,354 @@ def _setup_resume() -> None:
                 else:
                     console.print("[yellow]File not found, skipping plain-text copy.[/yellow]")
         break
+
+
+def _write_resume_json(data: dict) -> None:
+    RESUME_JSON_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _copy_resume_json(src_path: Path) -> dict:
+    data = load_resume_json_from_path(src_path)
+    if src_path.resolve() != RESUME_JSON_PATH.resolve():
+        shutil.copy2(src_path, RESUME_JSON_PATH)
+        console.print(f"[green]Copied canonical resume to {RESUME_JSON_PATH}[/green]")
+    else:
+        console.print(f"[green]Using canonical resume at {RESUME_JSON_PATH}[/green]")
+    return data
+
+
+def _legacy_profile_to_resume_json(profile: dict, resume_text: str = "") -> dict:
+    from applypilot.scoring.pdf import parse_entries, parse_resume, parse_skills
+
+    parsed_resume = parse_resume(resume_text) if resume_text.strip() else {"sections": {}, "name": "", "title": "", "contact": ""}
+    sections = parsed_resume.get("sections", {})
+
+    personal = profile.get("personal", {})
+    experience = profile.get("experience", {})
+    work_history = profile.get("work_history", [])
+    education = profile.get("education", [])
+    skills_boundary = profile.get("skills_boundary", {})
+    resume_facts = profile.get("resume_facts", {})
+
+    basics = {
+        "name": personal.get("full_name", "") or parsed_resume.get("name", ""),
+        "label": experience.get("target_role", "") or experience.get("current_title", "") or parsed_resume.get("title", ""),
+        "email": personal.get("email", ""),
+        "phone": personal.get("phone", ""),
+        "url": personal.get("website_url", ""),
+        "summary": sections.get("SUMMARY", "").strip(),
+        "location": {
+            "address": personal.get("address", ""),
+            "city": personal.get("city", ""),
+            "region": personal.get("province_state", ""),
+            "countryCode": personal.get("country", ""),
+            "postalCode": personal.get("postal_code", ""),
+        },
+        "profiles": [],
+    }
+
+    if personal.get("linkedin_url"):
+        basics["profiles"].append({"network": "LinkedIn", "url": personal["linkedin_url"]})
+    if personal.get("github_url"):
+        basics["profiles"].append({"network": "GitHub", "url": personal["github_url"]})
+    if personal.get("portfolio_url"):
+        basics["profiles"].append({"network": "Portfolio", "url": personal["portfolio_url"]})
+
+    parsed_experience = parse_entries(sections.get("EXPERIENCE", "")) if sections.get("EXPERIENCE") else []
+    work: list[dict] = []
+    if work_history:
+        for index, role in enumerate(work_history):
+            parsed_entry = parsed_experience[index] if index < len(parsed_experience) else {}
+            highlights = parsed_entry.get("bullets", []) if parsed_entry else role.get("highlights", [])
+            work.append(
+                {
+                    "name": role.get("company", ""),
+                    "position": role.get("position", ""),
+                    "location": role.get("location", ""),
+                    "startDate": str(role.get("start_year") or role.get("start_date") or ""),
+                    "endDate": str(role.get("end_year") or role.get("end_date") or ""),
+                    "summary": role.get("summary", ""),
+                    "highlights": highlights,
+                    "x-applypilot": {
+                        "key_metrics": role.get("key_metrics", []),
+                    },
+                }
+            )
+    else:
+        for entry in parsed_experience:
+            title = entry.get("title", "")
+            parts = [part.strip() for part in title.split("|")]
+            position = parts[0] if parts else title
+            company = parts[1] if len(parts) > 1 else ""
+            date_value = parts[2] if len(parts) > 2 else ""
+            work.append(
+                {
+                    "name": company,
+                    "position": position,
+                    "location": entry.get("subtitle", ""),
+                    "startDate": date_value,
+                    "summary": "",
+                    "highlights": entry.get("bullets", []),
+                    "x-applypilot": {"key_metrics": []},
+                }
+            )
+
+    parsed_projects = parse_entries(sections.get("PROJECTS", "")) if sections.get("PROJECTS") else []
+    projects = []
+    for entry in parsed_projects:
+        projects.append(
+            {
+                "name": entry.get("title", ""),
+                "description": entry.get("subtitle", ""),
+                "highlights": entry.get("bullets", []),
+            }
+        )
+
+    canonical_skills = []
+    if sections.get("TECHNICAL SKILLS"):
+        for label, value in parse_skills(sections["TECHNICAL SKILLS"]):
+            canonical_skills.append({"name": label, "keywords": [s.strip() for s in value.split(",") if s.strip()]})
+    elif skills_boundary:
+        label_map = {
+            "programming_languages": "Programming Languages",
+            "frameworks": "Frameworks & Libraries",
+            "devops": "DevOps & Infra",
+            "databases": "Databases",
+            "tools": "Tools & Platforms",
+        }
+        for key, values in skills_boundary.items():
+            canonical_skills.append({"name": label_map.get(key, key.replace("_", " ").title()), "keywords": values})
+
+    canonical_education = []
+    for entry in education:
+        canonical_education.append(
+            {
+                "institution": entry.get("institution", ""),
+                "studyType": entry.get("studyType", ""),
+                "area": entry.get("area", ""),
+                "endDate": entry.get("endDate", ""),
+            }
+        )
+
+    applypilot_meta = {
+        "personal": {
+            "preferred_name": personal.get("preferred_name", ""),
+            "address": personal.get("address", ""),
+            "province_state": personal.get("province_state", ""),
+            "country": personal.get("country", ""),
+            "postal_code": personal.get("postal_code", ""),
+            "portfolio_url": personal.get("portfolio_url", ""),
+            "website_url": personal.get("website_url", ""),
+            "github_url": personal.get("github_url", ""),
+            "linkedin_url": personal.get("linkedin_url", ""),
+        },
+        "target_role": experience.get("target_role", "") or experience.get("current_title", ""),
+        "years_of_experience_total": experience.get("years_of_experience_total", ""),
+        "work_authorization": profile.get("work_authorization", {}),
+        "compensation": profile.get("compensation", {}),
+        "availability": profile.get("availability", {}),
+        "eeo_voluntary": profile.get("eeo_voluntary", {}),
+        "resume_facts": resume_facts,
+        "tailoring_config": profile.get("tailoring_config", {}),
+        "files": profile.get("files", {}),
+        "render": {"theme": DEFAULT_RENDER_THEME},
+    }
+
+    return {
+        "basics": basics,
+        "work": work,
+        "education": canonical_education,
+        "skills": canonical_skills,
+        "projects": projects,
+        "meta": {
+            "canonical": "https://jsonresume.org/schema",
+            "version": "v1.0.0",
+            "applypilot": applypilot_meta,
+        },
+    }
+
+
+def _create_resume_json_scaffold() -> dict:
+    console.print(Panel(
+        "[bold]Step 1: Canonical Resume[/bold]\nCreate a starter [cyan]resume.json[/cyan] that follows JSON Resume."
+    ))
+    name = Prompt.ask("Full name")
+    email = Prompt.ask("Email address")
+    label = Prompt.ask("Professional title", default="")
+    phone = Prompt.ask("Phone number", default="")
+    city = Prompt.ask("City", default="")
+    country = Prompt.ask("Country / country code", default="")
+    return {
+        "basics": {
+            "name": name,
+            "label": label,
+            "email": email,
+            "phone": phone,
+            "summary": "",
+            "location": {
+                "city": city,
+                "countryCode": country,
+            },
+            "profiles": [],
+        },
+        "work": [],
+        "education": [],
+        "skills": [],
+        "projects": [],
+        "meta": {
+            "canonical": "https://jsonresume.org/schema",
+            "version": "v1.0.0",
+            "applypilot": {
+                "render": {"theme": DEFAULT_RENDER_THEME},
+            },
+        },
+    }
+
+
+def _prompt_missing_applypilot_fields(resume_data: dict) -> dict:
+    console.print(
+        Panel(
+            "[bold]Step 2: ApplyPilot Metadata[/bold]\n"
+            "Fill any missing ApplyPilot-specific fields. Standard resume content stays in resume.json."
+        )
+    )
+
+    basics = resume_data.setdefault("basics", {})
+    location = basics.setdefault("location", {})
+    meta = resume_data.setdefault("meta", {})
+    applypilot = meta.setdefault("applypilot", {})
+    personal = applypilot.setdefault("personal", {})
+    work_auth = applypilot.setdefault("work_authorization", {})
+    compensation = applypilot.setdefault("compensation", {})
+    availability = applypilot.setdefault("availability", {})
+    eeo = applypilot.setdefault("eeo_voluntary", {})
+    resume_facts = applypilot.setdefault("resume_facts", {})
+    applypilot.setdefault("files", {})
+
+    if not basics.get("name"):
+        basics["name"] = Prompt.ask("Full name")
+    if not basics.get("email"):
+        basics["email"] = Prompt.ask("Email address")
+    basics["phone"] = basics.get("phone") or Prompt.ask("Phone number", default="")
+    location["city"] = location.get("city") or Prompt.ask("City", default="")
+    if not location.get("countryCode") and not personal.get("country"):
+        location["countryCode"] = Prompt.ask("Country / country code", default="")
+
+    if not personal.get("linkedin_url"):
+        personal["linkedin_url"] = Prompt.ask("LinkedIn URL", default="")
+    if not personal.get("github_url"):
+        personal["github_url"] = Prompt.ask("GitHub URL", default="")
+
+    if "legally_authorized_to_work" not in work_auth and "legally_authorized" not in work_auth:
+        value = Confirm.ask("Are you legally authorized to work in your target country?")
+        work_auth["legally_authorized_to_work"] = value
+        work_auth["legally_authorized"] = value
+    if "require_sponsorship" not in work_auth and "needs_sponsorship" not in work_auth:
+        value = Confirm.ask("Will you now or in the future need sponsorship?")
+        work_auth["require_sponsorship"] = value
+        work_auth["needs_sponsorship"] = value
+    work_auth.setdefault("work_permit_type", "")
+
+    salary = str(compensation.get("salary_expectation", "")).strip()
+    if not salary:
+        salary = Prompt.ask("Expected annual salary (number)", default="")
+    salary_currency = str(compensation.get("salary_currency", "")).strip() or Prompt.ask("Currency", default="USD")
+    salary_range = (
+        f"{compensation.get('salary_range_min', '')}-{compensation.get('salary_range_max', '')}".strip("-")
+        if compensation.get("salary_range_min") or compensation.get("salary_range_max")
+        else Prompt.ask("Acceptable range (e.g. 80000-120000)", default="")
+    )
+    clean_salary = re.sub(r"[$,\s]", "", salary)
+    clean_range = re.sub(r"[$,\s]", "", salary_range)
+    range_parts = clean_range.split("-") if "-" in clean_range else [clean_salary, clean_salary]
+    compensation["salary_expectation"] = salary
+    compensation["salary_currency"] = salary_currency or "USD"
+    compensation["salary_range_min"] = range_parts[0].strip() if range_parts and range_parts[0] else ""
+    compensation["salary_range_max"] = range_parts[1].strip() if len(range_parts) > 1 else compensation["salary_range_min"]
+    compensation.setdefault("currency_conversion_note", "")
+
+    if not applypilot.get("years_of_experience_total"):
+        derived_profile = normalize_profile_from_resume_json(resume_data)
+        derived_years = derived_profile.get("experience", {}).get("years_of_experience_total", "")
+        if derived_years:
+            applypilot["years_of_experience_total"] = derived_years
+        else:
+            applypilot["years_of_experience_total"] = Prompt.ask("Years of professional experience", default="")
+    if not applypilot.get("target_role"):
+        default_role = basics.get("label", "")
+        applypilot["target_role"] = Prompt.ask("Target role", default=default_role)
+
+    if "earliest_start_date" not in availability or availability.get("earliest_start_date") in (None, ""):
+        availability["earliest_start_date"] = Prompt.ask("Earliest start date", default="Immediately")
+    availability.setdefault("available_for_full_time", "Yes")
+    availability.setdefault("available_for_contract", "No")
+
+    eeo.setdefault("gender", "Decline to self-identify")
+    eeo.setdefault("race_ethnicity", "Decline to self-identify")
+    eeo.setdefault("ethnicity", eeo["race_ethnicity"])
+    eeo.setdefault("veteran_status", "Decline to self-identify")
+    eeo.setdefault("disability_status", "Decline to self-identify")
+
+    resume_facts.setdefault("preserved_companies", [])
+    resume_facts.setdefault("preserved_projects", [])
+    resume_facts.setdefault("preserved_school", "")
+    resume_facts.setdefault("real_metrics", [])
+
+    if "tailoring_config" not in applypilot or not isinstance(applypilot.get("tailoring_config"), dict):
+        applypilot["tailoring_config"] = _setup_tailoring_config(str(applypilot.get("target_role", "")))
+
+    applypilot.setdefault("render", {"theme": DEFAULT_RENDER_THEME})
+    return resume_data
+
+
+def _setup_canonical_resume(resume_json: Path | None = None) -> tuple[dict, dict] | None:
+    if RESUME_JSON_PATH.exists() and resume_json is None:
+        console.print(f"[green]Using existing canonical resume:[/green] {RESUME_JSON_PATH}")
+        data = load_resume_json_from_path(RESUME_JSON_PATH)
+        data = _prompt_missing_applypilot_fields(data)
+        _write_resume_json(data)
+        return data, normalize_profile_from_resume_json(data)
+
+    if resume_json is not None:
+        data = _copy_resume_json(resume_json)
+        data = _prompt_missing_applypilot_fields(data)
+        _write_resume_json(data)
+        return data, normalize_profile_from_resume_json(data)
+
+    console.print(Panel(
+        "[bold]Step 1: Resume Source[/bold]\n"
+        "Choose how to create your canonical [cyan]resume.json[/cyan]."
+    ))
+    choice = Prompt.ask(
+        "Resume setup mode",
+        choices=["import", "migrate", "scaffold", "legacy"],
+        default="import" if PROFILE_PATH.exists() or RESUME_PATH.exists() else "scaffold",
+    )
+
+    if choice == "legacy":
+        return None
+    if choice == "import":
+        path_str = Prompt.ask("Path to JSON Resume file")
+        data = _copy_resume_json(Path(path_str.strip().strip('"').strip("'")).expanduser().resolve())
+    elif choice == "migrate":
+        if not PROFILE_PATH.exists():
+            console.print("[yellow]Legacy profile.json not found. Falling back to scaffold.[/yellow]")
+            data = _create_resume_json_scaffold()
+        else:
+            profile = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+            resume_text = RESUME_PATH.read_text(encoding="utf-8") if RESUME_PATH.exists() else ""
+            data = _legacy_profile_to_resume_json(profile, resume_text)
+        _write_resume_json(data)
+        console.print(f"[green]Migrated legacy profile into {RESUME_JSON_PATH}[/green]")
+    else:
+        data = _create_resume_json_scaffold()
+        _write_resume_json(data)
+        console.print(f"[green]Created scaffold at {RESUME_JSON_PATH}[/green]")
+
+    data = load_resume_json_from_path(RESUME_JSON_PATH)
+    data = _prompt_missing_applypilot_fields(data)
+    _write_resume_json(data)
+    return data, normalize_profile_from_resume_json(data)
 
 
 # ---------------------------------------------------------------------------
@@ -495,8 +849,8 @@ _OPTIONAL_FILE_KEYS = [
 ]
 
 
-def _setup_optional_files(profile: dict) -> None:
-    """Optionally copy documents into ~/.applypilot/files/ and record paths in profile."""
+def _setup_optional_files(profile: dict, canonical_resume: dict | None = None) -> None:
+    """Optionally copy documents into ~/.applypilot/files/ and record paths in profile or resume.json."""
     console.print(Panel(
         "[bold]Step 6: Optional Documents (skip if not needed)[/bold]\n"
         "Profile photo, ID, passport, certificates — some applications ask for these.\n"
@@ -504,7 +858,7 @@ def _setup_optional_files(profile: dict) -> None:
     ))
 
     if not Confirm.ask("Do you have any optional documents to add?", default=False):
-        console.print("[dim]Skipped. Add files to ~/.applypilot/files/ and update profile.json later.[/dim]")
+        console.print("[dim]Skipped. Add files to ~/.applypilot/files/ and update your canonical profile metadata later.[/dim]")
         return
 
     files: dict[str, str] = profile.get("files", {})
@@ -547,15 +901,22 @@ def _setup_optional_files(profile: dict) -> None:
 
     if files:
         profile["files"] = files
-        PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
-        console.print("[green]Document paths saved to profile.json[/green]")
+        if canonical_resume is not None:
+            meta = canonical_resume.setdefault("meta", {})
+            applypilot = meta.setdefault("applypilot", {})
+            applypilot["files"] = files
+            _write_resume_json(canonical_resume)
+            console.print("[green]Document paths saved to resume.json[/green]")
+        else:
+            PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
+            console.print("[green]Document paths saved to profile.json[/green]")
 
 
 # ---------------------------------------------------------------------------
 # Main entry
 # ---------------------------------------------------------------------------
 
-def run_wizard() -> None:
+def run_wizard(resume_json: Path | None = None) -> None:
     """Run the full interactive setup wizard."""
     console.print()
     console.print(
@@ -571,13 +932,20 @@ def run_wizard() -> None:
     ensure_dirs()
     console.print(f"[dim]Created {APP_DIR}[/dim]\n")
 
-    # Step 1: Resume
-    _setup_resume()
-    console.print()
+    canonical_result = _setup_canonical_resume(resume_json=resume_json)
+    if canonical_result is None:
+        # Step 1: Resume
+        _setup_resume()
+        console.print()
 
-    # Step 2: Profile
-    profile = _setup_profile()
-    console.print()
+        # Step 2: Profile
+        profile = _setup_profile()
+        console.print()
+        canonical_resume = None
+    else:
+        canonical_resume, profile = canonical_result
+        console.print(f"[green]Canonical resume ready:[/green] {RESUME_JSON_PATH}")
+        console.print()
 
     # Step 3: Search config
     _setup_searches()
@@ -592,7 +960,7 @@ def run_wizard() -> None:
     console.print()
 
     # Step 6: Optional documents (profile photo, ID, certs)
-    _setup_optional_files(profile)
+    _setup_optional_files(profile, canonical_resume=canonical_resume)
     console.print()
 
     # Done — show tier status

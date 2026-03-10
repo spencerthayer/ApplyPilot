@@ -14,7 +14,8 @@ from rich.table import Table
 
 from applypilot import __version__
 from applypilot.cli_greenhouse import app as greenhouse_app
-from applypilot.config import RESUME_PATH
+from applypilot.config import RESUME_JSON_PATH, get_resume_source, load_resume_text
+from applypilot.resume_json import ResumeJsonError
 
 
 def _configure_logging() -> None:
@@ -66,7 +67,9 @@ app = typer.Typer(
     help="AI-powered end-to-end job application pipeline.",
     no_args_is_help=True,
 )
+resume_app = typer.Typer(help="Manage the canonical JSON Resume artifact.")
 app.add_typer(greenhouse_app, name="greenhouse")
+app.add_typer(resume_app, name="resume")
 console = Console()
 log = logging.getLogger(__name__)
 
@@ -187,11 +190,17 @@ def main(
 
 
 @app.command()
-def init() -> None:
+def init(
+    resume_json: Optional[Path] = typer.Option(
+        None,
+        "--resume-json",
+        help="Import an existing JSON Resume file during setup.",
+    ),
+) -> None:
     """Run the first-time setup wizard (profile, resume, search config)."""
     from applypilot.wizard.init import run_wizard
 
-    run_wizard()
+    run_wizard(resume_json=resume_json)
 
 
 @app.command()
@@ -456,10 +465,17 @@ def analyze(
         "company_context": job_intel.company_context,
     }
 
-    resume_path = resume_file or RESUME_PATH
-    if resume_path.exists():
+    try:
+        resume_text = load_resume_text(resume_file)
+    except FileNotFoundError:
+        resume_text = None
+    except ResumeJsonError as exc:
+        console.print(f"[red]Resume load failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if resume_text is not None:
         matcher = ResumeMatcher()
-        match = matcher.analyze(resume_path.read_text(encoding="utf-8"), job_intel)
+        match = matcher.analyze(resume_text, job_intel)
         analysis_output["match"] = {
             "overall_score": match.overall_score,
             "strengths": match.strengths,
@@ -469,6 +485,39 @@ def analyze(
         }
 
     console.print_json(json.dumps(analysis_output))
+
+
+@resume_app.command("render")
+def render_resume(
+    theme: Optional[str] = typer.Option(None, "--theme", help="Theme package name, e.g. jsonresume-theme-even."),
+    format: str = typer.Option("html", "--format", help="Output format: html or pdf."),
+    output: Optional[Path] = typer.Option(None, "--output", help="Optional output path."),
+) -> None:
+    """Render the canonical resume.json with a JSON Resume theme."""
+    _bootstrap()
+
+    if format not in {"html", "pdf"}:
+        console.print("[red]Invalid --format value.[/red] Choose 'html' or 'pdf'.")
+        raise typer.Exit(code=1)
+
+    if not RESUME_JSON_PATH.exists():
+        console.print(f"[red]Canonical resume not found:[/red] {RESUME_JSON_PATH}")
+        raise typer.Exit(code=1)
+
+    from applypilot.resume_render import render_resume_html, render_resume_pdf
+
+    try:
+        if format == "html":
+            rendered_path, resolved_theme = render_resume_html(theme=theme, output_path=output)
+        else:
+            rendered_path, resolved_theme = render_resume_pdf(theme=theme, output_path=output)
+    except Exception as exc:
+        console.print(f"[red]Resume render failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"[green]Rendered {format.upper()}[/green] using [bold]{resolved_theme}[/bold] -> {rendered_path}"
+    )
 
 
 @app.command()
@@ -552,12 +601,13 @@ def doctor() -> None:
     """Check your setup and diagnose missing requirements."""
     import shutil
     from applypilot.config import (
-        load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
+        load_env, PROFILE_PATH, RESUME_JSON_PATH, RESUME_PATH, RESUME_PDF_PATH,
         SEARCH_CONFIG_PATH, get_auto_apply_agent_setting,
         get_auto_apply_agent_statuses, get_chrome_path,
         resolve_auto_apply_agent,
     )
     from applypilot.llm_provider import format_llm_provider_status, llm_config_hint
+    from applypilot.resume_render import LOCAL_RESUMED
 
     load_env()
 
@@ -568,19 +618,28 @@ def doctor() -> None:
     results: list[tuple[str, str, str]] = []  # (check, status, note)
 
     # --- Tier 1 checks ---
-    # Profile
-    if PROFILE_PATH.exists():
-        results.append(("profile.json", ok_mark, str(PROFILE_PATH)))
+    resume_source = get_resume_source()
+    if resume_source.mode == "canonical":
+        results.append(("resume.json", ok_mark, str(RESUME_JSON_PATH)))
+        results.append(("Profile source", ok_mark, "canonical resume.json"))
+        if PROFILE_PATH.exists() or RESUME_PATH.exists():
+            results.append(("Legacy resume files", warn_mark, "Ignored because resume.json is present"))
+    elif resume_source.mode == "canonical_invalid":
+        results.append(("resume.json", fail_mark, resume_source.detail))
+        results.append(("Profile source", fail_mark, "Fix resume.json before runtime commands will work"))
     else:
-        results.append(("profile.json", fail_mark, "Run 'applypilot init' to create"))
+        if PROFILE_PATH.exists():
+            results.append(("profile.json", ok_mark, str(PROFILE_PATH)))
+            results.append(("Profile source", warn_mark, "legacy profile.json + resume.txt"))
+        else:
+            results.append(("profile.json", fail_mark, "Run 'applypilot init' to create"))
 
-    # Resume
-    if RESUME_PATH.exists():
-        results.append(("resume.txt", ok_mark, str(RESUME_PATH)))
-    elif RESUME_PDF_PATH.exists():
-        results.append(("resume.txt", warn_mark, "Only PDF found - plain-text needed for AI stages"))
-    else:
-        results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
+        if RESUME_PATH.exists():
+            results.append(("resume.txt", ok_mark, str(RESUME_PATH)))
+        elif RESUME_PDF_PATH.exists():
+            results.append(("resume.txt", warn_mark, "Only PDF found - plain-text needed for AI stages"))
+        else:
+            results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
 
     # Search config
     if SEARCH_CONFIG_PATH.exists():
@@ -650,7 +709,12 @@ def doctor() -> None:
         results.append(("Node.js (npx)", ok_mark, npx_bin))
     else:
         results.append(("Node.js (npx)", fail_mark,
-                        "Install Node.js 18+ from nodejs.org (needed for auto-apply)"))
+                        "Install Node.js 20+ from nodejs.org (needed for auto-apply and resume render)"))
+
+    if LOCAL_RESUMED.exists():
+        results.append(("Resume theme renderer", ok_mark, str(LOCAL_RESUMED)))
+    else:
+        results.append(("Resume theme renderer", warn_mark, "Run `npm install` to enable `applypilot resume render`"))
 
     # CapSolver (optional)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")

@@ -1,8 +1,8 @@
 """Config-driven tailoring configuration module.
 
-Loads and validates tailoring configuration from profile.json, detects role types
-from job titles, loads example resumes, and provides role-specific instructions,
-constraints, and guidelines.
+Loads and validates tailoring configuration from the normalized profile contract,
+detects role types from job titles, loads example resumes, and provides
+role-specific instructions, constraints, and guidelines.
 
 All configuration is explicit - no magic folders or implicit behavior.
 """
@@ -11,7 +11,7 @@ import json
 import re
 from pathlib import Path
 
-from applypilot.config import PROFILE_PATH
+from applypilot.config import PROFILE_PATH, load_profile
 
 
 # Default configuration values
@@ -35,24 +35,10 @@ def load_tailoring_config(profile: dict | None = None) -> dict:
         FileNotFoundError: If profile file doesn't exist and profile not provided.
     """
     if profile is None:
-        if not PROFILE_PATH.exists():
-            raise FileNotFoundError(f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first.")
-
-        # Defensive file I/O: handle file read errors and malformed JSON
         try:
-            raw = PROFILE_PATH.read_text(encoding="utf-8")
-        except OSError as exc:  # covers FileNotFoundError, PermissionError, etc.
-            raise OSError(f"Failed to read profile at {PROFILE_PATH}: {exc}") from exc
-
-        try:
-            profile = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            # Provide helpful guidance when JSON is malformed
-            raise json.JSONDecodeError(
-                f"Malformed profile JSON at {PROFILE_PATH}: {exc.msg}",
-                exc.doc,
-                exc.pos,
-            ) from exc
+            profile = load_profile()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first.") from None
 
     # profile may be None for static analyzers; guard defensively
     return (profile or {}).get("tailoring_config", {})

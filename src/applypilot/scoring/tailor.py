@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
+from applypilot.config import TAILORED_DIR, load_profile, load_resume_text
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
@@ -528,10 +528,11 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
         {"approved": int, "failed": int, "errors": int, "elapsed": float}
     """
     profile = load_profile()
-    if not RESUME_PATH.exists():
-        log.error("Resume file not found: %s. Run 'applypilot init' first.", RESUME_PATH)
+    try:
+        resume_text = load_resume_text()
+    except FileNotFoundError:
+        log.error("Resume file not found. Run 'applypilot init' first.")
         return {"approved": 0, "failed": 0, "errors": 0, "elapsed": 0.0}
-    resume_text = RESUME_PATH.read_text(encoding="utf-8")
     conn = get_connection()
 
     jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=limit)
