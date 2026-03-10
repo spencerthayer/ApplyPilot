@@ -151,6 +151,16 @@ def load_blocked_sso() -> list[str]:
     return cfg.get("blocked_sso", [])
 
 
+def load_no_signup_domains() -> list[str]:
+    """Load no-signup domains from sites.yaml.
+
+    These are major job boards / ATS platforms where the agent must
+    NEVER create accounts (ban risk, pointless, or session-based).
+    """
+    cfg = load_sites_config()
+    return cfg.get("no_signup_domains", [])
+
+
 def load_base_urls() -> dict[str, str | None]:
     """Load site base URLs for URL resolution from sites.yaml."""
     cfg = load_sites_config()

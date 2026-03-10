@@ -9,6 +9,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urljoin
 
 from applypilot.config import DB_PATH
 
@@ -44,7 +45,7 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
 
     conn = sqlite3.connect(path, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     _local.connections[path] = conn
     return conn
@@ -99,6 +100,9 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             strategy              TEXT,
             discovered_at         TEXT,
 
+            -- Company (extracted from application_url domain)
+            company               TEXT,
+
             -- Enrichment stage (detail_scraper)
             full_description      TEXT,
             application_url       TEXT,
@@ -132,6 +136,18 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             verification_confidence TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS accounts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            site TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            email TEXT NOT NULL,
+            password TEXT,
+            created_at TEXT NOT NULL,
+            job_url TEXT REFERENCES jobs(url),
+            notes TEXT
+        )
+    """)
     conn.commit()
 
     # Run migrations for any columns added after initial schema
@@ -153,6 +169,8 @@ _ALL_COLUMNS: dict[str, str] = {
     "site": "TEXT",
     "strategy": "TEXT",
     "discovered_at": "TEXT",
+    # Company
+    "company": "TEXT",
     # Enrichment
     "full_description": "TEXT",
     "application_url": "TEXT",
@@ -326,9 +344,136 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     return stats
 
 
+def extract_company(application_url: str | None) -> str | None:
+    """Extract a company name from an application URL domain.
+
+    Handles common ATS patterns:
+      - Workday:     {company}.wd*.myworkdayjobs.com
+      - Greenhouse:  job-boards.greenhouse.io/{company}/...
+      - Lever:       jobs.lever.co/{company}/...
+      - iCIMS:       careers-{company}.icims.com
+      - Jobvite:     jobs.jobvite.com/en/{company}/...
+      - Direct:      careers.{company}.com, {company}.com/careers
+    """
+    if not application_url:
+        return None
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(application_url)
+        host = parsed.hostname or ""
+        path = parsed.path or ""
+
+        # Workday: workiva.wd503.myworkdayjobs.com → workiva
+        if "myworkdayjobs.com" in host:
+            return host.split(".")[0].lower()
+
+        # Greenhouse job boards: job-boards.greenhouse.io/hudl/... → hudl
+        if "greenhouse.io" in host and "/job_boards/" not in path:
+            parts = [p for p in path.split("/") if p]
+            if parts:
+                return parts[0].lower()
+
+        # Lever: jobs.lever.co/LuminDigital/... → lumindigital
+        if "lever.co" in host:
+            parts = [p for p in path.split("/") if p]
+            if parts:
+                return parts[0].lower()
+
+        # iCIMS: careers-mercuryinsurance.icims.com → mercuryinsurance
+        if "icims.com" in host:
+            prefix = host.split(".icims.com")[0]
+            prefix = prefix.replace("careers-", "").replace("careers.", "")
+            return prefix.lower() if prefix else None
+
+        # Jobvite: jobs.jobvite.com/en/company/... → company
+        if "jobvite.com" in host:
+            parts = [p for p in path.split("/") if p and p != "en"]
+            if parts:
+                return parts[0].lower()
+
+        # Oracle Cloud ATS: skip (company not in URL)
+        if "oraclecloud.com" in host:
+            return None
+
+        # Greenhouse short URLs: grnh.se → skip
+        if host == "grnh.se":
+            return None
+
+        # Direct company domains: jobs.twilio.com → twilio
+        # careers.ascensus.com → ascensus
+        # www.kentik.com/careers → kentik
+        # Skip major job boards / ATS platforms
+        skip_domains = {
+            "linkedin.com", "indeed.com", "glassdoor.com", "ziprecruiter.com",
+            "dice.com", "simplyhired.com", "monster.com", "careerjet.ca",
+            "talent.com", "jobbank.gc.ca", "wellfound.com",
+        }
+        if any(host.endswith(d) for d in skip_domains):
+            return None
+
+        # Strip common subdomains
+        parts = host.split(".")
+        if len(parts) >= 2:
+            # jobs.twilio.com → twilio, careers.foo.com → foo, www.foo.com → foo
+            if parts[0] in ("jobs", "careers", "career", "www", "apply", "hire"):
+                company = parts[1]
+            else:
+                # foo.com → foo
+                company = parts[-2]
+            # Skip generic TLDs as company names
+            if company not in ("com", "org", "net", "io", "co", "ca"):
+                return company.lower()
+
+        return None
+    except Exception:
+        return None
+
+
+def backfill_companies(conn: sqlite3.Connection | None = None) -> int:
+    """Populate the company column for all jobs that have an application_url but no company."""
+    if conn is None:
+        conn = get_connection()
+
+    rows = conn.execute(
+        "SELECT url, application_url FROM jobs WHERE company IS NULL AND application_url IS NOT NULL"
+    ).fetchall()
+
+    updated = 0
+    for row in rows:
+        company = extract_company(row[1])
+        if company:
+            conn.execute("UPDATE jobs SET company = ? WHERE url = ?", (company, row[0]))
+            updated += 1
+
+    if updated:
+        conn.commit()
+    return updated
+
+
+def _resolve_url(url: str, site: str) -> str | None:
+    """Resolve a relative URL to absolute using the site's base URL.
+
+    Returns the absolute URL, or None if it can't be resolved.
+    """
+    if not url:
+        return None
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+
+    # Lazy-load base URLs to avoid circular imports
+    from applypilot.config import load_base_urls
+    base = load_base_urls().get(site)
+    if base:
+        return urljoin(base, url)
+    return None
+
+
 def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
                site: str, strategy: str) -> tuple[int, int]:
     """Store discovered jobs, skipping duplicates by URL.
+
+    Relative URLs are resolved to absolute using base_urls from sites.yaml.
+    Jobs with unresolvable relative URLs are skipped.
 
     Args:
         conn: Database connection.
@@ -347,6 +492,13 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
         url = job.get("url")
         if not url:
             continue
+
+        # Normalize relative URLs to absolute
+        url = _resolve_url(url, site) or url
+        # Skip URLs that are still relative (unresolvable)
+        if not url.startswith("http://") and not url.startswith("https://"):
+            continue
+
         try:
             conn.execute(
                 "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at) "
@@ -360,6 +512,52 @@ def store_jobs(conn: sqlite3.Connection, jobs: list[dict],
 
     conn.commit()
     return new, existing
+
+
+def store_account(conn: sqlite3.Connection, account: dict,
+                  job_url: str | None = None) -> None:
+    """Store a newly created account in the accounts table.
+
+    Args:
+        conn: Database connection.
+        account: Dict with keys: site, domain, email, password.
+        job_url: The job URL that triggered this account creation.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO accounts (site, domain, email, password, created_at, job_url, notes) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            account.get("site", "unknown"),
+            account.get("domain", "unknown"),
+            account.get("email", ""),
+            account.get("password", ""),
+            now,
+            job_url,
+            account.get("notes"),
+        ),
+    )
+    conn.commit()
+
+
+def get_accounts_for_prompt(conn: sqlite3.Connection | None = None) -> dict[str, dict]:
+    """Return saved accounts as {domain: {email, password}} for prompt injection.
+
+    Supports subdomain fallback: a query for 'fico.wd1.myworkdayjobs.com'
+    first checks for an exact match, then falls back to 'myworkdayjobs.com'.
+    """
+    if conn is None:
+        conn = get_connection()
+    rows = conn.execute(
+        "SELECT domain, email, password FROM accounts ORDER BY created_at DESC"
+    ).fetchall()
+    # Build lookup: most recent account per domain wins
+    accounts: dict[str, dict] = {}
+    for row in rows:
+        domain = row["domain"]
+        if domain not in accounts:
+            accounts[domain] = {"email": row["email"], "password": row["password"] or ""}
+    return accounts
 
 
 def get_jobs_by_stage(conn: sqlite3.Connection | None = None,

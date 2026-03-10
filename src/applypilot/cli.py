@@ -84,14 +84,38 @@ def run(
         ),
     ),
     min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for tailor/cover stages."),
-    workers: int = typer.Option(1, "--workers", "-w", help="Parallel threads for discovery/enrichment stages."),
+    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max jobs per stage (tailor/cover). Default: 20."),
+    workers: int = typer.Option(
+        1, "--workers", "-w",
+        help="Parallel threads for Workday/smart-extract stages. (JobSpy runs sequentially regardless.)",
+    ),
     stream: bool = typer.Option(False, "--stream", help="Run stages concurrently (streaming mode)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview stages without executing."),
+    source: Optional[list[str]] = typer.Option(
+        None, "--source", "-s",
+        help="Discovery source(s) to run. Repeatable: --source hn --source jobspy. "
+             "Aliases: hn=hackernews, smart=smartextract. Only affects the discover stage.",
+    ),
+    list_sources: bool = typer.Option(
+        False, "--list-sources",
+        help="List available discovery sources and exit.",
+    ),
 ) -> None:
     """Run pipeline stages: discover, enrich, score, tailor, cover, pdf."""
+    # Handle --list-sources before bootstrap (no DB/env needed)
+    if list_sources:
+        from applypilot.pipeline import DISCOVERY_SOURCES, _SOURCE_ALIASES
+        console.print("\n[bold]Available discovery sources:[/bold]\n")
+        for name, desc in DISCOVERY_SOURCES.items():
+            aliases = [a for a, canon in _SOURCE_ALIASES.items() if canon == name]
+            alias_str = f"  (alias: {', '.join(aliases)})" if aliases else ""
+            console.print(f"  [cyan]{name:<14s}[/cyan] {desc}{alias_str}")
+        console.print(f"\nUsage: applypilot run discover --source hn --source jobspy")
+        raise typer.Exit()
+
     _bootstrap()
 
-    from applypilot.pipeline import run_pipeline
+    from applypilot.pipeline import run_pipeline, resolve_source_names
 
     stage_list = stages if stages else ["all"]
 
@@ -104,6 +128,15 @@ def run(
             )
             raise typer.Exit(code=1)
 
+    # Resolve --source aliases
+    resolved_sources: list[str] | None = None
+    if source:
+        try:
+            resolved_sources = resolve_source_names(source)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=1)
+
     # Gate AI stages behind Tier 2
     llm_stages = {"score", "tailor", "cover"}
     if any(s in stage_list for s in llm_stages) or "all" in stage_list:
@@ -113,9 +146,11 @@ def run(
     result = run_pipeline(
         stages=stage_list,
         min_score=min_score,
+        limit=limit,
         dry_run=dry_run,
         stream=stream,
         workers=workers,
+        sources=resolved_sources,
     )
 
     if result.get("errors"):
@@ -134,6 +169,7 @@ def apply(
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
     mark_applied: Optional[str] = typer.Option(None, "--mark-applied", help="Manually mark a job URL as applied."),
+    fresh_sessions: bool = typer.Option(False, "--fresh-sessions", help="Refresh Chrome session cookies from your real profile before launching."),
     mark_failed: Optional[str] = typer.Option(None, "--mark-failed", help="Manually mark a job URL as failed (provide URL)."),
     fail_reason: Optional[str] = typer.Option(None, "--fail-reason", help="Reason for --mark-failed."),
     reset_failed: bool = typer.Option(False, "--reset-failed", help="Reset all failed jobs for retry."),
@@ -220,6 +256,8 @@ def apply(
     console.print(f"  Model:    {model}")
     console.print(f"  Headless: {headless}")
     console.print(f"  Dry run:  {dry_run}")
+    if fresh_sessions:
+        console.print(f"  Sessions: [yellow]refreshing from real Chrome profile[/yellow]")
     if url:
         console.print(f"  Target:   {url}")
     console.print()
@@ -233,6 +271,7 @@ def apply(
         dry_run=dry_run,
         continuous=continuous,
         workers=workers,
+        fresh_sessions=fresh_sessions,
     )
 
 

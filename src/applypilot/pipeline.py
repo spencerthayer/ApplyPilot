@@ -21,11 +21,33 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from applypilot.config import load_env, ensure_dirs
+from applypilot.config import load_env, ensure_dirs, LOG_DIR
 from applypilot.database import init_db, get_connection, get_stats
 
 log = logging.getLogger(__name__)
 console = Console()
+
+
+def _setup_file_logging(stages: list[str]) -> logging.FileHandler | None:
+    """Add a FileHandler to the root logger for this pipeline run.
+
+    Creates a log file named like: 2026-02-20_01-37-00_discover.log
+    Returns the handler so it can be removed after the run.
+    """
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    stage_tag = "+".join(stages) if len(stages) <= 4 else f"{stages[0]}+{len(stages)-1}more"
+    log_path = LOG_DIR / f"{ts}_{stage_tag}.log"
+
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    logging.getLogger().addHandler(handler)
+    log.info("Log file: %s", log_path)
+    return handler
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +57,7 @@ console = Console()
 STAGE_ORDER = ("discover", "enrich", "score", "tailor", "cover", "pdf")
 
 STAGE_META: dict[str, dict] = {
-    "discover": {"desc": "Job discovery (JobSpy + Workday + smart extract)"},
+    "discover": {"desc": "Job discovery (JobSpy + Workday + smart extract + HN)"},
     "enrich":   {"desc": "Detail enrichment (full descriptions + apply URLs)"},
     "score":    {"desc": "LLM scoring (fit 1-10)"},
     "tailor":   {"desc": "Resume tailoring (LLM + validation)"},
@@ -56,45 +78,100 @@ _UPSTREAM: dict[str, str | None] = {
 
 
 # ---------------------------------------------------------------------------
+# Discovery sources
+# ---------------------------------------------------------------------------
+
+# Canonical name → description. Order determines default execution order.
+DISCOVERY_SOURCES: dict[str, str] = {
+    "jobspy":       "JobSpy aggregator (LinkedIn, Indeed, Glassdoor, ZipRecruiter)",
+    "workday":      "Workday corporate career sites",
+    "smartextract": "Smart extract (AI-powered scraping)",
+    "hackernews":   "Hacker News 'Who is Hiring?' thread",
+}
+
+# Alias → canonical name for CLI convenience
+_SOURCE_ALIASES: dict[str, str] = {
+    "hn":    "hackernews",
+    "smart": "smartextract",
+}
+
+
+def resolve_source_names(names: list[str]) -> list[str]:
+    """Resolve source aliases and validate names. Returns canonical names."""
+    resolved = []
+    for name in names:
+        canonical = _SOURCE_ALIASES.get(name, name)
+        if canonical not in DISCOVERY_SOURCES:
+            valid = sorted(set(list(DISCOVERY_SOURCES.keys()) + list(_SOURCE_ALIASES.keys())))
+            raise ValueError(
+                f"Unknown discovery source: '{name}'. "
+                f"Valid sources: {', '.join(valid)}"
+            )
+        if canonical not in resolved:
+            resolved.append(canonical)
+    return resolved
+
+
+# ---------------------------------------------------------------------------
 # Individual stage runners
 # ---------------------------------------------------------------------------
 
-def _run_discover(workers: int = 1) -> dict:
-    """Stage: Job discovery — JobSpy, Workday, and smart-extract scrapers."""
-    stats: dict = {"jobspy": None, "workday": None, "smartextract": None}
+def _run_discover(workers: int = 1, sources: list[str] | None = None) -> dict:
+    """Stage: Job discovery — JobSpy, Workday, smart-extract, and HN scrapers.
 
-    # JobSpy
-    console.print("  [cyan]JobSpy full crawl...[/cyan]")
-    try:
-        from applypilot.discovery.jobspy import run_discovery
-        run_discovery()
-        stats["jobspy"] = "ok"
-    except Exception as e:
-        log.error("JobSpy crawl failed: %s", e)
-        console.print(f"  [red]JobSpy error:[/red] {e}")
-        stats["jobspy"] = f"error: {e}"
+    Args:
+        workers: Thread count for sources that support parallelism.
+        sources: Canonical source names to run, or None for all.
+    """
+    run_all = sources is None
+    active = list(DISCOVERY_SOURCES.keys()) if run_all else sources
+    stats: dict = {s: None for s in active}
 
-    # Workday corporate scraper
-    console.print("  [cyan]Workday corporate scraper...[/cyan]")
-    try:
-        from applypilot.discovery.workday import run_workday_discovery
-        run_workday_discovery(workers=workers)
-        stats["workday"] = "ok"
-    except Exception as e:
-        log.error("Workday scraper failed: %s", e)
-        console.print(f"  [red]Workday error:[/red] {e}")
-        stats["workday"] = f"error: {e}"
+    if "jobspy" in active:
+        console.print("  [cyan]JobSpy full crawl...[/cyan]")
+        try:
+            from applypilot.discovery.jobspy import run_discovery
+            run_discovery()
+            stats["jobspy"] = "ok"
+        except Exception as e:
+            log.error("JobSpy crawl failed: %s", e)
+            console.print(f"  [red]JobSpy error:[/red] {e}")
+            stats["jobspy"] = f"error: {e}"
 
-    # Smart extract
-    console.print("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
-    try:
-        from applypilot.discovery.smartextract import run_smart_extract
-        run_smart_extract(workers=workers)
-        stats["smartextract"] = "ok"
-    except Exception as e:
-        log.error("Smart extract failed: %s", e)
-        console.print(f"  [red]Smart extract error:[/red] {e}")
-        stats["smartextract"] = f"error: {e}"
+    if "workday" in active:
+        console.print("  [cyan]Workday corporate scraper...[/cyan]")
+        try:
+            from applypilot.discovery.workday import run_workday_discovery
+            run_workday_discovery(workers=workers)
+            stats["workday"] = "ok"
+        except Exception as e:
+            log.error("Workday scraper failed: %s", e)
+            console.print(f"  [red]Workday error:[/red] {e}")
+            stats["workday"] = f"error: {e}"
+
+    if "smartextract" in active:
+        console.print("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
+        try:
+            from applypilot.discovery.smartextract import run_smart_extract
+            run_smart_extract(workers=workers)
+            stats["smartextract"] = "ok"
+        except Exception as e:
+            log.error("Smart extract failed: %s", e)
+            console.print(f"  [red]Smart extract error:[/red] {e}")
+            stats["smartextract"] = f"error: {e}"
+
+    if "hackernews" in active:
+        console.print("  [cyan]Hacker News 'Who is Hiring?' thread...[/cyan]")
+        try:
+            from applypilot.discovery.hackernews import run_hn_discovery
+            hn_result = run_hn_discovery()
+            new = hn_result.get("new", 0)
+            console.print(f"  [dim]HN: {new} new jobs from '{hn_result.get('thread_title', '?')}'[/dim]")
+            stats["hackernews"] = "ok"
+        except Exception as e:
+            log.error("HN discovery failed: %s", e)
+            console.print(f"  [red]HN error:[/red] {e}")
+            stats["hackernews"] = f"error: {e}"
 
     return stats
 
@@ -121,22 +198,22 @@ def _run_score() -> dict:
         return {"status": f"error: {e}"}
 
 
-def _run_tailor(min_score: int = 7) -> dict:
+def _run_tailor(min_score: int = 7, limit: int = 20) -> dict:
     """Stage: Resume tailoring — generate tailored resumes for high-fit jobs."""
     try:
         from applypilot.scoring.tailor import run_tailoring
-        run_tailoring(min_score=min_score)
+        run_tailoring(min_score=min_score, limit=limit)
         return {"status": "ok"}
     except Exception as e:
         log.error("Tailoring failed: %s", e)
         return {"status": f"error: {e}"}
 
 
-def _run_cover(min_score: int = 7) -> dict:
+def _run_cover(min_score: int = 7, limit: int = 20) -> dict:
     """Stage: Cover letter generation."""
     try:
         from applypilot.scoring.cover_letter import run_cover_letters
-        run_cover_letters(min_score=min_score)
+        run_cover_letters(min_score=min_score, limit=limit)
         return {"status": "ok"}
     except Exception as e:
         log.error("Cover letter generation failed: %s", e)
@@ -260,7 +337,9 @@ def _run_stage_streaming(
     tracker: _StageTracker,
     stop_event: threading.Event,
     min_score: int = 7,
+    limit: int = 20,
     workers: int = 1,
+    sources: list[str] | None = None,
 ) -> None:
     """Run a single stage in streaming mode: loop until upstream done + no work.
 
@@ -272,8 +351,11 @@ def _run_stage_streaming(
     kwargs: dict = {}
     if stage in ("tailor", "cover"):
         kwargs["min_score"] = min_score
+        kwargs["limit"] = limit
     if stage in ("discover", "enrich"):
         kwargs["workers"] = workers
+    if stage == "discover" and sources is not None:
+        kwargs["sources"] = sources
 
     upstream = _UPSTREAM[stage]
 
@@ -321,7 +403,13 @@ def _run_stage_streaming(
 # Pipeline orchestrators
 # ---------------------------------------------------------------------------
 
-def _run_sequential(ordered: list[str], min_score: int, workers: int = 1) -> dict:
+def _run_sequential(
+    ordered: list[str],
+    min_score: int,
+    limit: int = 20,
+    workers: int = 1,
+    sources: list[str] | None = None,
+) -> dict:
     """Execute stages one at a time (original behavior)."""
     results: list[dict] = []
     errors: dict[str, str] = {}
@@ -341,8 +429,11 @@ def _run_sequential(ordered: list[str], min_score: int, workers: int = 1) -> dic
             kwargs: dict = {}
             if name in ("tailor", "cover"):
                 kwargs["min_score"] = min_score
+                kwargs["limit"] = limit
             if name in ("discover", "enrich"):
                 kwargs["workers"] = workers
+            if name == "discover" and sources is not None:
+                kwargs["sources"] = sources
             result = runner(**kwargs)
             elapsed = time.time() - t0
 
@@ -373,7 +464,7 @@ def _run_sequential(ordered: list[str], min_score: int, workers: int = 1) -> dic
     return {"stages": results, "errors": errors, "elapsed": total_elapsed}
 
 
-def _run_streaming(ordered: list[str], min_score: int, workers: int = 1) -> dict:
+def _run_streaming(ordered: list[str], min_score: int, limit: int = 20, workers: int = 1, sources: list[str] | None = None) -> dict:
     """Execute stages concurrently with DB as conveyor belt."""
     tracker = _StageTracker()
     stop_event = threading.Event()
@@ -395,7 +486,7 @@ def _run_streaming(ordered: list[str], min_score: int, workers: int = 1) -> dict
         start_times[name] = time.time()
         t = threading.Thread(
             target=_run_stage_streaming,
-            args=(name, tracker, stop_event, min_score, workers),
+            args=(name, tracker, stop_event, min_score, limit, workers, sources),
             name=f"stage-{name}",
             daemon=True,
         )
@@ -439,18 +530,22 @@ def _run_streaming(ordered: list[str], min_score: int, workers: int = 1) -> dict
 def run_pipeline(
     stages: list[str] | None = None,
     min_score: int = 7,
+    limit: int | None = None,
     dry_run: bool = False,
     stream: bool = False,
     workers: int = 1,
+    sources: list[str] | None = None,
 ) -> dict:
     """Run pipeline stages.
 
     Args:
         stages: List of stage names, or None / ["all"] for full pipeline.
         min_score: Minimum fit score for tailor/cover stages.
+        limit: Max jobs per batch for tailor/cover stages. Default: 20.
         dry_run: If True, preview stages without executing.
         stream: If True, run stages concurrently (streaming mode).
         workers: Number of parallel threads for discovery/enrichment stages.
+        sources: Discovery source names to run, or None for all.
 
     Returns:
         Dict with keys: stages (list of result dicts), errors (dict), elapsed (float).
@@ -464,6 +559,7 @@ def run_pipeline(
     if stages is None:
         stages = ["all"]
     ordered = _resolve_stages(stages)
+    effective_limit = limit if limit is not None else 20
 
     # Banner
     mode = "streaming" if stream else "sequential"
@@ -473,8 +569,11 @@ def run_pipeline(
         border_style="blue",
     ))
     console.print(f"  Min score: {min_score}")
+    console.print(f"  Limit:     {effective_limit} jobs/batch")
     console.print(f"  Workers:   {workers}")
     console.print(f"  Stages:    {' -> '.join(ordered)}")
+    if sources:
+        console.print(f"  Sources:   {', '.join(sources)}")
 
     # Pre-run stats
     pre_stats = get_stats()
@@ -488,11 +587,20 @@ def run_pipeline(
         console.print(f"\n  No changes made.")
         return {"stages": [], "errors": {}, "elapsed": 0.0}
 
+    # Set up per-run file logging
+    file_handler = _setup_file_logging(ordered)
+
     # Execute
-    if stream:
-        result = _run_streaming(ordered, min_score, workers=workers)
-    else:
-        result = _run_sequential(ordered, min_score, workers=workers)
+    try:
+        if stream:
+            result = _run_streaming(ordered, min_score, limit=effective_limit, workers=workers, sources=sources)
+        else:
+            result = _run_sequential(ordered, min_score, limit=effective_limit, workers=workers, sources=sources)
+    finally:
+        # Always remove file handler, even on crash
+        if file_handler:
+            logging.getLogger().removeHandler(file_handler)
+            file_handler.close()
 
     # Summary table
     console.print(f"\n{'=' * 70}")
@@ -526,6 +634,10 @@ def run_pipeline(
     console.print(f"    Cover letters:  {final['with_cover_letter']}")
     console.print(f"    Ready to apply: {final['ready_to_apply']}")
     console.print(f"    Applied:        {final['applied']}")
-    console.print(f"{'=' * 70}\n")
+    console.print(f"{'=' * 70}")
+
+    if file_handler:
+        console.print(f"  [dim]Log saved: {file_handler.baseFilename}[/dim]")
+    console.print()
 
     return result
