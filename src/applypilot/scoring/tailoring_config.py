@@ -7,7 +7,6 @@ role-specific instructions, constraints, and guidelines.
 All configuration is explicit - no magic folders or implicit behavior.
 """
 
-import json
 import re
 from pathlib import Path
 
