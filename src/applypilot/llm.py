@@ -46,8 +46,6 @@ _PROVIDER_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "anthropic": "https://api.anthropic.com/v1",
 }
-
-
 @dataclass(frozen=True)
 class LLMConfig:
     """LLM configuration consumed by LLMClient."""
@@ -273,8 +271,6 @@ class LLMClient:
             if content:
                 parts.append(content)
         return "".join(parts).strip()
-
-
 _instance: LLMClient | None = None
 
 

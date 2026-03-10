@@ -50,7 +50,7 @@ applypilot apply --dry-run  # fill forms without submitting
 Runs all 6 stages, from job discovery to autonomous application submission. This is the full power of ApplyPilot.
 
 ### Discovery + Tailoring Only
-**Requires:** Python 3.11+, Gemini API key (free)
+**Requires:** Python 3.11+, an LLM key (Gemini/OpenAI/Claude) or `LLM_URL`
 
 Runs stages 1-5: discovers jobs, scores them, tailors your resume, generates cover letters. You submit applications manually with the AI-prepared materials.
 
@@ -101,6 +101,12 @@ Each stage is independent. Run them all or pick what you need.
 | Component | What It Does |
 |-----------|-------------|
 | CapSolver API key | Solves CAPTCHAs during auto-apply (hCaptcha, reCAPTCHA, Turnstile, FunCaptcha). Without it, CAPTCHA-blocked applications just fail gracefully |
+
+### Gemini Smoke Check (optional)
+
+```bash
+GEMINI_API_KEY=your_key_here pytest -m smoke -q tests/test_gemini_smoke.py
+```
 
 > **Note:** python-jobspy is installed separately with `--no-deps` because it pins an exact numpy version in its metadata that conflicts with pip's resolver. It works fine with modern numpy at runtime.
 

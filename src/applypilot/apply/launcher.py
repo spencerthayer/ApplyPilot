@@ -188,7 +188,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 params.extend(blocked_sites)
             url_clauses = ""
             if blocked_patterns:
-                url_clauses = " ".join(f"AND url NOT LIKE ?" for _ in blocked_patterns)
+                url_clauses = " ".join("AND url NOT LIKE ?" for _ in blocked_patterns)
                 params.extend(blocked_patterns)
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
