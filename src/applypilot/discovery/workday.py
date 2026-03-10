@@ -21,7 +21,7 @@ import yaml
 
 from applypilot import config
 from applypilot.config import CONFIG_DIR
-from applypilot.database import get_connection, init_db
+from applypilot.database import commit_with_retry, get_connection, init_db
 
 log = logging.getLogger(__name__)
 
@@ -336,7 +336,7 @@ def store_results(conn: sqlite3.Connection, jobs: list[dict], employers: dict) -
         except sqlite3.IntegrityError:
             existing += 1
 
-    conn.commit()
+    commit_with_retry(conn)
     return new, existing
 
 

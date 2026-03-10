@@ -12,6 +12,7 @@ import atexit
 import logging
 import os
 import threading
+import time
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ log = logging.getLogger(__name__)
 _MAX_RETRIES = 5
 _TIMEOUT = 120
 _DEFAULT_MAX_TOKENS = 4096
+_EXHAUSTION_COOLDOWN_SECONDS = 300
 _STREAMING_TRUE_VALUES = {"1", "true", "yes"}
 _PROVIDER_API_KEYS = {
     "gemini": "GEMINI_API_KEY",
@@ -58,6 +60,16 @@ class LLMConfig:
     api_key: str
     base_url: str | None = None
     use_streaming: bool = False
+
+
+@dataclass(frozen=True)
+class ModelEntry:
+    """A fallback-capable model target."""
+
+    name: str
+    provider: str
+    base_url: str
+    api_key: str
 
 
 class ChatMessage(TypedDict):
@@ -98,6 +110,74 @@ def _provider_from_model(model: str) -> str:
     return provider
 
 
+def _raw_model_name(model: str) -> str:
+    _, sep, remainder = model.partition("/")
+    return remainder if sep else model
+
+
+def _build_fallback_chain(primary_model: str, quality: bool = False) -> list[ModelEntry]:
+    """Build a best-effort fallback chain using configured provider keys."""
+
+    primary_name = _raw_model_name(primary_model)
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+
+    gemini_models = (
+        ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
+        if quality
+        else ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
+    )
+    openai_models = ["gpt-4.1-mini", "gpt-4.1-nano"] if quality else ["gpt-4.1-nano", "gpt-4.1-mini"]
+    anthropic_models = (
+        ["claude-sonnet-4-5-20250514", "claude-haiku-4-5-20251001"]
+        if quality
+        else ["claude-haiku-4-5-20251001"]
+    )
+    deepseek_models = ["deepseek-chat"]
+
+    chain: list[ModelEntry] = []
+
+    def _append(models: list[str], provider: str, api_key: str, base_url: str) -> None:
+        for model_name in models:
+            chain.append(ModelEntry(model_name, provider, base_url, api_key))
+
+    if gemini_key:
+        if primary_name in gemini_models:
+            start = gemini_models.index(primary_name)
+            _append(gemini_models[start:], "gemini", gemini_key, _PROVIDER_BASE_URLS["gemini"])
+            _append(gemini_models[:start], "gemini", gemini_key, _PROVIDER_BASE_URLS["gemini"])
+        else:
+            chain.append(ModelEntry(primary_name, "gemini", _PROVIDER_BASE_URLS["gemini"], gemini_key))
+            _append([name for name in gemini_models if name != primary_name], "gemini", gemini_key, _PROVIDER_BASE_URLS["gemini"])
+
+    if openai_key:
+        _append(openai_models, "openai", openai_key, _PROVIDER_BASE_URLS["openai"])
+
+    if deepseek_key:
+        _append(deepseek_models, "deepseek", deepseek_key, "https://api.deepseek.com/v1")
+
+    if anthropic_key:
+        _append(anthropic_models, "anthropic", anthropic_key, _PROVIDER_BASE_URLS["anthropic"])
+
+    if not chain:
+        raise RuntimeError(
+            "No LLM provider configured. "
+            "Set GEMINI_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, or ANTHROPIC_API_KEY."
+        )
+
+    deduped: list[ModelEntry] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in chain:
+        key = (entry.provider, entry.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
+
+
 def _detect_provider() -> tuple[str, str, str]:
     """Return the canonical provider tuple expected by main-branch callers."""
 
@@ -107,12 +187,14 @@ def _detect_provider() -> tuple[str, str, str]:
     raise RuntimeError(f"No LLM provider configured. {llm_config_hint()}")
 
 
-def resolve_llm_config(env: Mapping[str, str] | None = None) -> LLMConfig:
+def resolve_llm_config(env: Mapping[str, str] | None = None, quality: bool = False) -> LLMConfig:
     """Resolve runtime LLM configuration while preserving main's provider contract."""
 
     env_map = os.environ if env is None else env
     selection = detect_llm_provider(env_map)
-    configured_model = _env_get(env_map, "LLM_MODEL")
+    configured_model = _env_get(env_map, "LLM_MODEL_QUALITY") if quality else ""
+    if not configured_model:
+        configured_model = _env_get(env_map, "LLM_MODEL")
     local_url = _env_get(env_map, "LLM_URL").rstrip("/")
     use_streaming = _env_get(env_map, "LLM_STREAMING_MODE").lower() in _STREAMING_TRUE_VALUES
 
@@ -157,19 +239,30 @@ def resolve_llm_config(env: Mapping[str, str] | None = None) -> LLMConfig:
 class LLMClient:
     """Thin wrapper around LiteLLM completion()."""
 
-    def __init__(self, config_or_base_url: LLMConfig | str, model: str | None = None, api_key: str | None = None) -> None:
-        if isinstance(config_or_base_url, LLMConfig):
-            self.config = config_or_base_url
+    def __init__(
+        self,
+        config_or_base_url: LLMConfig | str | None = None,
+        model: str | None = None,
+        api_key: str | None = None,
+        quality: bool = False,
+        *,
+        base_url: str | None = None,
+    ) -> None:
+        config_source = base_url if base_url is not None else config_or_base_url
+        if isinstance(config_source, LLMConfig):
+            self.config = config_source
         else:
-            base_url = config_or_base_url
+            if config_source is None:
+                raise TypeError("base_url or LLMConfig is required when constructing LLMClient")
+            resolved_base_url = str(config_source)
             if model is None:
                 raise TypeError("model is required when constructing LLMClient with base_url")
             self.config = LLMConfig(
-                provider="openai" if base_url.startswith("http") else "unknown",
-                api_base=base_url.rstrip("/"),
+                provider="openai" if resolved_base_url.startswith("http") else "unknown",
+                api_base=resolved_base_url.rstrip("/"),
                 model=model,
                 api_key=api_key or "",
-                base_url=base_url.rstrip("/"),
+                base_url=resolved_base_url.rstrip("/"),
             )
 
         self.provider = self.config.provider
@@ -177,7 +270,19 @@ class LLMClient:
         self.api_key = self.config.api_key
         self.base_url = self.config.base_url or self.config.api_base or _PROVIDER_BASE_URLS.get(self.provider, "")
         self._use_streaming = self.config.use_streaming
+        self.quality = quality
+        self._request_options: dict[str, Any] = {}
+        self._exhausted: dict[str, float] = {}
         litellm.suppress_debug_info = True
+
+        self._fallback_chain = [self._primary_entry()]
+        try:
+            for entry in _build_fallback_chain(_raw_model_name(self.model), quality=self.quality):
+                if any(existing.name == entry.name for existing in self._fallback_chain):
+                    continue
+                self._fallback_chain.append(entry)
+        except RuntimeError:
+            pass
 
     def chat(
         self,
@@ -201,34 +306,31 @@ class LLMClient:
         )
         payload_messages = [dict(message) for message in messages]
 
-        kwargs: dict[str, Any] = {
-            "model": self.model,
-            "messages": payload_messages,
-            "max_tokens": effective_max_tokens,
+        self._request_options = {
             "timeout": timeout,
             "num_retries": num_retries,
             "drop_params": drop_params,
-            "api_key": self.api_key or None,
-            "api_base": self.config.api_base or None,
+            "extra": dict(extra),
         }
-        if temperature is not None:
-            kwargs["temperature"] = temperature
-        kwargs.update(extra)
-
         try:
-            if self._use_streaming:
-                kwargs["stream"] = True
-                response = litellm.completion(**kwargs)
-                text = self._consume_stream(response)
-            else:
-                response = litellm.completion(**kwargs)
-                text = self._extract_text(response)
-        except Exception as exc:
-            raise RuntimeError(f"LLM request failed ({self.provider}/{self.model}): {exc}") from exc
+            entries_to_try = self._active_entries()
+            for index, entry in enumerate(entries_to_try):
+                result = self._try_entry(
+                    entry,
+                    payload_messages,
+                    temperature,
+                    effective_max_tokens,
+                    index == len(entries_to_try) - 1,
+                )
+                if result is not None:
+                    return result
+        finally:
+            self._request_options = {}
 
-        if not text:
-            raise RuntimeError("LLM response contained no text content.")
-        return text
+        raise RuntimeError(
+            "All configured LLM models are temporarily exhausted. "
+            "Wait a few minutes for rate limits to reset."
+        )
 
     def ask(self, prompt: str, **kwargs: Any) -> str:
         """Convenience helper for a single user message."""
@@ -239,6 +341,79 @@ class LLMClient:
         """LiteLLM completion() is stateless, so close() is a no-op."""
 
         return None
+
+    def _primary_entry(self) -> ModelEntry:
+        return ModelEntry(
+            name=_raw_model_name(self.model),
+            provider=self.provider,
+            base_url=self.config.api_base or "",
+            api_key=self.api_key,
+        )
+
+    def _active_entries(self) -> list[ModelEntry]:
+        now = time.time()
+        active = [
+            entry
+            for entry in self._fallback_chain
+            if entry.name not in self._exhausted
+            or (now - self._exhausted[entry.name]) > _EXHAUSTION_COOLDOWN_SECONDS
+        ]
+        if active:
+            return active
+        self._exhausted.clear()
+        return list(self._fallback_chain)
+
+    def _entry_model(self, entry: ModelEntry) -> str:
+        if entry.provider == "unknown":
+            return self.model
+        if "/" in entry.name:
+            return entry.name
+        return _normalize_model(entry.provider, entry.name)
+
+    def _try_entry(
+        self,
+        entry: ModelEntry,
+        messages: list[dict[str, Any]] | list[ChatMessage],
+        temperature: float | None,
+        max_tokens: int,
+        is_last: bool,
+    ) -> str | None:
+        options = self._request_options
+        kwargs: dict[str, Any] = {
+            "model": self._entry_model(entry),
+            "messages": [dict(message) for message in messages],
+            "max_tokens": max_tokens,
+            "timeout": options.get("timeout", _TIMEOUT),
+            "num_retries": options.get("num_retries", _MAX_RETRIES),
+            "drop_params": options.get("drop_params", True),
+            "api_key": entry.api_key or None,
+            "api_base": entry.base_url or None,
+        }
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        kwargs.update(options.get("extra", {}))
+
+        try:
+            if self._use_streaming:
+                kwargs["stream"] = True
+                response = litellm.completion(**kwargs)
+                text = self._consume_stream(response)
+            else:
+                response = litellm.completion(**kwargs)
+                text = self._extract_text(response)
+        except Exception as exc:
+            message = str(exc).lower()
+            if any(token in message for token in ("429", "rate limit", "quota", "resource has been exhausted", "payment required")):
+                self._exhausted[entry.name] = time.time()
+                if not is_last:
+                    return None
+            raise RuntimeError(f"LLM request failed ({entry.provider}/{entry.name}): {exc}") from exc
+
+        if not text:
+            if not is_last:
+                return None
+            raise RuntimeError("LLM response contained no text content.")
+        return text
 
     @staticmethod
     def _extract_text(response: Any) -> str:
@@ -276,24 +451,31 @@ class LLMClient:
 
 
 _instance: LLMClient | None = None
+_quality_instance: LLMClient | None = None
 _instance_lock = threading.Lock()
 
 
-def get_client() -> LLMClient:
+def get_client(quality: bool = False) -> LLMClient:
     """Return the module-level client singleton."""
 
-    global _instance
-    if _instance is None:
+    global _instance, _quality_instance
+    target = _quality_instance if quality else _instance
+    if target is None:
         with _instance_lock:
-            if _instance is None:
+            target = _quality_instance if quality else _instance
+            if target is None:
                 try:
                     from applypilot.config import load_env
 
                     load_env()
                 except ModuleNotFoundError:
                     log.debug("python-dotenv not installed; skipping .env auto-load in llm.get_client().")
-                config = resolve_llm_config()
+                config = resolve_llm_config(quality=True) if quality else resolve_llm_config()
                 log.info("LLM provider: %s  model: %s", config.provider, config.model)
-                _instance = LLMClient(config)
-                atexit.register(_instance.close)
-    return _instance
+                target = LLMClient(config, quality=quality) if quality else LLMClient(config)
+                atexit.register(target.close)
+                if quality:
+                    _quality_instance = target
+                else:
+                    _instance = target
+    return target

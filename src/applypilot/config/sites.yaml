@@ -8,6 +8,7 @@
 # are flagged as "manual" during apply — bot skips, user applies by hand.
 manual_ats:
   - "ibegin.tcsapps.com"       # TCS iBegin — unsolvable CAPTCHA every time
+  - "myworkdayjobs.com"        # Workday — requires account login, can't automate
 
 # ── Blocked sites — too problematic for automation ───────────────────────
 blocked:
@@ -23,6 +24,20 @@ blocked:
     - "%google.jobs%"
     - "%accenture%"
     - "%workopolis.com/out%"
+
+# ── No-signup domains — agent must NEVER create accounts on these ─────────
+# Major job boards and ATS platforms where account creation is risky/pointless.
+# The agent will output RESULT:FAILED:login_required instead of signing up.
+no_signup_domains:
+  - "linkedin.com"
+  - "indeed.com"
+  - "glassdoor.com"
+  - "monster.com"
+  - "ziprecruiter.com"
+  - "dice.com"
+  - "lever.co"
+  - "greenhouse.io"
+  - "myworkdayjobs.com"
 
 # ── Blocked SSO domains — cannot authenticate through these ──────────────
 blocked_sso:
@@ -52,6 +67,21 @@ base_urls:
   "Himalayas": "https://himalayas.app"
   "Techstars Jobs": "https://www.techstars.com"
   "Randstad Canada": "https://www.randstad.ca/jobs/search/"
+  "SimplyHired": "https://www.simplyhired.com"
+  "Dice": "https://www.dice.com"
+  "PowerToFly": "https://powertofly.com"
+  "Wellfound": "https://wellfound.com"
+  "Jobgether": "https://jobgether.com"
+  "TopStartups": "https://topstartups.io"
+  "Jobspresso": "https://jobspresso.co"
+  "FlexJobs": "https://www.flexjobs.com"
+  "Otta": "https://otta.com"
+  "Eluta": "https://www.eluta.ca"
+  "Remotive": "https://remotive.com"
+  "Working Nomads": "https://www.workingnomads.com"
+  "Remote.co": "https://remote.co"
+  "DynamiteJobs": "https://dynamitejobs.com"
+  "4DayWeek": "https://4dayweek.io"
 
 sites:
   # ── Searchable sites (URL includes query + location params) ──────────
@@ -80,6 +110,7 @@ sites:
   - name: "Dice"
     url: "https://www.dice.com/jobs?q={query_encoded}&location=Remote&pageSize=100"
     type: search
+    no_headful: true  # dice.com is a SPA that requires login; headful retry is pointless
 
   - name: "SimplyHired"
     url: "https://www.simplyhired.com/search?q={query_encoded}&l={location_encoded}"

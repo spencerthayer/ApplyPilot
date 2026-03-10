@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ApplyPilot Control Panel</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      width: 380px;
+      background: #1a1a2e;
+      color: #e2e8f0;
+    }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px 8px;
+      border-bottom: 1px solid #2d2d4e;
+    }
+    .logo { font-size: 15px; font-weight: 700; color: #818cf8; letter-spacing: -0.5px; }
+    .window-label {
+      font-size: 10px; color: #94a3b8; background: #1e293b;
+      padding: 2px 6px; border-radius: 3px; font-weight: 600;
+    }
+    .summary { font-size: 11px; color: #475569; flex: 1; text-align: right; }
+    .icon-btn {
+      background: none; border: none; color: #64748b;
+      cursor: pointer; font-size: 16px; padding: 2px 4px;
+      border-radius: 4px; line-height: 1;
+    }
+    .icon-btn:hover { color: #94a3b8; background: #1e293b; }
+
+    /* ── Empty state ── */
+    .empty {
+      padding: 28px 16px;
+      text-align: center;
+      color: #475569;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+    .empty code { color: #818cf8; font-size: 11px; }
+
+    /* ── Worker cards ── */
+    .worker-card {
+      border-top: 1px solid #1e293b;
+      padding: 10px 12px;
+    }
+    .worker-card:first-child { border-top: none; }
+    .card-hitl  { border-left: 3px solid #a855f7; padding-left: 9px; }
+    .card-paused { border-left: 3px solid #eab308; padding-left: 9px; }
+
+    /* Card top row */
+    .card-top {
+      display: flex; align-items: flex-start; gap: 7px;
+      cursor: pointer; border-radius: 4px; padding: 2px 4px; margin: -2px -4px;
+      transition: background 0.1s;
+    }
+    .card-top:hover { background: #1e293b; }
+    .card-top:hover .focus-hint { opacity: 1; }
+    .focus-hint {
+      font-size: 10px; color: #475569; opacity: 0; transition: opacity 0.1s;
+      flex-shrink: 0; margin-top: 3px; user-select: none;
+    }
+    .wid-label {
+      font-size: 10px; font-weight: 700; color: #475569;
+      padding: 2px 5px; background: #1e293b; border-radius: 3px;
+      flex-shrink: 0; margin-top: 1px;
+    }
+    .status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      margin-top: 4px; flex-shrink: 0;
+    }
+    .dot-green  { background: #22c55e; animation: pulse 2s infinite; }
+    .dot-yellow { background: #eab308; }
+    .dot-purple { background: #a855f7; animation: pulse 1s infinite; }
+    .dot-gray   { background: #475569; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.35; }
+    }
+    .job-info  { flex: 1; min-width: 0; }
+    .job-title {
+      font-weight: 600; font-size: 13px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .job-meta  { font-size: 11px; color: #64748b; margin-top: 1px; }
+    .score-badge {
+      font-size: 11px; font-weight: 700; padding: 2px 6px;
+      border-radius: 10px; background: #1e3a5f; color: #60a5fa; flex-shrink: 0;
+    }
+
+    /* Status label colors */
+    .c-green  { color: #22c55e; }
+    .c-yellow { color: #eab308; }
+    .c-purple { color: #c084fc; }
+    .c-gray   { color: #64748b; }
+    .status-label {
+      font-weight: 600; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+
+    /* Card body */
+    .card-body { margin-top: 8px; }
+
+    /* HITL info */
+    .hitl-reason       { font-size: 12px; font-weight: 600; color: #c084fc; margin-bottom: 4px; }
+    .hitl-instructions { font-size: 11px; color: #94a3b8; line-height: 1.5; margin-bottom: 8px; }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      gap: 4px; padding: 6px 12px; border-radius: 6px; border: none;
+      cursor: pointer; font-size: 12px; font-weight: 500;
+      transition: opacity 0.1s; font-family: inherit;
+    }
+    .btn:hover   { opacity: 0.85; }
+    .btn:active  { opacity: 0.70; }
+    .btn:disabled { opacity: 0.40; cursor: default; }
+    .btn-sm      { padding: 4px 10px; font-size: 11px; }
+    .btn-takeover { background: #7c3aed; color: #fff; width: 100%; }
+    .btn-done     { background: #059669; color: #fff; }
+    .btn-handback { background: #2563eb; color: #fff; }
+    .btn-run      { background: #065f46; color: #10b981; border: 1px solid #064e3b; }
+    .btn-mini     {
+      background: none; border: 1px solid #334155; color: #64748b;
+      font-size: 11px; padding: 4px 9px;
+    }
+    .btn-mini:hover { border-color: #475569; color: #94a3b8; background: #1e293b; }
+    .btn-add  { background: #0f766e; color: #fff; width: 100%; }
+
+    /* Layout helpers */
+    .btn-row  { display: flex; gap: 6px; align-items: center; }
+    .flex1    { flex: 1; }
+    .mt6      { margin-top: 6px; }
+    .mt8      { margin-top: 8px; }
+    .divider  { height: 1px; background: #1e293b; margin: 8px 0; }
+
+    /* Task area */
+    .task-area { margin-top: 6px; }
+    textarea {
+      width: 100%; padding: 6px 9px;
+      background: #0f172a; border: 1px solid #334155;
+      border-radius: 6px; color: #e2e8f0;
+      font-size: 12px; font-family: inherit;
+      resize: vertical; min-height: 54px; line-height: 1.4;
+    }
+    textarea:focus       { outline: none; border-color: #6366f1; }
+    textarea::placeholder { color: #475569; }
+
+    /* Output area */
+    .output-area {
+      display: none;
+      margin-top: 6px; background: #0f172a; border: 1px solid #1e293b;
+      border-radius: 6px; padding: 6px 8px;
+      font-size: 11px; color: #94a3b8;
+      max-height: 100px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .output-area.visible { display: block; }
+
+    /* Save row */
+    .save-row { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #64748b; }
+    .save-row input { accent-color: #6366f1; }
+
+    /* Footer */
+    .footer { border-top: 1px solid #2d2d4e; padding: 8px 12px; }
+    .feedback {
+      font-size: 11px; margin-top: 5px;
+      padding: 4px 8px; border-radius: 4px; text-align: center;
+    }
+    .feedback.hidden  { display: none; }
+    .feedback.success { background: #064e3b; color: #6ee7b7; display: block; }
+    .feedback.error   { background: #450a0a; color: #fca5a5; display: block; }
+    .feedback.info    { background: #1e3a5f; color: #93c5fd; display: block; }
+
+    /* ── Tabs ── */
+    .tab-bar {
+      display: flex; border-bottom: 1px solid #2d2d4e;
+    }
+    .tab-btn {
+      flex: 1; padding: 7px 0; font-size: 11px; font-weight: 600;
+      background: none; border: none; color: #475569; cursor: pointer;
+      border-bottom: 2px solid transparent; transition: color 0.1s;
+      font-family: inherit;
+    }
+    .tab-btn:hover { color: #94a3b8; }
+    .tab-btn.active { color: #818cf8; border-bottom-color: #818cf8; }
+
+    /* ── Job cards ── */
+    #job-list { max-height: 420px; overflow-y: auto; }
+    .job-card {
+      padding: 9px 12px; border-top: 1px solid #1e293b;
+    }
+    .job-card:first-child { border-top: none; }
+    .job-card-top {
+      display: flex; align-items: flex-start; gap: 7px; margin-bottom: 7px;
+    }
+    .job-card-info { flex: 1; min-width: 0; }
+    .job-card-title {
+      font-size: 12px; font-weight: 600;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .job-card-title a { color: inherit; text-decoration: none; }
+    .job-card-title a:hover { text-decoration: underline; color: #818cf8; }
+    .job-card-meta { font-size: 11px; color: #64748b; margin-top: 1px; }
+    .stage-badge {
+      font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 8px;
+      text-transform: uppercase; letter-spacing: 0.4px; flex-shrink: 0;
+    }
+    .stage-ready   { background: #064e3b; color: #6ee7b7; }
+    .stage-hitl    { background: #3b0764; color: #d8b4fe; }
+    .stage-blocked { background: #422006; color: #fcd34d; }
+    .stage-error   { background: #450a0a; color: #fca5a5; }
+    .stage-pending { background: #1e293b; color: #94a3b8; }
+    .btn-applied  { background: #064e3b; color: #6ee7b7; }
+    .btn-skip     { background: #450a0a; color: #fca5a5; }
+    .btn-reset    { background: #1e3a5f; color: #93c5fd; }
+    .btn-error    { background: #422006; color: #fcd34d; }
+    .job-feedback {
+      font-size: 10px; margin-top: 4px; padding: 2px 6px;
+      border-radius: 4px; display: none;
+    }
+    .job-feedback.visible { display: block; }
+    .jobs-empty {
+      padding: 28px 16px; text-align: center; color: #475569; font-size: 12px;
+    }
+    .jobs-empty code { color: #818cf8; font-size: 11px; }
+    .jobs-loading { padding: 20px; text-align: center; color: #475569; font-size: 12px; }
+    #jobs-panel { display: none; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span class="logo">ApplyPilot</span>
+    <span id="window-label" class="window-label" style="display:none"></span>
+    <span id="summary" class="summary"></span>
+    <button id="btn-refresh" class="icon-btn" title="Refresh now">↻</button>
+  </div>
+
+  <div class="tab-bar">
+    <button class="tab-btn active" id="tab-workers">⚙ Workers</button>
+    <button class="tab-btn" id="tab-jobs">📋 Jobs</button>
+  </div>
+
+  <div id="workers-panel">
+    <div id="worker-list"></div>
+    <div class="footer">
+      <button id="btn-add-job" class="btn btn-add">＋ Add Tab to Pipeline</button>
+      <div id="add-feedback" class="feedback hidden"></div>
+    </div>
+  </div>
+
+  <div id="jobs-panel">
+    <div id="job-list"><div class="jobs-loading">Loading…</div></div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

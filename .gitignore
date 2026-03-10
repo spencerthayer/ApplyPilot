@@ -14,9 +14,23 @@ chrome-workers/
 apply-workers/
 apply_logs/
 logs/
+tmp_*
 
 # MCP configs (per-machine)
 .mcp*.json
+
+# Playwright MCP
+.playwright-mcp/
+
+# direnv (per-machine venv activation)
+.envrc
+.direnv/
+
+# Node
+node_modules/
+
+# Python venv
+.venv/
 
 # Python
 __pycache__/
@@ -45,3 +59,5 @@ Thumbs.db
 .memsearch/
 
 .cursor/
+# CLAUDE.md is machine/user-specific — copy CLAUDE.md.example to customize
+CLAUDE.md

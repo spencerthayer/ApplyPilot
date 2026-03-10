@@ -12,11 +12,12 @@ Three-tier extraction cascade (cheapest first):
 
 import json
 import logging
+import random
 import re
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -27,7 +28,37 @@ from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+def _get_ua() -> str:
+    """Build a realistic UA from the actual installed Chrome version."""
+    from applypilot.apply.chrome import _get_real_user_agent
+    return _get_real_user_agent()
+
+
+UA = _get_ua()
+
+# Stealth JS patches — hides automation signals from bot detectors
+_STEALTH_INIT_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+
+Object.defineProperty(navigator, 'plugins', {
+  get: () => [
+    {name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer'},
+    {name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai'},
+    {name: 'Native Client', filename: 'internal-nacl-plugin'},
+  ],
+});
+
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+
+window.chrome = window.chrome || {};
+window.chrome.runtime = window.chrome.runtime || {};
+
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) =>
+  parameters.name === 'notifications'
+    ? Promise.resolve({state: Notification.permission})
+    : originalQuery(parameters);
+"""
 
 # Sites that block scraping -- skip detail extraction entirely
 SKIP_DETAIL_SITES = {"glassdoor", "google", "Workopolis"}
@@ -143,7 +174,9 @@ def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page(user_agent=UA)
+        context = browser.new_context(user_agent=UA)
+        context.add_init_script(_STEALTH_INIT_SCRIPT)
+        page = context.new_page()
         page.on("response", capture_algolia)
         page.goto(
             "https://www.welcometothejungle.com/en/jobs?query=developer&refinementList%5Bremote%5D%5B%5D=fulltime",
@@ -529,6 +562,53 @@ SITE_DELAYS = {
 RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 PERMANENT_FAILURES = {404, 410, 451}
 
+# Max enrichment retries before giving up and marking a job as permanently failed.
+MAX_DETAIL_RETRIES = 5
+
+# Error strings that indicate the job posting is still live but we hit a network/LLM issue.
+_RETRIABLE_PATTERNS = (
+    "timeout", "LLM error", "Client error",
+    "HTTP 408", "HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504",
+    "ERR_CONNECTION", "ERR_NAME_NOT_RESOLVED", "ERR_INTERNET_DISCONNECTED",
+    "net::ERR",
+)
+
+# Error strings that mean the posting is definitively gone.
+_EXPIRED_PATTERNS = ("HTTP 404", "HTTP 410", "HTTP 451")
+
+# Errors that can never succeed regardless of retries.
+_PERMANENT_PATTERNS = (
+    "no data extracted",
+    "manual://",  # Synthetic HN contact-only URLs — not real web pages
+)
+
+
+def _classify_detail_error(error: str, current_retry_count: int) -> tuple[str, str | None]:
+    """Classify an enrichment error and compute the next retry timestamp.
+
+    Returns:
+        (category, next_retry_at_iso)
+        category: 'expired' | 'retriable' | 'permanent'
+        next_retry_at_iso: ISO timestamp string, or None if no retry
+    """
+    if current_retry_count >= MAX_DETAIL_RETRIES:
+        return "permanent", None
+
+    if any(p in error for p in _EXPIRED_PATTERNS):
+        return "expired", None
+
+    if any(p in error for p in _PERMANENT_PATTERNS):
+        return "permanent", None
+
+    if any(p in error for p in _RETRIABLE_PATTERNS):
+        # Exponential backoff: 5min, 20min, 80min, ~5h, ~21h
+        delay_minutes = min(5 * (4 ** current_retry_count), 24 * 60)
+        next_retry = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+        return "retriable", next_retry.isoformat()
+
+    # Unknown error — treat as permanent to avoid infinite retries
+    return "permanent", None
+
 
 def scrape_detail_page(page, url: str) -> dict:
     """Full cascade for one detail page."""
@@ -640,6 +720,7 @@ def scrape_site_batch(
                 launch_opts["proxy"] = _PROXY_CONFIG["playwright"]
             browser = p.chromium.launch(**launch_opts)
             context = browser.new_context(user_agent=UA)
+            context.add_init_script(_STEALTH_INIT_SCRIPT)
             page = context.new_page()
 
             for i, (url, title) in enumerate(jobs):
@@ -674,15 +755,29 @@ def scrape_site_batch(
                     stats[status] += 1
                     conn.execute(
                         "UPDATE jobs SET full_description = ?, application_url = ?, "
-                        "detail_scraped_at = ?, detail_error = NULL WHERE url = ?",
+                        "detail_scraped_at = ?, detail_error = NULL, "
+                        "detail_error_category = NULL, detail_retry_count = 0, "
+                        "detail_next_retry_at = NULL WHERE url = ?",
                         (result.get("full_description"), result.get("application_url"), now, url),
                     )
                 else:
                     stats["error"] += 1
+                    error_msg = result.get("error", "unknown")
+                    # Fetch current retry count before classifying
+                    row = conn.execute(
+                        "SELECT COALESCE(detail_retry_count, 0) FROM jobs WHERE url = ?", (url,)
+                    ).fetchone()
+                    retry_count = row[0] if row else 0
+                    category, next_retry_at = _classify_detail_error(error_msg, retry_count)
                     conn.execute(
-                        "UPDATE jobs SET detail_error = ?, detail_scraped_at = ? WHERE url = ?",
-                        (result.get("error", "unknown"), now, url),
+                        "UPDATE jobs SET detail_error = ?, detail_error_category = ?, "
+                        "detail_retry_count = ?, detail_next_retry_at = ?, "
+                        "detail_scraped_at = ? WHERE url = ?",
+                        (error_msg, category, retry_count + 1, next_retry_at, now, url),
                     )
+                    log.info("  error_category=%s retry=%d/%d next=%s",
+                             category, retry_count + 1, MAX_DETAIL_RETRIES,
+                             next_retry_at or "never")
 
                 conn.commit()
 
@@ -713,7 +808,13 @@ def _run_detail_scraper(
     """
     placeholders = ",".join("?" * len(SKIP_DETAIL_SITES))
     rows = conn.execute(
-        f"SELECT url, title, site FROM jobs WHERE detail_scraped_at IS NULL AND site NOT IN ({placeholders}) ORDER BY site",
+        "SELECT url, title, site FROM jobs "
+        f"WHERE site NOT IN ({placeholders}) AND ("
+        "  detail_scraped_at IS NULL "
+        "  OR (detail_error_category = 'retriable' "
+        "      AND (detail_next_retry_at IS NULL OR detail_next_retry_at <= datetime('now')))"
+        ") "
+        "ORDER BY site, discovered_at DESC",
         list(SKIP_DETAIL_SITES),
     ).fetchall()
 
@@ -727,6 +828,11 @@ def _run_detail_scraper(
         if sites and site not in sites:
             continue
         site_jobs.setdefault(site, []).append((url, title))
+
+    # Shuffle site order so enrichment doesn't always process the same sources first
+    site_items = list(site_jobs.items())
+    random.shuffle(site_items)
+    site_jobs = dict(site_items)
 
     log.info("Pending: %d jobs across %d sites (workers=%d)", len(rows), len(site_jobs), workers)
     for site, jobs in site_jobs.items():
@@ -851,7 +957,13 @@ def stream_detail(
         while True:
             placeholders = ",".join("?" * len(SKIP_DETAIL_SITES))
             rows = conn.execute(
-                f"SELECT url, title, site FROM jobs WHERE detail_scraped_at IS NULL AND site NOT IN ({placeholders}) ORDER BY site LIMIT 200",
+                "SELECT url, title, site FROM jobs "
+                f"WHERE site NOT IN ({placeholders}) AND ("
+                "  detail_scraped_at IS NULL "
+                "  OR (detail_error_category = 'retriable' "
+                "      AND (detail_next_retry_at IS NULL OR detail_next_retry_at <= datetime('now')))"
+                ") "
+                "ORDER BY site, discovered_at DESC LIMIT 200",
                 list(SKIP_DETAIL_SITES),
             ).fetchall()
 
@@ -860,6 +972,10 @@ def stream_detail(
                 for row in rows:
                     url, title, site = row[0], row[1], row[2]
                     site_jobs.setdefault(site, []).append((url, title))
+
+                site_items = list(site_jobs.items())
+                random.shuffle(site_items)
+                site_jobs = dict(site_items)
 
                 for site, jobs in site_jobs.items():
                     delay = SITE_DELAYS.get(site, 2.0)

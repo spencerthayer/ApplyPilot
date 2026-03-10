@@ -1,6 +1,6 @@
 [project]
 name = "applypilot"
-version = "0.3.0"
+version = "0.2.0"
 description = "AI-powered end-to-end job application pipeline"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -27,6 +27,10 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyyaml>=6.0",
     "pandas>=2.0",
+    "mcp>=1.9",
+    "python-jobspy>=1.1",
+    "markdownify>=0.14.1",
+    "websocket-client>=1.0",
     ]
 
 [project.optional-dependencies]
@@ -36,9 +40,9 @@ dev = ["pytest>=7.0", "ruff>=0.1"]
 applypilot = "applypilot.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/Pickle-Pixel/ApplyPilot"
-Repository = "https://github.com/Pickle-Pixel/ApplyPilot"
-Issues = "https://github.com/Pickle-Pixel/ApplyPilot/issues"
+Homepage = "https://github.com/ibarrajo/ApplyPilot"
+Repository = "https://github.com/ibarrajo/ApplyPilot"
+Issues = "https://github.com/ibarrajo/ApplyPilot/issues"
 
 [build-system]
 requires = ["hatchling"]

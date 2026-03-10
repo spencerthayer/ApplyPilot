@@ -423,7 +423,7 @@ def batch_convert(limit: int = 50) -> int:
             break
 
     if not to_convert:
-        log.info("All text files already have PDFs.")
+        log.debug("All text files already have PDFs.")
         return 0
 
     log.info("Converting %d files to PDF...", len(to_convert))

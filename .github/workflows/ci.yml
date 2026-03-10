@@ -1,7 +1,11 @@
 name: CI
 
 on:
-  workflow_dispatch:  # manual trigger only
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # also allow manual trigger
 
 jobs:
   test:

@@ -23,6 +23,7 @@ from applypilot.config import (
     AUTO_APPLY_AGENT_CHOICES,
     DEFAULT_AUTO_APPLY_AGENT,
     ENV_PATH,
+    FILES_DIR,
     PROFILE_PATH,
     RESUME_PATH,
     RESUME_PDF_PATH,
@@ -152,21 +153,13 @@ def _setup_profile() -> dict:
 
     # -- Personal --
     console.print("\n[bold cyan]Personal Information[/bold cyan]")
-    full_name = Prompt.ask("Full name")
     profile["personal"] = {
-        "full_name": full_name,
-        "preferred_name": Prompt.ask("Preferred/nickname (leave blank to use first name)", default=""),
+        "full_name": Prompt.ask("Full name"),
         "email": Prompt.ask("Email address"),
         "phone": Prompt.ask("Phone number", default=""),
         "city": Prompt.ask("City"),
-        "province_state": Prompt.ask("Province/State (e.g. Ontario, California)", default=""),
         "country": Prompt.ask("Country"),
-        "postal_code": Prompt.ask("Postal/ZIP code", default=""),
-        "address": Prompt.ask("Street address (optional, used for form auto-fill)", default=""),
         "linkedin_url": Prompt.ask("LinkedIn URL", default=""),
-        "github_url": Prompt.ask("GitHub URL (optional)", default=""),
-        "portfolio_url": Prompt.ask("Portfolio URL (optional)", default=""),
-        "website_url": Prompt.ask("Personal website URL (optional)", default=""),
         "password": Prompt.ask("Job site password (used for login walls during auto-apply)", password=True, default=""),
     }
     if profile["personal"]["password"]:
@@ -178,9 +171,8 @@ def _setup_profile() -> dict:
     # -- Work Authorization --
     console.print("\n[bold cyan]Work Authorization[/bold cyan]")
     profile["work_authorization"] = {
-        "legally_authorized_to_work": Confirm.ask("Are you legally authorized to work in your target country?"),
-        "require_sponsorship": Confirm.ask("Will you now or in the future need sponsorship?"),
-        "work_permit_type": Prompt.ask("Work permit type (e.g. Citizen, PR, Open Work Permit — leave blank if N/A)", default=""),
+        "legally_authorized": Confirm.ask("Are you legally authorized to work in your target country?"),
+        "needs_sponsorship": Confirm.ask("Will you now or in the future need sponsorship?"),
     }
 
     # -- Compensation --
@@ -200,13 +192,10 @@ def _setup_profile() -> dict:
 
     # -- Experience --
     console.print("\n[bold cyan]Experience[/bold cyan]")
-    current_title = Prompt.ask("Current/most recent job title", default="")
-    target_role = Prompt.ask("Target role (what you're applying for, e.g. 'Senior Backend Engineer')", default=current_title)
     profile["experience"] = {
         "years_of_experience_total": Prompt.ask("Years of professional experience", default=""),
         "education_level": Prompt.ask("Highest education (e.g. Bachelor's, Master's, PhD, Self-taught)", default=""),
-        "current_title": current_title,
-        "target_role": target_role,
+        "current_title": Prompt.ask("Current/most recent job title", default=""),
     }
     profile["education"] = _collect_education()
     profile["tailoring_config"] = _setup_tailoring_config(target_role)
@@ -239,7 +228,7 @@ def _setup_profile() -> dict:
     # -- EEO Voluntary (defaults) --
     profile["eeo_voluntary"] = {
         "gender": "Decline to self-identify",
-        "race_ethnicity": "Decline to self-identify",
+        "ethnicity": "Decline to self-identify",
         "veteran_status": "Decline to self-identify",
         "disability_status": "Decline to self-identify",
     }
@@ -495,6 +484,73 @@ def _setup_auto_apply() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Optional documents
+# ---------------------------------------------------------------------------
+
+_OPTIONAL_FILE_KEYS = [
+    ("profile_photo",  "Profile photo / headshot", [".jpg", ".jpeg", ".png", ".webp"]),
+    ("id_document",    "Government-issued ID scan", [".pdf", ".jpg", ".jpeg", ".png"]),
+    ("passport",       "Passport scan",             [".pdf", ".jpg", ".jpeg", ".png"]),
+]
+
+
+def _setup_optional_files(profile: dict) -> None:
+    """Optionally copy documents into ~/.applypilot/files/ and record paths in profile."""
+    console.print(Panel(
+        "[bold]Step 6: Optional Documents (skip if not needed)[/bold]\n"
+        "Profile photo, ID, passport, certificates — some applications ask for these.\n"
+        "Files are copied to [cyan]~/.applypilot/files/[/cyan] for use by the apply agent."
+    ))
+
+    if not Confirm.ask("Do you have any optional documents to add?", default=False):
+        console.print("[dim]Skipped. Add files to ~/.applypilot/files/ and update profile.json later.[/dim]")
+        return
+
+    files: dict[str, str] = profile.get("files", {})
+    FILES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Known file types
+    for key, label, allowed_exts in _OPTIONAL_FILE_KEYS:
+        if not Confirm.ask(f"Add {label}?", default=False):
+            continue
+        while True:
+            path_str = Prompt.ask(f"{label} file path")
+            src = Path(path_str.strip().strip('"').strip("'")).expanduser().resolve()
+            if not src.exists():
+                console.print(f"[red]File not found:[/red] {src}")
+                continue
+            if src.suffix.lower() not in allowed_exts:
+                console.print(f"[red]Unsupported format.[/red] Use one of: {', '.join(allowed_exts)}")
+                continue
+            dest = FILES_DIR / f"{key}{src.suffix.lower()}"
+            shutil.copy2(src, dest)
+            files[key] = f"~/.applypilot/files/{dest.name}"
+            console.print(f"[green]Copied to {dest}[/green]")
+            break
+
+    # Free-form: certificates / other documents
+    while Confirm.ask("Add another document (certificate, portfolio, etc.)?", default=False):
+        doc_label = Prompt.ask("Short label for this document (e.g. 'aws_cert', 'portfolio')")
+        key = doc_label.strip().lower().replace(" ", "_")
+        while True:
+            path_str = Prompt.ask("File path")
+            src = Path(path_str.strip().strip('"').strip("'")).expanduser().resolve()
+            if not src.exists():
+                console.print(f"[red]File not found:[/red] {src}")
+                continue
+            dest = FILES_DIR / f"{key}{src.suffix.lower()}"
+            shutil.copy2(src, dest)
+            files[key] = f"~/.applypilot/files/{dest.name}"
+            console.print(f"[green]Copied to {dest}[/green]")
+            break
+
+    if files:
+        profile["files"] = files
+        PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
+        console.print("[green]Document paths saved to profile.json[/green]")
+
+
+# ---------------------------------------------------------------------------
 # Main entry
 # ---------------------------------------------------------------------------
 
@@ -519,7 +575,7 @@ def run_wizard() -> None:
     console.print()
 
     # Step 2: Profile
-    _setup_profile()
+    profile = _setup_profile()
     console.print()
 
     # Step 3: Search config
@@ -532,6 +588,10 @@ def run_wizard() -> None:
 
     # Step 5: Auto-apply agent
     _setup_auto_apply()
+    console.print()
+
+    # Step 6: Optional documents (profile photo, ID, certs)
+    _setup_optional_files(profile)
     console.print()
 
     # Done — show tier status

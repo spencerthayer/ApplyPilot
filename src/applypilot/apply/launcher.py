@@ -14,12 +14,14 @@ import os
 import platform
 import re
 import signal
+import socketserver
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from rich.console import Console
@@ -98,6 +100,17 @@ _stop_event = threading.Event()
 _agent_procs: dict[int, subprocess.Popen] = {}
 _agent_lock = threading.Lock()
 
+# Minimal always-on worker HTTP listener state used by the extension tests and
+# by manual browser-control flows. This intentionally keeps the current main
+# launcher architecture intact; it only exposes the small API surface the
+# extension server relies on.
+_worker_servers: dict[int, HTTPServer] = {}
+_worker_server_lock = threading.Lock()
+_worker_state: dict[int, dict] = {}
+_worker_state_lock = threading.Lock()
+_takeover_events: dict[int, threading.Event] = {}
+_handback_events: dict[int, threading.Event] = {}
+
 # Register cleanup on exit
 atexit.register(cleanup_on_exit)
 if platform.system() != "Windows":
@@ -123,6 +136,156 @@ def _kill_active_agent_processes() -> None:
         for proc in list(_agent_procs.values()):
             if proc.poll() is None:
                 _kill_process_tree(proc.pid)
+
+
+class _ThreadedHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
+def _start_worker_listener(worker_id: int) -> int:
+    """Start a lightweight per-worker HTTP server for extension control."""
+
+    state: dict = {
+        "job": None,
+        "status": "idle",
+        "reason": None,
+        "instructions": None,
+        "hitl_event": None,
+        "hitl_job_hash": None,
+        "chrome_pid": None,
+        "last_focused": 0.0,
+        "handback_instructions": None,
+        "mini_proc": None,
+        "saved_instruction": None,
+    }
+    takeover_event = threading.Event()
+    handback_event = threading.Event()
+
+    with _worker_state_lock:
+        _worker_state[worker_id] = state
+    _takeover_events[worker_id] = takeover_event
+    _handback_events[worker_id] = handback_event
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_OPTIONS(self) -> None:
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            if self.path == "/api/status":
+                self._handle_status()
+            elif self.path == "/api/focus":
+                self._handle_focus()
+            else:
+                self.send_response(404)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+
+        def do_POST(self) -> None:
+            self.close_connection = True
+            if self.path.startswith("/api/done"):
+                self._handle_done()
+            else:
+                self.send_response(404)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+
+        def _read_body(self) -> dict:
+            length = int(self.headers.get("Content-Length", 0))
+            if not length:
+                return {}
+            try:
+                return json.loads(self.rfile.read(length))
+            except Exception:
+                return {}
+
+        def _json_ok(self, payload: dict) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _text_ok(self, text: bytes = b"ok") -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(text)))
+            self.end_headers()
+            self.wfile.write(text)
+
+        def _handle_status(self) -> None:
+            job = state.get("job") or {}
+            self._json_ok(
+                {
+                    "workerId": worker_id,
+                    "status": state.get("status", "idle"),
+                    "jobTitle": job.get("title", ""),
+                    "jobSite": job.get("site", ""),
+                    "jobCompany": job.get("company", ""),
+                    "score": job.get("fit_score", 0),
+                    "reason": state.get("reason", ""),
+                    "instructions": state.get("instructions"),
+                    "savedInstruction": state.get("saved_instruction"),
+                    "chromePid": state.get("chrome_pid"),
+                    "lastFocused": state.get("last_focused", 0),
+                }
+            )
+
+        def _handle_focus(self) -> None:
+            state["last_focused"] = time.time()
+            try:
+                from applypilot.apply.chrome import bring_to_foreground_cdp, bring_to_foreground_pid
+
+                bring_to_foreground_cdp(BASE_CDP_PORT + worker_id)
+                bring_to_foreground_pid(state.get("chrome_pid"))
+            except Exception:
+                logger.debug("Worker focus request failed", exc_info=True)
+            self._text_ok()
+
+        def _handle_done(self) -> None:
+            body = self._read_body()
+            instructions = (body.get("instructions") or "").strip()
+            if instructions:
+                state["handback_instructions"] = instructions
+            hitl_event = state.get("hitl_event")
+            if hitl_event:
+                state["status"] = "resuming"
+                hitl_event.set()
+            self._text_ok()
+
+        def log_message(self, format, *args) -> None:
+            pass
+
+    server = _ThreadedHTTPServer(("127.0.0.1", 0), _Handler)
+    with _worker_server_lock:
+        _worker_servers[worker_id] = server
+    thread = threading.Thread(
+        target=server.serve_forever,
+        daemon=True,
+        name=f"worker-http-w{worker_id}",
+    )
+    thread.start()
+    return int(server.server_address[1])
+
+
+def _stop_worker_listener(worker_id: int) -> None:
+    """Shut down a worker's lightweight HTTP listener."""
+
+    with _worker_server_lock:
+        server = _worker_servers.pop(worker_id, None)
+    if server:
+        server.shutdown()
+        server.server_close()
+    with _worker_state_lock:
+        _worker_state.pop(worker_id, None)
+    _takeover_events.pop(worker_id, None)
+    _handback_events.pop(worker_id, None)
 
 
 def _make_mcp_config(cdp_port: int) -> dict:
