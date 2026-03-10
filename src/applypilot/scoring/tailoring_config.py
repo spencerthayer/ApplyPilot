@@ -10,7 +10,6 @@ All configuration is explicit - no magic folders or implicit behavior.
 import json
 import re
 from pathlib import Path
-from typing import Any
 
 from applypilot.config import PROFILE_PATH
 
@@ -758,4 +757,3 @@ def should_merge_role(role_title: str, role_company: str, role_dates: str, confi
 
     # Default to not merging if we can't determine
     return False
-

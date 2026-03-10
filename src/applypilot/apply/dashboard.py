@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Rich live dashboard for the apply pipeline.
 
 Displays real-time worker status, job progress, and recent events
 in a terminal dashboard using the Rich library.
 """
+
+from __future__ import annotations
 
 import logging
 import threading

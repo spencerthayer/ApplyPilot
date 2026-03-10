@@ -11,14 +11,14 @@ import logging
 import sqlite3
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from transitions import Machine
 
 from applypilot.llm import get_client
 
 from applypilot.intelligence.jd_parser import JobDescriptionParser
-from applypilot.tailoring.models import GateResult, Resume
+from applypilot.tailoring.models import Resume
 from applypilot.tailoring.quality_gates import MetricsGate, RelevanceGate
 from applypilot.tailoring.metrics_registry import MetricsRegistry
 from applypilot.tailoring.variant_generators import (
@@ -872,9 +872,6 @@ class ComprehensiveTailoringEngine:
 
     def _build_summary(self) -> str:
         """Build professional summary with key metrics."""
-        personal = self.profile.get("personal", {})
-        base_summary = personal.get("summary", "")
-        
         # Get years of experience
         years_exp = self.profile.get("experience", {}).get("years_of_experience_total", "14")
         
@@ -902,7 +899,9 @@ class ComprehensiveTailoringEngine:
         
         # Add key metrics
         if len(top_metrics) >= 2:
-            summary_parts.append(f"Reduced platform costs while scaling revenue through automated content generation and personalized user experiences.")
+            summary_parts.append(
+                "Reduced platform costs while scaling revenue through automated content generation and personalized user experiences."
+            )
         
         return " ".join(summary_parts)
 
@@ -916,7 +915,9 @@ class ComprehensiveTailoringEngine:
         if languages:
             # Filter to main languages mentioned in v7
             main_langs = ["Python", "SQL", "TypeScript", "JavaScript"]
-            filtered_langs = [l for l in languages if any(ml in l for ml in main_langs)]
+            filtered_langs = [
+                language for language in languages if any(main_lang in language for main_lang in main_langs)
+            ]
             if filtered_langs:
                 lines.append(f"Languages: {', '.join(filtered_langs[:5])}")
         

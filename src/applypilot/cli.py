@@ -13,6 +13,8 @@ from rich.console import Console
 from rich.table import Table
 
 from applypilot import __version__
+from applypilot.cli_greenhouse import app as greenhouse_app
+from applypilot.config import RESUME_PATH
 
 
 def _configure_logging() -> None:
@@ -64,7 +66,6 @@ app = typer.Typer(
     help="AI-powered end-to-end job application pipeline.",
     no_args_is_help=True,
 )
-from applypilot.cli_greenhouse import app as greenhouse_app
 app.add_typer(greenhouse_app, name="greenhouse")
 console = Console()
 log = logging.getLogger(__name__)
@@ -364,7 +365,7 @@ def apply(
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
-        console.print(f"\n[bold]Run manually:[/bold]")
+        console.print("\n[bold]Run manually:[/bold]")
         console.print(f"  {build_manual_command(resolved_agent, prompt_file, 0, resolved_model)}")
         return
 
@@ -455,7 +456,7 @@ def analyze(
         "company_context": job_intel.company_context,
     }
 
-    resume_path = resume_file or config.RESUME_PATH
+    resume_path = resume_file or RESUME_PATH
     if resume_path.exists():
         matcher = ResumeMatcher()
         match = matcher.analyze(resume_path.read_text(encoding="utf-8"), job_intel)

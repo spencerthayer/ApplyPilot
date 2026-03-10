@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Deterministic validation framework for resume tailoring.
 
 This module provides comprehensive, countable validation checks for tailored resumes.
@@ -19,6 +17,8 @@ Usage:
     >>> if not result["passed"]:
     ...     print(result["retry_prompt"])
 """
+
+from __future__ import annotations
 
 import logging
 import re
@@ -603,8 +603,6 @@ def check_bullet_metrics(resume_data: dict, profile: dict, config: ValidationCon
             if not isinstance(bullet, str):
                 continue
                 
-            bullet_lower = bullet.lower()
-            
             # Check for any metric pattern
             has_metric = any(
                 re.search(pattern, bullet, re.IGNORECASE)

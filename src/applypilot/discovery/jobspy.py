@@ -172,7 +172,6 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
             continue
 
         title = _clean(row.get("title"))
-        company = _clean(row.get("company"))
         location_str = _clean(row.get("location"))
 
         salary = None

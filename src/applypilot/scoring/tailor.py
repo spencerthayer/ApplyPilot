@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Resume tailoring: LLM-powered ATS-optimized resume generation per job.
 
 THIS IS THE HEAVIEST REFACTOR. Every piece of personal data -- name, email, phone,
@@ -10,6 +8,8 @@ The LLM returns structured JSON, code assembles the final text. Header (name, co
 is always code-injected, never LLM-generated. Each retry starts a fresh conversation
 to avoid apologetic spirals.
 """
+
+from __future__ import annotations
 
 import json
 import logging
@@ -70,12 +70,10 @@ def _build_tailor_prompt(profile: dict, resume_text: str | None = None) -> str:
 
     # Preserved entities
     companies = resume_facts.get("preserved_companies", [])
-    projects = resume_facts.get("preserved_projects", [])
     school = resume_facts.get("preserved_school", "")
     real_metrics = resume_facts.get("real_metrics", [])
 
     companies_str = ", ".join(companies) if companies else "N/A"
-    projects_str = ", ".join(projects) if projects else "N/A"
     metrics_str = ", ".join(real_metrics) if real_metrics else "N/A"
 
     # Include ALL banned words from the validator so the LLM knows exactly

@@ -10,7 +10,6 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from typing import Optional
 
 import httpx
 import yaml

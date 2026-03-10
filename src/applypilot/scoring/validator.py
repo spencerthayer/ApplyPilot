@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Resume and cover letter validation: banned words, fabrication detection, structural checks.
 
 All validation is profile-driven -- no hardcoded personal data. The validator receives
@@ -12,6 +10,8 @@ strict  -- banned words = hard errors that trigger retries (original behavior)
 normal  -- banned words = warnings only; fabrication/structure = errors (default)
 lenient -- banned words ignored; only fabrication and required structure checked
 """
+
+from __future__ import annotations
 
 import logging
 import re

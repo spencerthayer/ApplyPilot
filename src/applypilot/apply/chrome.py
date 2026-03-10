@@ -1,10 +1,10 @@
-from __future__ import annotations
-
 """Chrome lifecycle management for apply workers.
 
 Handles launching an isolated Chrome instance with remote debugging,
 worker profile setup/cloning, and cross-platform process cleanup.
 """
+
+from __future__ import annotations
 
 import glob as _glob
 import json

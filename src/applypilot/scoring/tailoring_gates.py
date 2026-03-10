@@ -487,7 +487,7 @@ def check_confidence(output: dict, min_confidence: float) -> GateResult:
         elif score < min_confidence:
             result.add_error(
                 f"Confidence {score:.2f} below minimum {min_confidence}",
-                f"Review the output for accuracy. Low confidence may indicate ambiguous input or unclear requirements.",
+                "Review the output for accuracy. Low confidence may indicate ambiguous input or unclear requirements.",
             )
     except (ValueError, TypeError):
         result.add_error(
@@ -512,14 +512,14 @@ def check_required_fields(output: dict, required_fields: list[str]) -> GateResul
     result = GateResult(passed=True)
 
     missing = []
-    for field in required_fields:
+    for field_name in required_fields:
         # Treat missing keys or falsy values (empty string, empty list/dict, None, 0) as missing
-        if not output.get(field):
+        if not output.get(field_name):
             # Distinguish between completely missing and present-but-empty
-            if field not in output:
-                missing.append(field)
+            if field_name not in output:
+                missing.append(field_name)
             else:
-                missing.append(f"{field} (empty)")
+                missing.append(f"{field_name} (empty)")
 
     if missing:
         result.errors = [f"Missing required field: {f}" for f in missing]
@@ -935,11 +935,6 @@ def run_final_validation(
             "validation_result": GateResult,
         }
     """
-    from applypilot.scoring.resume_validator import ResumeValidator
-    
-    config = profile.get("tailoring_config", {})
-    validator = ResumeValidator(profile, config)
-    
     attempts = []
     current_data = resume_data
     

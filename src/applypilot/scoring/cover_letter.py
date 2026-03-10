@@ -9,6 +9,7 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
 from applypilot.database import get_connection

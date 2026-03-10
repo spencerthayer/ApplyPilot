@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """ApplyPilot configuration: paths, platform detection, user data."""
+
+from __future__ import annotations
 
 import os
 import platform

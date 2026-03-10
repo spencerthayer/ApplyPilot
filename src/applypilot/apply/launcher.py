@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Apply orchestration: acquire jobs, spawn browser-agent sessions, track results.
 
 This is the main entry point for the apply pipeline. It pulls jobs from
 the database, launches Chrome + a browser agent for each one, parses the
 result, and updates the database. Supports parallel workers via --workers.
 """
+
+from __future__ import annotations
 
 import atexit
 import json

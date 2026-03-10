@@ -198,6 +198,7 @@ def _setup_profile() -> dict:
         "current_title": Prompt.ask("Current/most recent job title", default=""),
     }
     profile["education"] = _collect_education()
+    target_role = profile["experience"]["current_title"]
     profile["tailoring_config"] = _setup_tailoring_config(target_role)
 
     # -- Skills Boundary --

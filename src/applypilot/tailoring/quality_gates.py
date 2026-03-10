@@ -1,6 +1,5 @@
 """Quality gates for resume validation during tailoring."""
 
-import json
 import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict

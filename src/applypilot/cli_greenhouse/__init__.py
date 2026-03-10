@@ -409,11 +409,11 @@ def add_job(
         try:
             new, existing = _store_jobs([job])
             if new:
-                console.print(f"[green]✓[/green] Job saved successfully (new)")
+                console.print("[green]✓[/green] Job saved successfully (new)")
             elif existing:
-                console.print(f"[yellow]⚠[/yellow] Job already exists in database")
+                console.print("[yellow]⚠[/yellow] Job already exists in database")
             else:
-                console.print(f"[green]✓[/green] Job processed")
+                console.print("[green]✓[/green] Job processed")
         except Exception as e:
             console.print(f"[red]✗[/red] Failed to save: {e}")
             raise typer.Exit(code=1)

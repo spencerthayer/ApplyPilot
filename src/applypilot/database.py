@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """ApplyPilot database layer: schema, migrations, stats, and connection helpers.
 
 Single source of truth for the jobs table schema. All columns from every
 pipeline stage are created up front so any stage can run independently
 without migration ordering issues.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
