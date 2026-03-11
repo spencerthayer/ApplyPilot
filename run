@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 clear
 printf 'Datetime: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+echo "Activating virtual environment..."
+echo "source .venv/bin/activate"
 source .venv/bin/activate
+echo "Running ApplyPilot..."
+echo "applypilot run"
 applypilot run

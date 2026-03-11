@@ -17,6 +17,7 @@ import warnings
 from importlib import metadata as importlib_metadata
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlencode
 from uuid import uuid4
 
 import pandas as pd
@@ -68,6 +69,8 @@ _DEBUG_JOBSPY_ENABLED = os.getenv("APPLYPILOT_DEBUG_JOBSPY") == "1"
 _DEBUG_LOG_PATH = Path(os.getenv("APPLYPILOT_DEBUG_LOG_PATH", ".cursor/debug-e0a421.log")).expanduser()
 _DEBUG_SESSION_ID = os.getenv("APPLYPILOT_DEBUG_SESSION_ID", "e0a421")
 _DEBUG_RUN_ID = os.getenv("APPLYPILOT_DEBUG_RUN_ID", "default")
+_JOBSPY_SITE_QUARANTINE_PATH = config.APP_DIR / "jobspy_site_quarantine.json"
+_JOBSPY_SITE_QUARANTINE_HOURS = 12
 
 
 def _resolve_debug_log_path() -> Path:
@@ -371,6 +374,221 @@ def _resolve_jobspy_sites(sites: list[str], remote_only: bool) -> tuple[list[str
     return effective_sites, has_glassdoor
 
 
+def _load_site_quarantines() -> dict[str, dict]:
+    """Load active JobSpy site quarantines from user state."""
+    if not _JOBSPY_SITE_QUARANTINE_PATH.exists():
+        return {}
+
+    try:
+        payload = json.loads(_JOBSPY_SITE_QUARANTINE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    now = datetime.now(timezone.utc)
+    active: dict[str, dict] = {}
+    for site, info in payload.items():
+        try:
+            until = datetime.fromisoformat(info["until"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        until = until.astimezone(timezone.utc)
+        if until > now:
+            active[site] = {
+                "until": until,
+                "reason": info.get("reason", "unknown"),
+            }
+    return active
+
+
+def _save_site_quarantines(quarantines: dict[str, dict]) -> None:
+    serializable = {
+        site: {
+            "until": info["until"].astimezone(timezone.utc).isoformat(),
+            "reason": info.get("reason", "unknown"),
+        }
+        for site, info in quarantines.items()
+    }
+    try:
+        _JOBSPY_SITE_QUARANTINE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _JOBSPY_SITE_QUARANTINE_PATH.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
+    except OSError:
+        return
+
+
+def _quarantine_site(site: str, reason: str) -> dict:
+    active = _load_site_quarantines()
+    existing = active.get(site)
+    if existing is not None:
+        return existing
+
+    info = {
+        "until": datetime.now(timezone.utc) + timedelta(hours=_JOBSPY_SITE_QUARANTINE_HOURS),
+        "reason": reason,
+    }
+    active[site] = info
+    _save_site_quarantines(active)
+    return info
+
+
+def _quarantine_reason_for_exception(site: str, exc: Exception) -> str | None:
+    text = f"{exc.__class__.__name__}: {exc}".lower()
+    if site == "zip_recruiter" and (
+        "403" in text or "cloudflare" in text or "challenge" in text or "forbidden" in text
+    ):
+        return "cloudflare_403"
+    return None
+
+
+def _ziprecruiter_search_url(search_term: str, location: str, remote_only: bool, page_number: int) -> str:
+    params = {
+        "search": search_term,
+        "location": location,
+        "form": "jobs-landing",
+    }
+    if remote_only:
+        params["refine_by_location_type"] = "only_remote"
+    base = "https://www.ziprecruiter.com/jobs-search"
+    if page_number > 1:
+        base += f"/{page_number}"
+    return f"{base}?{urlencode(params)}"
+
+
+def _merge_ziprecruiter_page_data(item_list: list[dict], cards: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    for idx, item in enumerate(item_list):
+        card = cards[idx] if idx < len(cards) else {}
+        title = item.get("name") or card.get("title") or ""
+        location = card.get("location") or ""
+        merged.append(
+            {
+                "job_url": item.get("url") or "",
+                "title": title,
+                "company": card.get("company") or "",
+                "location": location,
+                "salary": card.get("salary") or None,
+                "description": None,
+                "date_posted": None,
+                "site": "zip_recruiter",
+                "is_remote": "remote" in location.lower(),
+            }
+        )
+    return merged
+
+
+def _scrape_ziprecruiter_browser(
+    *,
+    search_term: str,
+    location: str,
+    results_wanted: int,
+    remote_only: bool,
+    proxy_config: dict | None,
+):
+    """Scrape ZipRecruiter with a real browser to clear Cloudflare and parse rendered results."""
+    from playwright.sync_api import sync_playwright
+
+    from applypilot.apply.chrome import _get_real_user_agent
+    from applypilot.enrichment.detail import _STEALTH_INIT_SCRIPT
+
+    launch_opts: dict = {"headless": True}
+    try:
+        chrome_path = config.get_chrome_path()
+    except FileNotFoundError:
+        chrome_path = None
+    if chrome_path:
+        launch_opts["executable_path"] = chrome_path
+    if proxy_config:
+        launch_opts["proxy"] = proxy_config["playwright"]
+
+    per_page = 20
+    page_count = max(1, min(5, (results_wanted + per_page - 1) // per_page))
+    collected: list[dict] = []
+    seen_urls: set[str] = set()
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(**launch_opts)
+        try:
+            context = browser.new_context(user_agent=_get_real_user_agent())
+            context.add_init_script(_STEALTH_INIT_SCRIPT)
+            page = context.new_page()
+
+            for page_number in range(1, page_count + 1):
+                page.goto(
+                    _ziprecruiter_search_url(search_term, location, remote_only, page_number),
+                    timeout=60000,
+                    wait_until="domcontentloaded",
+                )
+                page.wait_for_selector("article[id^='job-card-'], script[type='application/ld+json']", timeout=30000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=8000)
+                except Exception:
+                    pass
+
+                payload = page.evaluate(
+                    """
+                    () => {
+                        const itemList = [];
+                        for (const script of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
+                            try {
+                                const parsed = JSON.parse(script.textContent || 'null');
+                                if (parsed && parsed['@type'] === 'ItemList' && Array.isArray(parsed.itemListElement)) {
+                                    for (const item of parsed.itemListElement) {
+                                        itemList.push({
+                                            name: item?.name || '',
+                                            url: item?.url || '',
+                                        });
+                                    }
+                                    break;
+                                }
+                            } catch (_) {}
+                        }
+
+                        const seen = new Set();
+                        const cards = [];
+                        for (const article of Array.from(document.querySelectorAll('article[id^="job-card-"]'))) {
+                            const id = article.id || '';
+                            if (!id || seen.has(id)) continue;
+                            const title = article.querySelector('h2')?.textContent?.trim() || '';
+                            if (!title) continue;
+                            seen.add(id);
+                            const paragraphs = Array.from(article.querySelectorAll('p'))
+                                .map((p) => (p.textContent || '').trim())
+                                .filter(Boolean);
+                            cards.push({
+                                id,
+                                title,
+                                company: article.querySelector('a[href^="/co/"]')?.textContent?.trim() || '',
+                                location: paragraphs.find((text) => text.includes('·')) || '',
+                                salary: paragraphs.find((text) => /\\$|\\/hr|\\/yr/.test(text)) || '',
+                            });
+                        }
+
+                        return { itemList, cards };
+                    }
+                    """
+                )
+
+                merged = _merge_ziprecruiter_page_data(payload.get("itemList", []), payload.get("cards", []))
+                page_new = 0
+                for row in merged:
+                    url = row.get("job_url") or ""
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    collected.append(row)
+                    page_new += 1
+                    if len(collected) >= results_wanted:
+                        break
+
+                if page_new == 0 or len(collected) >= results_wanted:
+                    break
+        finally:
+            browser.close()
+
+    return pd.DataFrame(collected)
+
+
 def _build_site_scrape_kwargs(
     *,
     site: str,
@@ -417,25 +635,43 @@ def _scrape_sites_independently(
     max_retries: int,
     verbose: int = 0,
     hypothesis_id: str = "H1",
-) -> tuple[list[object], list[dict]]:
+    quarantined_sites: dict[str, dict] | None = None,
+) -> tuple[list[object], list[dict], dict[str, dict]]:
     dataframes: list[object] = []
     failures: list[dict] = []
+    newly_quarantined: dict[str, dict] = {}
+    active_quarantines = quarantined_sites or {}
 
     for site in sites:
-        kwargs = _build_site_scrape_kwargs(
-            site=site,
-            search_term=search_term,
-            location=location,
-            results_per_site=results_per_site,
-            hours_old=hours_old,
-            proxy_config=proxy_config,
-            remote_only=remote_only,
-            country_indeed=country_indeed,
-            verbose=verbose,
-        )
+        existing_quarantine = active_quarantines.get(site)
+        if existing_quarantine is not None:
+            until = existing_quarantine["until"].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            log.warning("[%s] (site=%s): skipped while quarantined until %s", label, site, until)
+            continue
+
         started = time.time()
         try:
-            df = _scrape_with_retry(kwargs, max_retries=max_retries)
+            if site == "zip_recruiter":
+                df = _scrape_ziprecruiter_browser(
+                    search_term=search_term,
+                    location=location,
+                    results_wanted=results_per_site,
+                    remote_only=remote_only,
+                    proxy_config=proxy_config,
+                )
+            else:
+                kwargs = _build_site_scrape_kwargs(
+                    site=site,
+                    search_term=search_term,
+                    location=location,
+                    results_per_site=results_per_site,
+                    hours_old=hours_old,
+                    proxy_config=proxy_config,
+                    remote_only=remote_only,
+                    country_indeed=country_indeed,
+                    verbose=verbose,
+                )
+                df = _scrape_with_retry(kwargs, max_retries=max_retries)
             dataframes.append(df)
             _emit_debug_log(
                 hypothesis_id=hypothesis_id,
@@ -450,7 +686,17 @@ def _scrape_sites_independently(
             )
         except Exception as e:
             elapsed_ms = int((time.time() - started) * 1000)
-            normalized_kwargs = _normalize_scrape_kwargs(kwargs)
+            if site == "zip_recruiter":
+                normalized_kwargs = {
+                    "site_name": [site],
+                    "search_term": search_term,
+                    "location": location,
+                    "results_wanted": results_per_site,
+                    "is_remote": remote_only,
+                    "strategy": "browser",
+                }
+            else:
+                normalized_kwargs = _normalize_scrape_kwargs(kwargs)
             failure = {
                 "site": site,
                 "exception_class": e.__class__.__name__,
@@ -474,8 +720,20 @@ def _scrape_sites_independently(
                 message="site scrape failed",
                 data={"query": search_term, **failure},
             )
+            quarantine_reason = _quarantine_reason_for_exception(site, e)
+            if quarantine_reason is not None:
+                info = _quarantine_site(site, quarantine_reason)
+                newly_quarantined[site] = info
+                until = info["until"].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                log.warning(
+                    "[%s] (site=%s): quarantined until %s after %s",
+                    label,
+                    site,
+                    until,
+                    quarantine_reason,
+                )
 
-    return dataframes, failures
+    return dataframes, failures, newly_quarantined
 
 
 def _concat_site_results(dataframes: list[object]):
@@ -577,6 +835,7 @@ def _run_one_search(
     accept_locs: list[str],
     reject_locs: list[str],
     glassdoor_map: dict,
+    quarantined_sites: dict[str, dict] | None = None,
 ) -> dict:
     """Run a single search query and store results in DB."""
     s = search
@@ -605,8 +864,9 @@ def _run_one_search(
     all_dfs: list[object] = []
 
     # Run non-Glassdoor sites independently to preserve partial success when one board fails.
+    newly_quarantined: dict[str, dict] = {}
     if other_sites:
-        site_dfs, non_gd_failures = _scrape_sites_independently(
+        site_dfs, non_gd_failures, newly_quarantined = _scrape_sites_independently(
             label=label,
             search_term=s["query"],
             location=s["location"],
@@ -619,6 +879,7 @@ def _run_one_search(
             max_retries=max_retries,
             verbose=0,
             hypothesis_id="H1",
+            quarantined_sites=quarantined_sites,
         )
         all_dfs.extend(site_dfs)
         if non_gd_failures and all_dfs:
@@ -650,9 +911,34 @@ def _run_one_search(
         except Exception as e:
             log.error("[%s] (glassdoor): %s", label, e)
 
+    attempted_sites = [
+        site for site in other_sites if not quarantined_sites or site not in quarantined_sites
+    ]
+    if has_glassdoor:
+        attempted_sites.append("glassdoor")
+    if not attempted_sites and not all_dfs:
+        log.warning("[%s]: all sites skipped because they are quarantined", label)
+        return {
+            "new": 0,
+            "existing": 0,
+            "errors": 0,
+            "filtered": 0,
+            "total": 0,
+            "label": label,
+            "quarantined_sites": newly_quarantined,
+        }
+
     if not all_dfs:
         log.error("[%s]: all sites failed", label)
-        return {"new": 0, "existing": 0, "errors": 1, "filtered": 0, "total": 0, "label": label}
+        return {
+            "new": 0,
+            "existing": 0,
+            "errors": 1,
+            "filtered": 0,
+            "total": 0,
+            "label": label,
+            "quarantined_sites": newly_quarantined,
+        }
 
     df = _concat_site_results(all_dfs)
 
@@ -695,6 +981,7 @@ def _run_one_search(
         "filtered": filtered + recency_filtered,
         "total": before,
         "label": label,
+        "quarantined_sites": newly_quarantined,
     }
 
 
@@ -717,6 +1004,8 @@ def search_jobs(
 
     proxy_config = parse_proxy(proxy) if proxy else None
     effective_sites, has_glassdoor = _resolve_jobspy_sites(sites, remote_only)
+    active_quarantines = _load_site_quarantines()
+    preexisting_quarantines = dict(active_quarantines)
 
     log.info('Search: "%s" in %s | sites=%s | remote=%s', query, location, sites, remote_only)
     _emit_debug_log(
@@ -745,7 +1034,7 @@ def search_jobs(
     )
 
     all_dfs: list[object] = []
-    site_dfs, failures = _scrape_sites_independently(
+    site_dfs, failures, newly_quarantined = _scrape_sites_independently(
         label=f'"{query}" in {location} {"(remote)" if remote_only else ""}',
         search_term=query,
         location=location,
@@ -758,8 +1047,10 @@ def search_jobs(
         max_retries=2,
         verbose=2,
         hypothesis_id="H5",
+        quarantined_sites=active_quarantines,
     )
     all_dfs.extend(site_dfs)
+    active_quarantines.update(newly_quarantined)
 
     if has_glassdoor:
         gd_kwargs = _build_site_scrape_kwargs(
@@ -779,6 +1070,12 @@ def search_jobs(
             failures.append({"site": "glassdoor", "exception_message": str(e)})
             log.error('["%s" in %s] (glassdoor): %s', query, location, e)
 
+    attempted_sites = [site for site in effective_sites if site not in preexisting_quarantines]
+    if has_glassdoor:
+        attempted_sites.append("glassdoor")
+    if not attempted_sites and not all_dfs:
+        log.warning('JobSpy search skipped: all sites are quarantined for "%s" in %s', query, location)
+        return {"total": 0, "new": 0, "existing": 0}
     if not all_dfs:
         log.error('JobSpy search failed: all sites failed for "%s" in %s', query, location)
         return {"error": "all sites failed", "total": 0, "new": 0, "existing": 0}
@@ -864,9 +1161,14 @@ def _full_crawl(
             )
 
     proxy_config = parse_proxy(proxy) if proxy else None
+    active_quarantines = _load_site_quarantines()
 
     log.info("Full crawl: %d search combinations", len(searches))
     log.info("Sites: %s | Results/site: %d | Hours old: %d", ", ".join(sites), results_per_site, hours_old)
+    if active_quarantines:
+        for site, info in active_quarantines.items():
+            until = info["until"].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            log.warning("JobSpy site quarantine active: %s skipped until %s (%s)", site, until, info["reason"])
     if _DEBUG_JOBSPY_ENABLED:
         compat = _jobspy_debug_compat_snapshot()
         log.info(
@@ -902,11 +1204,13 @@ def _full_crawl(
             accept_locs,
             reject_locs,
             glassdoor_map,
+            active_quarantines,
         )
         completed += 1
         total_new += result["new"]
         total_existing += result["existing"]
         total_errors += result["errors"]
+        active_quarantines.update(result.get("quarantined_sites", {}))
 
         if completed % 5 == 0 or completed == len(searches):
             log.info(

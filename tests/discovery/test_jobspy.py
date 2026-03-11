@@ -103,7 +103,7 @@ def test_apply_local_hours_filter_is_noop_without_supported_column() -> None:
     assert enforced is False
 
 
-def test_run_one_search_remote_drops_indeed_and_runs_each_site(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_one_search_remote_drops_indeed_and_runs_each_site(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     calls: list[list[str]] = []
 
     def _fake_scrape(kwargs: dict, max_retries: int = 0):
@@ -111,7 +111,13 @@ def test_run_one_search_remote_drops_indeed_and_runs_each_site(monkeypatch: pyte
         site = kwargs["site_name"][0]
         return pd.DataFrame([{"job_url": f"https://example.com/{site}", "location": "Remote", "site": site}])
 
+    def _fake_zip(**kwargs):
+        calls.append(["zip_recruiter"])
+        return pd.DataFrame([{"job_url": "https://example.com/zip", "location": "Remote", "site": "zip_recruiter"}])
+
+    monkeypatch.setattr(jobspy, "_JOBSPY_SITE_QUARANTINE_PATH", tmp_path / "jobspy_site_quarantine.json")
     monkeypatch.setattr(jobspy, "_scrape_with_retry", _fake_scrape)
+    monkeypatch.setattr(jobspy, "_scrape_ziprecruiter_browser", _fake_zip)
     monkeypatch.setattr(jobspy, "get_connection", lambda: object())
     monkeypatch.setattr(jobspy, "store_jobspy_results", lambda conn, df, source_label: (len(df), 0))
 
@@ -134,15 +140,18 @@ def test_run_one_search_remote_drops_indeed_and_runs_each_site(monkeypatch: pyte
 
 
 def test_run_one_search_keeps_partial_success_when_one_site_fails(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
     def _fake_scrape(kwargs: dict, max_retries: int = 0):
         site = kwargs["site_name"][0]
-        if site == "zip_recruiter":
-            raise RuntimeError("bad response status code: 403")
         return pd.DataFrame([{"job_url": "https://example.com/li", "location": "Remote", "site": site}])
 
+    def _fake_zip(**kwargs):
+        raise RuntimeError("bad response status code: 403")
+
+    monkeypatch.setattr(jobspy, "_JOBSPY_SITE_QUARANTINE_PATH", tmp_path / "jobspy_site_quarantine.json")
     monkeypatch.setattr(jobspy, "_scrape_with_retry", _fake_scrape)
+    monkeypatch.setattr(jobspy, "_scrape_ziprecruiter_browser", _fake_zip)
     monkeypatch.setattr(jobspy, "get_connection", lambda: object())
     monkeypatch.setattr(jobspy, "store_jobspy_results", lambda conn, df, source_label: (len(df), 0))
 
@@ -167,13 +176,18 @@ def test_run_one_search_keeps_partial_success_when_one_site_fails(
 
 
 def test_run_one_search_reports_error_when_all_sites_fail(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
     def _fake_scrape(kwargs: dict, max_retries: int = 0):
         site = kwargs["site_name"][0]
         raise RuntimeError(f"{site} blocked 403")
 
+    def _fake_zip(**kwargs):
+        raise RuntimeError("zip_recruiter blocked 403")
+
+    monkeypatch.setattr(jobspy, "_JOBSPY_SITE_QUARANTINE_PATH", tmp_path / "jobspy_site_quarantine.json")
     monkeypatch.setattr(jobspy, "_scrape_with_retry", _fake_scrape)
+    monkeypatch.setattr(jobspy, "_scrape_ziprecruiter_browser", _fake_zip)
 
     result = jobspy._run_one_search(
         search={"query": "UI/UX", "location": "Remote", "remote": True, "tier": 3},
@@ -195,19 +209,22 @@ def test_run_one_search_reports_error_when_all_sites_fail(
 
 
 def test_search_jobs_keeps_partial_success_when_one_site_fails(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, tmp_path, caplog: pytest.LogCaptureFixture
 ) -> None:
     def _fake_scrape(kwargs: dict, max_retries: int = 0):
         site = kwargs["site_name"][0]
-        if site == "zip_recruiter":
-            raise RuntimeError("bad response status code: 403")
         return pd.DataFrame([{"job_url": "https://example.com/li", "location": "Remote", "site": site}])
+
+    def _fake_zip(**kwargs):
+        raise RuntimeError("bad response status code: 403")
 
     class _FakeConn:
         def execute(self, _query: str):
             return SimpleNamespace(fetchone=lambda: [1])
 
+    monkeypatch.setattr(jobspy, "_JOBSPY_SITE_QUARANTINE_PATH", tmp_path / "jobspy_site_quarantine.json")
     monkeypatch.setattr(jobspy, "_scrape_with_retry", _fake_scrape)
+    monkeypatch.setattr(jobspy, "_scrape_ziprecruiter_browser", _fake_zip)
     monkeypatch.setattr(jobspy, "init_db", lambda: _FakeConn())
     monkeypatch.setattr(jobspy, "store_jobspy_results", lambda conn, df, source_label: (len(df), 0))
 
@@ -222,3 +239,96 @@ def test_search_jobs_keeps_partial_success_when_one_site_fails(
     assert result["new"] == 1
     assert "all sites failed" not in caplog.text
     assert "partial site success" in caplog.text
+
+
+def test_full_crawl_quarantines_ziprecruiter_after_first_403(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def _fake_scrape(kwargs: dict, max_retries: int = 0):
+        site = kwargs["site_name"][0]
+        query = kwargs["search_term"]
+        calls.append((site, query))
+        return pd.DataFrame([{"job_url": f"https://example.com/{query}", "location": "Remote", "site": site}])
+
+    def _fake_zip(**kwargs):
+        calls.append(("zip_recruiter", kwargs["search_term"]))
+        raise RuntimeError("bad response status code: 403")
+
+    fake_conn = SimpleNamespace(execute=lambda _query: SimpleNamespace(fetchone=lambda: [5]))
+
+    monkeypatch.setattr(jobspy, "_JOBSPY_SITE_QUARANTINE_PATH", tmp_path / "jobspy_site_quarantine.json")
+    monkeypatch.setattr(jobspy, "_scrape_with_retry", _fake_scrape)
+    monkeypatch.setattr(jobspy, "_scrape_ziprecruiter_browser", _fake_zip)
+    monkeypatch.setattr(jobspy, "init_db", lambda: None)
+    monkeypatch.setattr(jobspy, "get_connection", lambda: fake_conn)
+    monkeypatch.setattr(jobspy, "store_jobspy_results", lambda conn, df, source_label: (len(df), 0))
+
+    result = jobspy._full_crawl(
+        search_cfg={
+            "queries": [{"query": "Systems Architect"}, {"query": "Backend Engineer"}],
+            "locations": [{"location": "Remote", "remote": True}],
+            "sites": ["linkedin", "zip_recruiter"],
+            "defaults": {},
+        },
+        sites=["linkedin", "zip_recruiter"],
+        results_per_site=50,
+        hours_old=72,
+        max_retries=0,
+    )
+
+    assert calls == [
+        ("linkedin", "Systems Architect"),
+        ("zip_recruiter", "Systems Architect"),
+        ("linkedin", "Backend Engineer"),
+    ]
+    assert result["errors"] == 0
+    assert "quarantined until" in caplog.text
+    assert (tmp_path / "jobspy_site_quarantine.json").exists()
+
+
+def test_search_jobs_skips_preexisting_quarantined_ziprecruiter(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    quarantine_path = tmp_path / "jobspy_site_quarantine.json"
+    quarantine_path.write_text(
+        '{"zip_recruiter": {"until": "2999-01-01T00:00:00+00:00", "reason": "cloudflare_403"}}',
+        encoding="utf-8",
+    )
+
+    calls: list[dict] = []
+
+    def _fake_scrape(kwargs: dict, max_retries: int = 0):
+        calls.append(kwargs)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(jobspy, "_JOBSPY_SITE_QUARANTINE_PATH", quarantine_path)
+    monkeypatch.setattr(jobspy, "_scrape_with_retry", _fake_scrape)
+    monkeypatch.setattr(jobspy, "_scrape_ziprecruiter_browser", lambda **kwargs: (_ for _ in ()).throw(AssertionError("should not run")))
+
+    result = jobspy.search_jobs(
+        query="Systems Architect",
+        location="Remote",
+        sites=["zip_recruiter"],
+        remote_only=True,
+    )
+
+    assert result == {"total": 0, "new": 0, "existing": 0}
+    assert calls == []
+
+
+def test_merge_ziprecruiter_page_data_prefers_itemlist_urls() -> None:
+    merged = jobspy._merge_ziprecruiter_page_data(
+        item_list=[
+            {"name": "Systems Architect", "url": "https://www.ziprecruiter.com/c/Foo/Job/Systems-Architect?jid=123"},
+            {"name": "Backend Engineer", "url": "https://www.ziprecruiter.com/c/Bar/Job/Backend-Engineer?jid=456"},
+        ],
+        cards=[
+            {"title": "Systems Architect", "company": "Foo", "location": "Remote, US · Remote", "salary": "$100K/yr"},
+            {"title": "Backend Engineer", "company": "Bar", "location": "Austin, TX · On-site +1", "salary": ""},
+        ],
+    )
+
+    assert merged[0]["job_url"].endswith("jid=123")
+    assert merged[0]["is_remote"] is True
+    assert merged[1]["title"] == "Backend Engineer"
+    assert merged[1]["salary"] is None
