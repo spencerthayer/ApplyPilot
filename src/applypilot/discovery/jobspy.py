@@ -457,13 +457,18 @@ def _ziprecruiter_search_url(search_term: str, location: str, remote_only: bool,
 
 def _merge_ziprecruiter_page_data(item_list: list[dict], cards: list[dict]) -> list[dict]:
     merged: list[dict] = []
-    for idx, item in enumerate(item_list):
+    row_count = max(len(item_list), len(cards))
+    for idx in range(row_count):
+        item = item_list[idx] if idx < len(item_list) else {}
         card = cards[idx] if idx < len(cards) else {}
+        job_url = item.get("url") or card.get("url") or ""
         title = item.get("name") or card.get("title") or ""
+        if not job_url and not title:
+            continue
         location = card.get("location") or ""
         merged.append(
             {
-                "job_url": item.get("url") or "",
+                "job_url": job_url,
                 "title": title,
                 "company": card.get("company") or "",
                 "location": location,
@@ -475,6 +480,130 @@ def _merge_ziprecruiter_page_data(item_list: list[dict], cards: list[dict]) -> l
             }
         )
     return merged
+
+
+def _classify_ziprecruiter_page(payload: dict) -> dict[str, object]:
+    item_list = payload.get("itemList") or []
+    cards = payload.get("cards") or []
+    markers = payload.get("markers") or {}
+    if item_list or cards:
+        state = "results"
+    elif markers.get("challenge_or_block"):
+        state = "challenge_or_block"
+    elif markers.get("empty"):
+        state = "empty"
+    else:
+        state = "unexpected_layout"
+    return {
+        "state": state,
+        "itemList": item_list,
+        "cards": cards,
+        "item_list_count": len(item_list),
+        "card_count": len(cards),
+        "text_sample": str(payload.get("textSample") or "")[:240],
+    }
+
+
+def _inspect_ziprecruiter_page(page) -> dict[str, object]:
+    payload = page.evaluate(
+        """
+        () => {
+            const itemList = [];
+            for (const script of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
+                try {
+                    const parsed = JSON.parse(script.textContent || 'null');
+                    if (parsed && parsed['@type'] === 'ItemList' && Array.isArray(parsed.itemListElement)) {
+                        for (const item of parsed.itemListElement) {
+                            itemList.push({
+                                name: item?.name || '',
+                                url: item?.url || '',
+                            });
+                        }
+                        break;
+                    }
+                } catch (_) {}
+            }
+
+            const seen = new Set();
+            const cards = [];
+            for (const article of Array.from(document.querySelectorAll('article[id^="job-card-"]'))) {
+                const id = article.id || '';
+                if (!id || seen.has(id)) continue;
+                const title = article.querySelector('h2')?.textContent?.trim() || '';
+                if (!title) continue;
+                seen.add(id);
+                const paragraphs = Array.from(article.querySelectorAll('p'))
+                    .map((p) => (p.textContent || '').trim())
+                    .filter(Boolean);
+                const hrefs = Array.from(article.querySelectorAll('a[href]'))
+                    .map((a) => a.getAttribute('href') || '')
+                    .filter(Boolean);
+                const preferredHref = hrefs.find((href) => {
+                    const lowered = href.toLowerCase();
+                    return /\\/jobs?\\//i.test(href) || /\\/c\\/.+\\/job\\//i.test(lowered) || lowered.includes('jid=');
+                }) || hrefs.find((href) => !href.startsWith('/co/') && !href.startsWith('#')) || '';
+                let jobUrl = '';
+                if (preferredHref) {
+                    try {
+                        jobUrl = new URL(preferredHref, window.location.origin).href;
+                    } catch (_) {
+                        jobUrl = preferredHref;
+                    }
+                }
+                cards.push({
+                    id,
+                    url: jobUrl,
+                    title,
+                    company: article.querySelector('a[href^="/co/"]')?.textContent?.trim() || '',
+                    location: paragraphs.find((text) => text.includes('·')) || '',
+                    salary: paragraphs.find((text) => /\\$|\\/hr|\\/yr/.test(text)) || '',
+                });
+            }
+
+            const textSample = [document.title || '', document.body?.innerText || '']
+                .filter(Boolean)
+                .join('\\n')
+                .slice(0, 4000);
+            const loweredText = textSample.toLowerCase();
+            const challengeSignals = [
+                'cloudflare',
+                'verify you are human',
+                'verify that you are human',
+                'access denied',
+                'forbidden',
+                'security check',
+                'unusual traffic',
+                'complete the security check',
+                'checking your browser',
+                'challenge',
+            ];
+            const emptySignals = [
+                'no jobs found',
+                'no matching jobs',
+                'no matching job',
+                'no results found',
+                '0 jobs',
+                'try another search',
+            ];
+
+            return {
+                itemList,
+                cards,
+                markers: {
+                    challenge_or_block: challengeSignals.some((token) => loweredText.includes(token)),
+                    empty: emptySignals.some((token) => loweredText.includes(token))
+                        || Boolean(
+                            document.querySelector(
+                                '[data-testid*="no-results"], [class*="no-results"], [id*="no-results"]'
+                            )
+                        ),
+                },
+                textSample,
+            };
+        }
+        """
+    )
+    return _classify_ziprecruiter_page(payload)
 
 
 def _scrape_ziprecruiter_browser(
@@ -519,57 +648,46 @@ def _scrape_ziprecruiter_browser(
                     timeout=60000,
                     wait_until="domcontentloaded",
                 )
-                page.wait_for_selector("article[id^='job-card-'], script[type='application/ld+json']", timeout=30000)
+                selector_ready = True
+                try:
+                    page.wait_for_selector(
+                        "article[id^='job-card-'], script[type='application/ld+json']",
+                        state="attached",
+                        timeout=30000,
+                    )
+                except Exception:
+                    selector_ready = False
                 try:
                     page.wait_for_load_state("networkidle", timeout=8000)
                 except Exception:
                     pass
 
-                payload = page.evaluate(
-                    """
-                    () => {
-                        const itemList = [];
-                        for (const script of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
-                            try {
-                                const parsed = JSON.parse(script.textContent || 'null');
-                                if (parsed && parsed['@type'] === 'ItemList' && Array.isArray(parsed.itemListElement)) {
-                                    for (const item of parsed.itemListElement) {
-                                        itemList.push({
-                                            name: item?.name || '',
-                                            url: item?.url || '',
-                                        });
-                                    }
-                                    break;
-                                }
-                            } catch (_) {}
-                        }
-
-                        const seen = new Set();
-                        const cards = [];
-                        for (const article of Array.from(document.querySelectorAll('article[id^="job-card-"]'))) {
-                            const id = article.id || '';
-                            if (!id || seen.has(id)) continue;
-                            const title = article.querySelector('h2')?.textContent?.trim() || '';
-                            if (!title) continue;
-                            seen.add(id);
-                            const paragraphs = Array.from(article.querySelectorAll('p'))
-                                .map((p) => (p.textContent || '').trim())
-                                .filter(Boolean);
-                            cards.push({
-                                id,
-                                title,
-                                company: article.querySelector('a[href^="/co/"]')?.textContent?.trim() || '',
-                                location: paragraphs.find((text) => text.includes('·')) || '',
-                                salary: paragraphs.find((text) => /\\$|\\/hr|\\/yr/.test(text)) || '',
-                            });
-                        }
-
-                        return { itemList, cards };
-                    }
-                    """
+                page_info = _inspect_ziprecruiter_page(page)
+                _emit_debug_log(
+                    hypothesis_id="H4",
+                    location="jobspy.py:_scrape_ziprecruiter_browser",
+                    message="ziprecruiter page classified",
+                    data={
+                        "query": search_term,
+                        "page_number": page_number,
+                        "selector_ready": selector_ready,
+                        "state": page_info["state"],
+                        "item_list_count": page_info["item_list_count"],
+                        "card_count": page_info["card_count"],
+                        "text_sample": page_info["text_sample"],
+                    },
                 )
+                if page_info["state"] == "challenge_or_block":
+                    break
+                if page_info["state"] == "empty":
+                    break
+                if page_info["state"] == "unexpected_layout":
+                    raise RuntimeError(
+                        "ziprecruiter unexpected_layout"
+                        + (f": {page_info['text_sample']}" if page_info["text_sample"] else "")
+                    )
 
-                merged = _merge_ziprecruiter_page_data(payload.get("itemList", []), payload.get("cards", []))
+                merged = _merge_ziprecruiter_page_data(page_info["itemList"], page_info["cards"])
                 page_new = 0
                 for row in merged:
                     url = row.get("job_url") or ""

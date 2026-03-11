@@ -9,6 +9,74 @@ import pytest
 from applypilot.discovery import jobspy
 
 
+class _FakeZipRecruiterPage:
+    def __init__(self, payloads: list[dict], *, raise_on_wait: bool = False) -> None:
+        self._payloads = list(payloads)
+        self.raise_on_wait = raise_on_wait
+        self.goto_calls: list[dict] = []
+        self.wait_calls: list[dict] = []
+        self.load_state_calls: list[dict] = []
+
+    def goto(self, url: str, *, timeout: int, wait_until: str) -> None:
+        self.goto_calls.append({"url": url, "timeout": timeout, "wait_until": wait_until})
+
+    def wait_for_selector(self, selector: str, *, state: str | None = None, timeout: int | None = None) -> None:
+        self.wait_calls.append({"selector": selector, "state": state, "timeout": timeout})
+        if self.raise_on_wait:
+            raise TimeoutError("selector not attached")
+
+    def wait_for_load_state(self, state: str, *, timeout: int | None = None) -> None:
+        self.load_state_calls.append({"state": state, "timeout": timeout})
+
+    def evaluate(self, _script: str) -> dict:
+        if not self._payloads:
+            raise AssertionError("No fake ZipRecruiter payloads remaining")
+        return self._payloads.pop(0)
+
+
+def _install_fake_ziprecruiter_browser(
+    monkeypatch: pytest.MonkeyPatch,
+    payloads: list[dict],
+    *,
+    raise_on_wait: bool = False,
+) -> _FakeZipRecruiterPage:
+    page = _FakeZipRecruiterPage(payloads, raise_on_wait=raise_on_wait)
+
+    class _FakeContext:
+        def add_init_script(self, _script: str) -> None:
+            return None
+
+        def new_page(self) -> _FakeZipRecruiterPage:
+            return page
+
+    class _FakeBrowser:
+        def new_context(self, *, user_agent: str) -> _FakeContext:
+            assert user_agent == "fake-user-agent"
+            return _FakeContext()
+
+        def close(self) -> None:
+            return None
+
+    class _FakeChromium:
+        def launch(self, **_kwargs) -> _FakeBrowser:
+            return _FakeBrowser()
+
+    class _FakePlaywright:
+        chromium = _FakeChromium()
+
+        def __enter__(self) -> "_FakePlaywright":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    monkeypatch.setattr("playwright.sync_api.sync_playwright", lambda: _FakePlaywright())
+    monkeypatch.setattr("applypilot.apply.chrome._get_real_user_agent", lambda: "fake-user-agent")
+    monkeypatch.setattr("applypilot.enrichment.detail._STEALTH_INIT_SCRIPT", "window.__stealth = true;")
+    monkeypatch.setattr(jobspy.config, "get_chrome_path", lambda: "/tmp/fake-chrome")
+    return page
+
+
 def test_normalize_scrape_kwargs_adapts_old_jobspy_signature(monkeypatch) -> None:
     monkeypatch.setattr(
         jobspy,
@@ -332,3 +400,133 @@ def test_merge_ziprecruiter_page_data_prefers_itemlist_urls() -> None:
     assert merged[0]["is_remote"] is True
     assert merged[1]["title"] == "Backend Engineer"
     assert merged[1]["salary"] is None
+
+
+def test_scrape_ziprecruiter_browser_uses_attached_wait_for_jsonld_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    page = _install_fake_ziprecruiter_browser(
+        monkeypatch,
+        [
+            {
+                "itemList": [
+                    {
+                        "name": "Systems Architect",
+                        "url": "https://www.ziprecruiter.com/c/Foo/Job/Systems-Architect?jid=123",
+                    }
+                ],
+                "cards": [],
+                "markers": {"challenge_or_block": False, "empty": False},
+                "textSample": "ZipRecruiter systems architect results",
+            }
+        ],
+    )
+
+    df = jobspy._scrape_ziprecruiter_browser(
+        search_term="Systems Architect",
+        location="Remote",
+        results_wanted=5,
+        remote_only=True,
+        proxy_config=None,
+    )
+
+    assert page.wait_calls == [
+        {
+            "selector": "article[id^='job-card-'], script[type='application/ld+json']",
+            "state": "attached",
+            "timeout": 30000,
+        }
+    ]
+    assert page.load_state_calls == [{"state": "networkidle", "timeout": 8000}]
+    assert list(df["job_url"]) == ["https://www.ziprecruiter.com/c/Foo/Job/Systems-Architect?jid=123"]
+    assert list(df["title"]) == ["Systems Architect"]
+
+
+def test_scrape_ziprecruiter_browser_accepts_card_only_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_ziprecruiter_browser(
+        monkeypatch,
+        [
+            {
+                "itemList": [],
+                "cards": [
+                    {
+                        "url": "https://www.ziprecruiter.com/jobs/backend-engineer-123",
+                        "title": "Backend Engineer",
+                        "company": "Bar",
+                        "location": "Remote, US · Remote",
+                        "salary": "$140K/yr",
+                    }
+                ],
+                "markers": {"challenge_or_block": False, "empty": False},
+                "textSample": "ZipRecruiter backend engineer results",
+            }
+        ],
+    )
+
+    df = jobspy._scrape_ziprecruiter_browser(
+        search_term="Backend Engineer",
+        location="Remote",
+        results_wanted=5,
+        remote_only=True,
+        proxy_config=None,
+    )
+
+    assert list(df["job_url"]) == ["https://www.ziprecruiter.com/jobs/backend-engineer-123"]
+    assert list(df["company"]) == ["Bar"]
+    assert list(df["salary"]) == ["$140K/yr"]
+
+
+def test_scrape_ziprecruiter_browser_logs_challenge_state_and_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    debug_calls: list[dict] = []
+    _install_fake_ziprecruiter_browser(
+        monkeypatch,
+        [
+            {
+                "itemList": [],
+                "cards": [],
+                "markers": {"challenge_or_block": True, "empty": False},
+                "textSample": "Verify you are human before continuing",
+            }
+        ],
+        raise_on_wait=True,
+    )
+    monkeypatch.setattr(jobspy, "_emit_debug_log", lambda **kwargs: debug_calls.append(kwargs))
+
+    df = jobspy._scrape_ziprecruiter_browser(
+        search_term="Systems Architect",
+        location="Remote",
+        results_wanted=5,
+        remote_only=True,
+        proxy_config=None,
+    )
+
+    assert df.empty
+    assert debug_calls[-1]["message"] == "ziprecruiter page classified"
+    assert debug_calls[-1]["data"]["state"] == "challenge_or_block"
+    assert debug_calls[-1]["data"]["selector_ready"] is False
+
+
+def test_scrape_ziprecruiter_browser_raises_on_unexpected_layout(monkeypatch: pytest.MonkeyPatch) -> None:
+    debug_calls: list[dict] = []
+    _install_fake_ziprecruiter_browser(
+        monkeypatch,
+        [
+            {
+                "itemList": [],
+                "cards": [],
+                "markers": {"challenge_or_block": False, "empty": False},
+                "textSample": "ZipRecruiter marketing shell",
+            }
+        ],
+        raise_on_wait=True,
+    )
+    monkeypatch.setattr(jobspy, "_emit_debug_log", lambda **kwargs: debug_calls.append(kwargs))
+
+    with pytest.raises(RuntimeError, match="unexpected_layout"):
+        jobspy._scrape_ziprecruiter_browser(
+            search_term="Systems Architect",
+            location="Remote",
+            results_wanted=5,
+            remote_only=True,
+            proxy_config=None,
+        )
+
+    assert debug_calls[-1]["data"]["state"] == "unexpected_layout"
