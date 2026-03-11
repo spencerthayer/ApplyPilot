@@ -36,6 +36,7 @@ node_modules/
 # Python
 __pycache__/
 .venv/
+.venv.broken/
 *.py[cod]
 *$py.class
 *.egg-info/
@@ -66,4 +67,3 @@ CLAUDE.md
 resume.json
 
 .applypilot
-.venv.broken/*
