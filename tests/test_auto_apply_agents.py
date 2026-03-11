@@ -308,6 +308,66 @@ def test_doctor_reports_auto_apply_agent_layer(monkeypatch, tmp_path: Path) -> N
     assert "Logged in using ChatGPT" in output
 
 
+def test_doctor_reports_jobspy_version_and_compatibility_warning(monkeypatch, tmp_path: Path) -> None:
+    profile = tmp_path / "profile.json"
+    resume_json = tmp_path / "resume.json"
+    resume = tmp_path / "resume.txt"
+    searches = tmp_path / "searches.yaml"
+    profile.write_text("{}", encoding="utf-8")
+    resume.write_text("resume", encoding="utf-8")
+    searches.write_text("queries: []\n", encoding="utf-8")
+
+    buffer = io.StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=220))
+    monkeypatch.setattr(config, "load_env", lambda: None)
+    monkeypatch.setattr(config, "PROFILE_PATH", profile)
+    monkeypatch.setattr(config, "RESUME_JSON_PATH", resume_json)
+    monkeypatch.setattr(config, "RESUME_PATH", resume)
+    monkeypatch.setattr(config, "RESUME_PDF_PATH", tmp_path / "resume.pdf")
+    monkeypatch.setattr(config, "SEARCH_CONFIG_PATH", searches)
+    monkeypatch.setattr(config, "get_chrome_path", lambda: "/Applications/Google Chrome.app")
+    monkeypatch.setattr(config, "get_auto_apply_agent_setting", lambda environ=None: "auto")
+    monkeypatch.setattr(
+        config,
+        "resolve_auto_apply_agent",
+        lambda preferred=None, environ=None: config.AutoApplyAgentSelection(
+            requested="auto",
+            resolved="codex",
+            model="gpt-5.4",
+        ),
+    )
+    monkeypatch.setattr(
+        config,
+        "get_auto_apply_agent_statuses",
+        lambda: {
+            "codex": _agent_status("codex", available=True, binary="/opt/homebrew/bin/codex", note="Logged in using ChatGPT"),
+            "claude": _agent_status("claude", available=False, note="Install from https://claude.ai/code"),
+        },
+    )
+    monkeypatch.setattr(config, "get_tier", lambda: 3)
+    monkeypatch.setattr(llm_provider, "format_llm_provider_status", lambda environ=None: "Gemini (gemini-2.0-flash)")
+    monkeypatch.setattr(llm_provider, "llm_config_hint", lambda: "unused")
+    monkeypatch.setattr(shutil, "which", lambda name: "/opt/homebrew/bin/npx" if name == "npx" else None)
+    monkeypatch.setattr(
+        cli,
+        "_jobspy_runtime_capabilities",
+        lambda: (
+            "1.1.13",
+            ["site_name", "search_term", "location", "results_wanted", "is_remote", "proxy", "country_indeed"],
+            ["hours_old", "description_format", "linkedin_fetch_description", "proxies"],
+        ),
+    )
+
+    cli.doctor()
+    output = buffer.getvalue()
+
+    assert "python-jobspy" in output
+    assert "version 1.1.13" in output
+    assert "JobSpy capability mode" in output
+    assert "compatibility mode active" in output
+    assert "missing args: hours_old" in output
+
+
 def test_setup_auto_apply_writes_separate_agent_env(monkeypatch, tmp_path: Path) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text("GEMINI_API_KEY=test\nLLM_MODEL=gemini-2.0-flash\n", encoding="utf-8")

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from applypilot.discovery import jobspy
 
@@ -100,3 +101,124 @@ def test_apply_local_hours_filter_is_noop_without_supported_column() -> None:
     assert filtered.equals(df)
     assert removed == 0
     assert enforced is False
+
+
+def test_run_one_search_remote_drops_indeed_and_runs_each_site(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_scrape(kwargs: dict, max_retries: int = 0):
+        calls.append(kwargs["site_name"])
+        site = kwargs["site_name"][0]
+        return pd.DataFrame([{"job_url": f"https://example.com/{site}", "location": "Remote", "site": site}])
+
+    monkeypatch.setattr(jobspy, "_scrape_with_retry", _fake_scrape)
+    monkeypatch.setattr(jobspy, "get_connection", lambda: object())
+    monkeypatch.setattr(jobspy, "store_jobspy_results", lambda conn, df, source_label: (len(df), 0))
+
+    result = jobspy._run_one_search(
+        search={"query": "Backend Engineer", "location": "Remote", "remote": True, "tier": 1},
+        sites=["indeed", "linkedin", "zip_recruiter"],
+        results_per_site=50,
+        hours_old=72,
+        proxy_config=None,
+        defaults={},
+        max_retries=0,
+        accept_locs=[],
+        reject_locs=[],
+        glassdoor_map={},
+    )
+
+    assert calls == [["linkedin"], ["zip_recruiter"]]
+    assert result["errors"] == 0
+    assert result["total"] == 2
+
+
+def test_run_one_search_keeps_partial_success_when_one_site_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _fake_scrape(kwargs: dict, max_retries: int = 0):
+        site = kwargs["site_name"][0]
+        if site == "zip_recruiter":
+            raise RuntimeError("bad response status code: 403")
+        return pd.DataFrame([{"job_url": "https://example.com/li", "location": "Remote", "site": site}])
+
+    monkeypatch.setattr(jobspy, "_scrape_with_retry", _fake_scrape)
+    monkeypatch.setattr(jobspy, "get_connection", lambda: object())
+    monkeypatch.setattr(jobspy, "store_jobspy_results", lambda conn, df, source_label: (len(df), 0))
+
+    result = jobspy._run_one_search(
+        search={"query": "Systems Architect", "location": "Remote", "remote": True, "tier": 1},
+        sites=["linkedin", "zip_recruiter"],
+        results_per_site=50,
+        hours_old=72,
+        proxy_config=None,
+        defaults={},
+        max_retries=0,
+        accept_locs=[],
+        reject_locs=[],
+        glassdoor_map={},
+    )
+
+    assert result["errors"] == 0
+    assert result["new"] == 1
+    assert "all sites failed" not in caplog.text
+    assert "(site=zip_recruiter)" in caplog.text
+    assert "partial site success" in caplog.text
+
+
+def test_run_one_search_reports_error_when_all_sites_fail(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _fake_scrape(kwargs: dict, max_retries: int = 0):
+        site = kwargs["site_name"][0]
+        raise RuntimeError(f"{site} blocked 403")
+
+    monkeypatch.setattr(jobspy, "_scrape_with_retry", _fake_scrape)
+
+    result = jobspy._run_one_search(
+        search={"query": "UI/UX", "location": "Remote", "remote": True, "tier": 3},
+        sites=["linkedin", "zip_recruiter"],
+        results_per_site=50,
+        hours_old=72,
+        proxy_config=None,
+        defaults={},
+        max_retries=0,
+        accept_locs=[],
+        reject_locs=[],
+        glassdoor_map={},
+    )
+
+    assert result["errors"] == 1
+    assert "all sites failed" in caplog.text
+    assert "(site=linkedin)" in caplog.text
+    assert "(site=zip_recruiter)" in caplog.text
+
+
+def test_search_jobs_keeps_partial_success_when_one_site_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def _fake_scrape(kwargs: dict, max_retries: int = 0):
+        site = kwargs["site_name"][0]
+        if site == "zip_recruiter":
+            raise RuntimeError("bad response status code: 403")
+        return pd.DataFrame([{"job_url": "https://example.com/li", "location": "Remote", "site": site}])
+
+    class _FakeConn:
+        def execute(self, _query: str):
+            return SimpleNamespace(fetchone=lambda: [1])
+
+    monkeypatch.setattr(jobspy, "_scrape_with_retry", _fake_scrape)
+    monkeypatch.setattr(jobspy, "init_db", lambda: _FakeConn())
+    monkeypatch.setattr(jobspy, "store_jobspy_results", lambda conn, df, source_label: (len(df), 0))
+
+    result = jobspy.search_jobs(
+        query="Systems Architect",
+        location="Remote",
+        sites=["linkedin", "zip_recruiter"],
+        remote_only=True,
+    )
+
+    assert result["total"] == 1
+    assert result["new"] == 1
+    assert "all sites failed" not in caplog.text
+    assert "partial site success" in caplog.text

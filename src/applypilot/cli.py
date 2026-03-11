@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import os
 from pathlib import Path
 from typing import Optional
+from importlib import metadata as importlib_metadata
 
 import typer
 from rich.console import Console
@@ -75,6 +77,24 @@ log = logging.getLogger(__name__)
 
 # Valid pipeline stages (in execution order)
 VALID_STAGES = ("discover", "enrich", "score", "tailor", "cover", "pdf")
+
+
+def _jobspy_runtime_capabilities() -> tuple[str | None, list[str], list[str]]:
+    """Return installed python-jobspy version and capability info."""
+    try:
+        import jobspy
+    except ImportError:
+        return None, [], []
+
+    try:
+        version = importlib_metadata.version("python-jobspy")
+    except importlib_metadata.PackageNotFoundError:
+        version = "unknown"
+
+    params = list(inspect.signature(jobspy.scrape_jobs).parameters)
+    expected = ["hours_old", "description_format", "linkedin_fetch_description", "proxies"]
+    missing = [name for name in expected if name not in params]
+    return version, params, missing
 
 
 # ---------------------------------------------------------------------------
@@ -648,12 +668,24 @@ def doctor() -> None:
         results.append(("searches.yaml", warn_mark, "Will use example config - run 'applypilot init'"))
 
     # jobspy (discovery dep installed separately)
-    try:
-        import jobspy  # noqa: F401
-        results.append(("python-jobspy", ok_mark, "Job board scraping available"))
-    except ImportError:
+    jobspy_version, jobspy_params, jobspy_missing = _jobspy_runtime_capabilities()
+    if jobspy_version is None:
         results.append(("python-jobspy", warn_mark,
                         "pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex"))
+    else:
+        results.append(("python-jobspy", ok_mark, f"version {jobspy_version}"))
+        if jobspy_missing:
+            results.append(
+                (
+                    "JobSpy capability mode",
+                    warn_mark,
+                    f"compatibility mode active (missing args: {', '.join(jobspy_missing)})",
+                )
+            )
+        else:
+            results.append(("JobSpy capability mode", ok_mark, "full feature signature detected"))
+        if jobspy_params:
+            results.append(("JobSpy scrape_jobs args", "[dim]info[/dim]", ", ".join(jobspy_params)))
 
     # --- Tier 2 checks (built-in LLM layer) ---
     llm_status = format_llm_provider_status()

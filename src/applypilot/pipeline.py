@@ -87,6 +87,7 @@ DISCOVERY_SOURCES: dict[str, str] = {
     "jobspy":       "JobSpy aggregator (LinkedIn, Indeed, ZipRecruiter)",
     "linkedin":     "LinkedIn only (via JobSpy)",
     "indeed":       "Indeed only (via JobSpy)",
+    "ziprecruiter": "ZipRecruiter only (via JobSpy)",
     "workday":      "Workday corporate career sites",
     "greenhouse":   "Greenhouse ATS career sites",
     "smartextract": "Smart extract (AI-powered scraping, incl. Dice via sites.yaml)",
@@ -95,15 +96,17 @@ DISCOVERY_SOURCES: dict[str, str] = {
 
 # Alias → canonical name for CLI convenience
 _SOURCE_ALIASES: dict[str, str] = {
-    "hn":    "hackernews",
-    "smart": "smartextract",
-    "dice":  "smartextract",  # dice is scraped via smartextract + sites.yaml
+    "hn":            "hackernews",
+    "smart":         "smartextract",
+    "dice":          "smartextract",   # dice is scraped via smartextract + sites.yaml
+    "zip_recruiter": "ziprecruiter",
 }
 
 # Sources that are jobspy with a specific site filter
 _JOBSPY_SITE_SOURCES: dict[str, list[str]] = {
-    "linkedin": ["linkedin"],
-    "indeed":   ["indeed"],
+    "linkedin":     ["linkedin"],
+    "indeed":       ["indeed"],
+    "ziprecruiter": ["zip_recruiter"],
 }
 
 

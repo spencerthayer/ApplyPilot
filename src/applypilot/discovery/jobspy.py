@@ -9,10 +9,17 @@ search configuration YAML (searches.yaml) rather than being hardcoded.
 
 import logging
 import inspect
+import json
+import os
 import sqlite3
 import time
+import warnings
+from importlib import metadata as importlib_metadata
 from datetime import date, datetime, time as dtime, timedelta, timezone
+from pathlib import Path
+from uuid import uuid4
 
+import pandas as pd
 from jobspy import scrape_jobs
 
 # Patch TLSRotating to always specify a client_identifier.
@@ -57,6 +64,58 @@ log = logging.getLogger(__name__)
 _SCRAPE_JOBS_PARAMS = set(inspect.signature(scrape_jobs).parameters)
 _HOURS_OLD_SUPPORTED = "hours_old" in _SCRAPE_JOBS_PARAMS
 _HOURS_OLD_WARNING_EMITTED = False
+_DEBUG_JOBSPY_ENABLED = os.getenv("APPLYPILOT_DEBUG_JOBSPY") == "1"
+_DEBUG_LOG_PATH = Path(os.getenv("APPLYPILOT_DEBUG_LOG_PATH", ".cursor/debug-e0a421.log")).expanduser()
+_DEBUG_SESSION_ID = os.getenv("APPLYPILOT_DEBUG_SESSION_ID", "e0a421")
+_DEBUG_RUN_ID = os.getenv("APPLYPILOT_DEBUG_RUN_ID", "default")
+
+
+def _resolve_debug_log_path() -> Path:
+    path = _DEBUG_LOG_PATH
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path
+
+
+def _emit_debug_log(
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict,
+    run_id: str = _DEBUG_RUN_ID,
+) -> None:
+    if not _DEBUG_JOBSPY_ENABLED:
+        return
+    log_path = _resolve_debug_log_path()
+    payload = {
+        "sessionId": _DEBUG_SESSION_ID,
+        "id": f"log_{int(time.time() * 1000)}_{uuid4().hex[:8]}",
+        "timestamp": int(time.time() * 1000),
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+    }
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
+    except Exception:
+        pass
+
+
+def _jobspy_debug_compat_snapshot() -> dict:
+    try:
+        version = importlib_metadata.version("python-jobspy")
+    except importlib_metadata.PackageNotFoundError:
+        version = "unknown"
+    return {
+        "python_jobspy_version": version,
+        "scrape_jobs_signature_params": sorted(_SCRAPE_JOBS_PARAMS),
+        "hours_old_supported": _HOURS_OLD_SUPPORTED,
+        "site_by_site_fallback_enabled": True,
+    }
 
 
 def _clean(val) -> str | None:
@@ -108,10 +167,33 @@ def _scrape_with_retry(kwargs: dict, max_retries: int = 2, backoff: float = 5.0)
     normalized_kwargs = _normalize_scrape_kwargs(kwargs)
     for attempt in range(max_retries + 1):
         try:
+            _emit_debug_log(
+                hypothesis_id="H4",
+                location="jobspy.py:_scrape_with_retry",
+                message="scrape attempt start",
+                data={
+                    "attempt": attempt,
+                    "max_retries": max_retries,
+                    "site_name": normalized_kwargs.get("site_name"),
+                },
+            )
             return scrape_jobs(**normalized_kwargs)
         except Exception as e:
             err = str(e).lower()
             transient = any(k in err for k in ("timeout", "429", "proxy", "connection", "reset", "refused"))
+            _emit_debug_log(
+                hypothesis_id="H4",
+                location="jobspy.py:_scrape_with_retry",
+                message="scrape attempt failed",
+                data={
+                    "attempt": attempt,
+                    "max_retries": max_retries,
+                    "site_name": normalized_kwargs.get("site_name"),
+                    "exception_class": e.__class__.__name__,
+                    "exception_message": str(e),
+                    "classified_transient": transient,
+                },
+            )
             if transient and attempt < max_retries:
                 wait = backoff * (attempt + 1)
                 log.warning("Retry %d/%d in %.0fs: %s", attempt + 1, max_retries, wait, e)
@@ -140,6 +222,29 @@ def _normalize_scrape_kwargs(kwargs: dict) -> dict:
 
     if "hours_old" in kwargs and not _HOURS_OLD_SUPPORTED:
         _warn_hours_old_fallback()
+
+    _emit_debug_log(
+        hypothesis_id="H2",
+        location="jobspy.py:_normalize_scrape_kwargs",
+        message="normalized scrape kwargs",
+        data={
+            "input_site_name": kwargs.get("site_name"),
+            "normalized_site_name": normalized.get("site_name"),
+            "input_keys": sorted(kwargs.keys()),
+            "normalized_keys": sorted(normalized.keys()),
+        },
+    )
+
+    _emit_debug_log(
+        hypothesis_id="H3",
+        location="jobspy.py:_normalize_scrape_kwargs",
+        message="jobspy compatibility status",
+        data={
+            "hours_old_supported": _HOURS_OLD_SUPPORTED,
+            "signature_has_hours_old": "hours_old" in _SCRAPE_JOBS_PARAMS,
+            "signature_params": sorted(_SCRAPE_JOBS_PARAMS),
+        },
+    )
 
     return normalized
 
@@ -257,6 +362,130 @@ def _location_ok(location: str | None, accept: list[str], reject: list[str]) -> 
     return False
 
 
+def _resolve_jobspy_sites(sites: list[str], remote_only: bool) -> tuple[list[str], bool]:
+    """Return non-Glassdoor sites after ApplyPilot's remote-only adjustments."""
+    has_glassdoor = "glassdoor" in sites
+    effective_sites = [site for site in sites if site != "glassdoor"]
+    if remote_only and "indeed" in effective_sites:
+        effective_sites = [site for site in effective_sites if site != "indeed"]
+    return effective_sites, has_glassdoor
+
+
+def _build_site_scrape_kwargs(
+    *,
+    site: str,
+    search_term: str,
+    location: str,
+    results_per_site: int,
+    hours_old: int,
+    proxy_config: dict | None,
+    remote_only: bool,
+    country_indeed: str,
+    verbose: int,
+) -> dict:
+    kwargs = {
+        "site_name": [site],
+        "search_term": search_term,
+        "location": location,
+        "results_wanted": results_per_site,
+        "hours_old": hours_old,
+        "description_format": "markdown",
+        "verbose": verbose,
+    }
+    if site == "indeed":
+        kwargs["country_indeed"] = country_indeed
+    if remote_only:
+        kwargs["is_remote"] = True
+    if proxy_config:
+        kwargs["proxies"] = [proxy_config["jobspy"]]
+    if site == "linkedin":
+        kwargs["linkedin_fetch_description"] = True
+    return kwargs
+
+
+def _scrape_sites_independently(
+    *,
+    label: str,
+    search_term: str,
+    location: str,
+    sites: list[str],
+    results_per_site: int,
+    hours_old: int,
+    proxy_config: dict | None,
+    remote_only: bool,
+    country_indeed: str,
+    max_retries: int,
+    verbose: int = 0,
+    hypothesis_id: str = "H1",
+) -> tuple[list[object], list[dict]]:
+    dataframes: list[object] = []
+    failures: list[dict] = []
+
+    for site in sites:
+        kwargs = _build_site_scrape_kwargs(
+            site=site,
+            search_term=search_term,
+            location=location,
+            results_per_site=results_per_site,
+            hours_old=hours_old,
+            proxy_config=proxy_config,
+            remote_only=remote_only,
+            country_indeed=country_indeed,
+            verbose=verbose,
+        )
+        started = time.time()
+        try:
+            df = _scrape_with_retry(kwargs, max_retries=max_retries)
+            dataframes.append(df)
+            _emit_debug_log(
+                hypothesis_id=hypothesis_id,
+                location="jobspy.py:_scrape_sites_independently",
+                message="site scrape completed",
+                data={
+                    "query": search_term,
+                    "site": site,
+                    "elapsed_ms": int((time.time() - started) * 1000),
+                    "rows": len(df) if hasattr(df, "__len__") else None,
+                },
+            )
+        except Exception as e:
+            elapsed_ms = int((time.time() - started) * 1000)
+            normalized_kwargs = _normalize_scrape_kwargs(kwargs)
+            failure = {
+                "site": site,
+                "exception_class": e.__class__.__name__,
+                "exception_message": str(e),
+                "normalized_kwargs": normalized_kwargs,
+                "elapsed_ms": elapsed_ms,
+            }
+            failures.append(failure)
+            log.error(
+                "[%s] (site=%s): %s: %s | kwargs=%s | elapsed_ms=%d",
+                label,
+                site,
+                e.__class__.__name__,
+                e,
+                normalized_kwargs,
+                elapsed_ms,
+            )
+            _emit_debug_log(
+                hypothesis_id=hypothesis_id,
+                location="jobspy.py:_scrape_sites_independently",
+                message="site scrape failed",
+                data={"query": search_term, **failure},
+            )
+
+    return dataframes, failures
+
+
+def _concat_site_results(dataframes: list[object]):
+    if not dataframes:
+        return pd.DataFrame()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        return pd.concat(dataframes, ignore_index=True) if len(dataframes) > 1 else dataframes[0]
+
+
 # -- DB storage (JobSpy DataFrame -> SQLite) ---------------------------------
 
 
@@ -357,43 +586,48 @@ def _run_one_search(
 
     # Split sites: Glassdoor needs simplified location, others use original
     gd_location = glassdoor_map.get(s["location"], s["location"].split(",")[0])
-    has_glassdoor = "glassdoor" in sites
-    # Indeed auto-detects country from IP for remote searches, causing failures
-    # when the network exits through a non-USA IP. Skip Indeed for remote-only.
-    effective_sites = [si for si in sites if si != "glassdoor"]
-    if s.get("remote") and "indeed" in effective_sites:
-        effective_sites = [si for si in effective_sites if si != "indeed"]
-    other_sites = effective_sites
+    other_sites, has_glassdoor = _resolve_jobspy_sites(sites, bool(s.get("remote")))
 
-    all_dfs = []
-
-    # Run non-Glassdoor sites with original location
-    if other_sites:
-        kwargs = {
-            "site_name": other_sites,
-            "search_term": s["query"],
+    _emit_debug_log(
+        hypothesis_id="H2",
+        location="jobspy.py:_run_one_search",
+        message="resolved site list for query",
+        data={
+            "query": s["query"],
             "location": s["location"],
-            "results_wanted": results_per_site,
-            "hours_old": hours_old,
-            "description_format": "markdown",
-            "verbose": 0,
-        }
-        # Only pass country_indeed when Indeed is actually in the site list;
-        # jobspy validates this param even if Indeed isn't being used, and
-        # may auto-detect a non-US country from the exit IP causing failures.
-        if "indeed" in other_sites:
-            kwargs["country_indeed"] = defaults.get("country_indeed", "usa")
-        if s.get("remote"):
-            kwargs["is_remote"] = True
-        if proxy_config:
-            kwargs["proxies"] = [proxy_config["jobspy"]]
-        if "linkedin" in other_sites:
-            kwargs["linkedin_fetch_description"] = True
-        try:
-            df = _scrape_with_retry(kwargs, max_retries=max_retries)
-            all_dfs.append(df)
-        except Exception as e:
-            log.error("[%s] (non-gd): %s", label, e)
+            "remote": bool(s.get("remote")),
+            "configured_sites": sites,
+            "resolved_non_glassdoor_sites": other_sites,
+            "glassdoor_enabled": has_glassdoor,
+        },
+    )
+
+    all_dfs: list[object] = []
+
+    # Run non-Glassdoor sites independently to preserve partial success when one board fails.
+    if other_sites:
+        site_dfs, non_gd_failures = _scrape_sites_independently(
+            label=label,
+            search_term=s["query"],
+            location=s["location"],
+            sites=other_sites,
+            results_per_site=results_per_site,
+            hours_old=hours_old,
+            proxy_config=proxy_config,
+            remote_only=bool(s.get("remote")),
+            country_indeed=defaults.get("country_indeed", "usa"),
+            max_retries=max_retries,
+            verbose=0,
+            hypothesis_id="H1",
+        )
+        all_dfs.extend(site_dfs)
+        if non_gd_failures and all_dfs:
+            log.warning(
+                '[%s]: partial site success (%d/%d sites failed)',
+                label,
+                len(non_gd_failures),
+                len(other_sites),
+            )
 
     # Run Glassdoor separately with simplified location
     if has_glassdoor:
@@ -420,12 +654,7 @@ def _run_one_search(
         log.error("[%s]: all sites failed", label)
         return {"new": 0, "existing": 0, "errors": 1, "filtered": 0, "total": 0, "label": label}
 
-    import pandas as pd
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", FutureWarning)
-        df = pd.concat(all_dfs, ignore_index=True) if len(all_dfs) > 1 else all_dfs[0]
+    df = _concat_site_results(all_dfs)
 
     if len(df) == 0:
         log.info("[%s] 0 results", label)
@@ -487,34 +716,83 @@ def search_jobs(
         sites = ["indeed", "linkedin", "zip_recruiter"]
 
     proxy_config = parse_proxy(proxy) if proxy else None
+    effective_sites, has_glassdoor = _resolve_jobspy_sites(sites, remote_only)
 
     log.info('Search: "%s" in %s | sites=%s | remote=%s', query, location, sites, remote_only)
+    _emit_debug_log(
+        hypothesis_id="H5",
+        location="jobspy.py:search_jobs",
+        message="single-search invocation",
+        data={
+            "query": query,
+            "location": location,
+            "sites": sites,
+            "remote_only": remote_only,
+        },
+    )
+    _emit_debug_log(
+        hypothesis_id="H2",
+        location="jobspy.py:search_jobs",
+        message="resolved site list for single search",
+        data={
+            "query": query,
+            "location": location,
+            "remote_only": remote_only,
+            "configured_sites": sites,
+            "resolved_non_glassdoor_sites": effective_sites,
+            "glassdoor_enabled": has_glassdoor,
+        },
+    )
 
-    kwargs = {
-        "site_name": sites,
-        "search_term": query,
-        "location": location,
-        "results_wanted": results_per_site,
-        "hours_old": hours_old,
-        "description_format": "markdown",
-        "country_indeed": country_indeed,
-        "verbose": 2,
-    }
+    all_dfs: list[object] = []
+    site_dfs, failures = _scrape_sites_independently(
+        label=f'"{query}" in {location} {"(remote)" if remote_only else ""}',
+        search_term=query,
+        location=location,
+        sites=effective_sites,
+        results_per_site=results_per_site,
+        hours_old=hours_old,
+        proxy_config=proxy_config,
+        remote_only=remote_only,
+        country_indeed=country_indeed,
+        max_retries=2,
+        verbose=2,
+        hypothesis_id="H5",
+    )
+    all_dfs.extend(site_dfs)
 
-    if remote_only:
-        kwargs["is_remote"] = True
+    if has_glassdoor:
+        gd_kwargs = _build_site_scrape_kwargs(
+            site="glassdoor",
+            search_term=query,
+            location=location,
+            results_per_site=results_per_site,
+            hours_old=hours_old,
+            proxy_config=proxy_config,
+            remote_only=remote_only,
+            country_indeed=country_indeed,
+            verbose=2,
+        )
+        try:
+            all_dfs.append(_scrape_with_retry(gd_kwargs, max_retries=2))
+        except Exception as e:
+            failures.append({"site": "glassdoor", "exception_message": str(e)})
+            log.error('["%s" in %s] (glassdoor): %s', query, location, e)
 
-    if proxy_config:
-        kwargs["proxies"] = [proxy_config["jobspy"]]
+    if not all_dfs:
+        log.error('JobSpy search failed: all sites failed for "%s" in %s', query, location)
+        return {"error": "all sites failed", "total": 0, "new": 0, "existing": 0}
+    attempted_sites = len(effective_sites) + (1 if has_glassdoor else 0)
+    if failures and all_dfs:
+        log.warning(
+            '["%s" in %s]: partial site success (%d/%d sites failed)',
+            query,
+            location,
+            len(failures),
+            attempted_sites,
+        )
 
-    if "linkedin" in sites:
-        kwargs["linkedin_fetch_description"] = True
-
-    try:
-        df = _scrape_with_retry(kwargs)
-    except Exception as e:
-        log.error("JobSpy search failed: %s", e)
-        return {"error": str(e), "total": 0, "new": 0, "existing": 0}
+    df = _concat_site_results(all_dfs)
 
     recency_filtered = 0
     if not _HOURS_OLD_SUPPORTED:
@@ -589,6 +867,20 @@ def _full_crawl(
 
     log.info("Full crawl: %d search combinations", len(searches))
     log.info("Sites: %s | Results/site: %d | Hours old: %d", ", ".join(sites), results_per_site, hours_old)
+    if _DEBUG_JOBSPY_ENABLED:
+        compat = _jobspy_debug_compat_snapshot()
+        log.info(
+            "JobSpy debug mode: version=%s | hours_old_supported=%s | site_by_site_fallback=%s",
+            compat["python_jobspy_version"],
+            compat["hours_old_supported"],
+            compat["site_by_site_fallback_enabled"],
+        )
+        _emit_debug_log(
+            hypothesis_id="H3",
+            location="jobspy.py:_full_crawl",
+            message="jobspy runtime compatibility snapshot",
+            data=compat,
+        )
 
     # Ensure DB schema is ready
     init_db()
