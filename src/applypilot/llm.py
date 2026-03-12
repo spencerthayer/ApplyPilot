@@ -52,6 +52,20 @@ _PROVIDER_BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "anthropic": "https://api.anthropic.com/v1",
 }
+_KNOWN_PROVIDER_PREFIXES = frozenset(
+    {
+        "anthropic",
+        "azure",
+        "deepseek",
+        "gemini",
+        "local",
+        "ollama",
+        "openai",
+        "openai_compat",
+        "openrouter",
+        "vertex_ai",
+    }
+)
 @dataclass(frozen=True)
 class LLMConfig:
     """LLM configuration consumed by LLMClient."""
@@ -115,6 +129,11 @@ def _provider_from_model(model: str) -> str:
 def _raw_model_name(model: str) -> str:
     _, sep, remainder = model.partition("/")
     return remainder if sep else model
+
+
+def _is_provider_qualified_model(model: str) -> bool:
+    prefix, sep, remainder = model.partition("/")
+    return bool(prefix and sep and remainder and prefix in _KNOWN_PROVIDER_PREFIXES)
 
 
 def _build_fallback_chain(primary_model: str, quality: bool = False) -> list[ModelEntry]:
@@ -345,8 +364,11 @@ class LLMClient:
         return None
 
     def _primary_entry(self) -> ModelEntry:
+        # OpenRouter model IDs often include nested slashes (vendor/model), so
+        # keep the provider-qualified model string for the primary entry.
+        primary_name = self.model if self.provider == "openrouter" else _raw_model_name(self.model)
         return ModelEntry(
-            name=_raw_model_name(self.model),
+            name=primary_name,
             provider=self.provider,
             base_url=self.config.base_url or self.config.api_base or "",
             api_key=self.api_key,
@@ -368,7 +390,7 @@ class LLMClient:
     def _entry_model(self, entry: ModelEntry) -> str:
         if entry.provider == "unknown":
             return self.model
-        if "/" in entry.name:
+        if _is_provider_qualified_model(entry.name):
             return entry.name
         return _normalize_model(entry.provider, entry.name)
 

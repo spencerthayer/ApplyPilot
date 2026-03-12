@@ -347,7 +347,13 @@ class _StageTracker:
 # SQL to count pending work for each stage
 _PENDING_SQL: dict[str, str] = {
     "enrich": "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL",
-    "score": "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND fit_score IS NULL",
+    "score": (
+        "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND ("
+        "  (fit_score IS NULL AND score_error IS NULL) "
+        "  OR (score_error IS NOT NULL AND score_retry_count < 5 "
+        "      AND (score_next_retry_at IS NULL OR score_next_retry_at <= datetime('now')))"
+        ")"
+    ),
     "tailor": (
         "SELECT COUNT(*) FROM jobs WHERE fit_score >= ? "
         "AND full_description IS NOT NULL "

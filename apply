@@ -7,4 +7,10 @@ source .venv/bin/activate
 echo "Applying with ApplyPilot..."
 echo "> applypilot apply"
 applypilot apply
-echo "ApplyPilot application completed."
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "ApplyPilot application completed."
+else
+  echo "ApplyPilot application failed (exit code: $rc)."
+fi
+exit "$rc"

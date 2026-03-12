@@ -136,5 +136,6 @@ def test_openrouter_primary_entry_preserves_remote_base_url(monkeypatch) -> None
 
     assert response == "ok"
     assert client._primary_entry().base_url == "https://openrouter.ai/api/v1"
+    assert captured["model"] == "openrouter/openai/gpt-oss-120b:free"
     assert captured["api_base"] == "https://openrouter.ai/api/v1"
     assert captured["base_url"] == "https://openrouter.ai/api/v1"

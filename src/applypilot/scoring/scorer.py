@@ -8,13 +8,15 @@ profile and resume file.
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from applypilot.config import RESUME_JSON_PATH, RESUME_PATH, load_resume_text
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
+MAX_SCORE_RETRIES = 5
+_LEGACY_SCORE_ERROR_PATTERN = "%LLM error:%"
 
 
 # ── Scoring Prompt ────────────────────────────────────────────────────────
@@ -213,6 +215,81 @@ def score_job(resume_text: str, job: dict) -> dict:
         return {"score": 0, "keywords": "", "reasoning": f"LLM error: {e}"}
 
 
+def _compose_score_reasoning(result: dict) -> str:
+    keywords = str(result.get("keywords") or "").strip()
+    reasoning = str(result.get("reasoning") or "").strip()
+    if keywords and reasoning:
+        return f"{keywords}\n{reasoning}"
+    return keywords or reasoning
+
+
+def _normalize_llm_error(reasoning: str) -> str:
+    text = (reasoning or "").strip()
+    if not text:
+        return "LLM error: unknown scoring failure"
+    if text.lower().startswith("llm error:"):
+        return text
+    return f"LLM error: {text}"
+
+
+def _next_score_retry_at_iso(current_retry_count: int) -> str | None:
+    if current_retry_count >= MAX_SCORE_RETRIES:
+        return None
+    delay_minutes = min(5 * (4 ** current_retry_count), 24 * 60)
+    next_retry = datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+    return next_retry.isoformat()
+
+
+def _classify_score_outcome(result: dict) -> str:
+    if result.get("exclusion_reason_code"):
+        return "excluded"
+    try:
+        score_value = int(result.get("score", 0))
+    except (TypeError, ValueError):
+        score_value = 0
+    return "scored_success" if score_value > 0 else "llm_failed"
+
+
+def _autoheal_legacy_llm_failures(conn) -> int:
+    """Repair legacy rows where transient LLM failures were stored as fit_score=0."""
+
+    rows = conn.execute(
+        """
+        SELECT url, score_reasoning, COALESCE(score_retry_count, 0) AS retry_count
+        FROM jobs
+        WHERE fit_score = 0
+          AND COALESCE(exclusion_reason_code, '') = ''
+          AND COALESCE(exclusion_rule_id, '') = ''
+          AND COALESCE(score_reasoning, '') LIKE ?
+        """,
+        (_LEGACY_SCORE_ERROR_PATTERN,),
+    ).fetchall()
+
+    if not rows:
+        return 0
+
+    healed = 0
+    for row in rows:
+        url = row[0]
+        score_reasoning = (row[1] or "").strip()
+        retry_count = int(row[2] or 0)
+        error_text = _normalize_llm_error(score_reasoning)
+
+        # Preserve evidence of a prior failure while ensuring these jobs are retryable.
+        next_retry_count = min(max(retry_count, 1), MAX_SCORE_RETRIES - 1)
+        conn.execute(
+            "UPDATE jobs SET fit_score = NULL, score_reasoning = NULL, scored_at = NULL, "
+            "score_error = ?, score_retry_count = ?, score_next_retry_at = NULL, "
+            "exclusion_reason_code = NULL, exclusion_rule_id = NULL, excluded_at = NULL "
+            "WHERE url = ?",
+            (error_text, next_retry_count, url),
+        )
+        healed += 1
+
+    conn.commit()
+    return healed
+
+
 def _load_scoring_resume_text() -> str:
     """Load resume text while preserving canonical precedence and legacy test overrides."""
 
@@ -235,14 +312,17 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
 
     Returns:
         {"scored": int, "errors": int, "elapsed": float, "distribution": list,
-         "excluded": int}
+         "excluded": int, "auto_healed": int}
     """
     try:
         resume_text = _load_scoring_resume_text()
     except FileNotFoundError:
         log.error("Resume file not found. Run 'applypilot init' first.")
-        return {"scored": 0, "errors": 0, "elapsed": 0.0, "distribution": [], "excluded": 0}
+        return {"scored": 0, "errors": 0, "elapsed": 0.0, "distribution": [], "excluded": 0, "auto_healed": 0}
     conn = get_connection()
+    auto_healed = _autoheal_legacy_llm_failures(conn)
+    if auto_healed:
+        log.info("Auto-healed %d legacy scoring failure row(s).", auto_healed)
 
     if rescore:
         if limit > 0:
@@ -254,7 +334,7 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
 
     if not jobs:
         log.info("No unscored jobs with descriptions found.")
-        return {"scored": 0, "errors": 0, "elapsed": 0.0, "distribution": [], "excluded": 0}
+        return {"scored": 0, "errors": 0, "elapsed": 0.0, "distribution": [], "excluded": 0, "auto_healed": auto_healed}
 
     # Convert sqlite3.Row to dicts if needed
     if jobs and not isinstance(jobs[0], dict):
@@ -275,33 +355,67 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
             excluded_count += 1
         else:
             result = score_job(resume_text, job)
+        result["outcome"] = _classify_score_outcome(result)
         result["url"] = job["url"]
+        result["score_retry_count"] = int(job.get("score_retry_count") or 0)
         completed += 1
-        if result["score"] == 0:
+        if result["outcome"] == "llm_failed":
             errors += 1
         results.append(result)
+        marker = " [EXCLUDED]" if result["outcome"] == "excluded" else (" [LLM_FAILED]" if result["outcome"] == "llm_failed" else "")
         log.info(
             "[%d/%d] score=%d  %s%s",
-            completed, len(jobs), result["score"], job.get("title", "?")[:60],
-            " [EXCLUDED]" if exclusion else "",
+            completed, len(jobs), int(result.get("score", 0)), job.get("title", "?")[:60],
+            marker,
         )
 
     # Write scores to DB
     now = datetime.now(timezone.utc).isoformat()
     for r in results:
+        outcome = r.get("outcome")
+        if outcome == "excluded":
+            conn.execute(
+                "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
+                "exclusion_reason_code = ?, exclusion_rule_id = ?, excluded_at = ?, "
+                "score_error = NULL, score_retry_count = 0, score_next_retry_at = NULL "
+                "WHERE url = ?",
+                (
+                    0,
+                    _compose_score_reasoning(r),
+                    now,
+                    r.get("exclusion_reason_code"),
+                    r.get("exclusion_rule_id"),
+                    now,
+                    r["url"],
+                ),
+            )
+            continue
+
+        if outcome == "scored_success":
+            conn.execute(
+                "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?, "
+                "exclusion_reason_code = NULL, exclusion_rule_id = NULL, excluded_at = NULL, "
+                "score_error = NULL, score_retry_count = 0, score_next_retry_at = NULL "
+                "WHERE url = ?",
+                (
+                    int(r["score"]),
+                    _compose_score_reasoning(r),
+                    now,
+                    r["url"],
+                ),
+            )
+            continue
+
+        retry_count = int(r.get("score_retry_count") or 0)
+        next_retry_count = min(retry_count + 1, MAX_SCORE_RETRIES)
+        next_retry_at = _next_score_retry_at_iso(retry_count) if retry_count < MAX_SCORE_RETRIES else None
+        error_text = _normalize_llm_error(str(r.get("reasoning") or ""))
         conn.execute(
-            "UPDATE jobs SET fit_score = ?, score_reasoning = ?, scored_at = ?,"
-            " exclusion_reason_code = ?, exclusion_rule_id = ?, excluded_at = ?"
-            " WHERE url = ?",
-            (
-                r["score"],
-                f"{r['keywords']}\n{r['reasoning']}",
-                now,
-                r.get("exclusion_reason_code"),
-                r.get("exclusion_rule_id"),
-                now if r.get("exclusion_reason_code") else None,
-                r["url"],
-            ),
+            "UPDATE jobs SET fit_score = NULL, score_reasoning = ?, scored_at = NULL, "
+            "exclusion_reason_code = NULL, exclusion_rule_id = NULL, excluded_at = NULL, "
+            "score_error = ?, score_retry_count = ?, score_next_retry_at = ? "
+            "WHERE url = ?",
+            (error_text, error_text, next_retry_count, next_retry_at, r["url"]),
         )
     conn.commit()
 
@@ -322,4 +436,5 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
         "elapsed": elapsed,
         "distribution": distribution,
         "excluded": excluded_count,
+        "auto_healed": auto_healed,
     }
