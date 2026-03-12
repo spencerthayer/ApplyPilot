@@ -349,6 +349,68 @@ def _derive_short_reason(reasoning: str) -> str:
     return "Mixed fit with notable gaps"
 
 
+def _log_file_only(level: int, message: str, *args) -> None:
+    """Write a log record only to file handlers attached to the root logger."""
+
+    root_logger = logging.getLogger()
+    file_handlers = [handler for handler in root_logger.handlers if isinstance(handler, logging.FileHandler)]
+    if not file_handlers:
+        log.log(level, message, *args)
+        return
+
+    record = log.makeRecord(
+        log.name,
+        level,
+        __file__,
+        0,
+        message,
+        args,
+        exc_info=None,
+        func="_log_file_only",
+        extra=None,
+    )
+    for handler in file_handlers:
+        if level >= handler.level:
+            handler.handle(record)
+
+
+def _outcome_markers(outcome: str) -> tuple[str, str]:
+    if outcome == "excluded":
+        return " [EXCLUDED]", " [yellow][EXCLUDED][/yellow]"
+    if outcome == "llm_failed":
+        return " [LLM_FAILED]", " [red][LLM_FAILED][/red]"
+    return "", ""
+
+
+def _score_color(score: int, outcome: str) -> str:
+    if outcome == "excluded":
+        return "yellow"
+    if outcome == "llm_failed":
+        return "red"
+    if score >= 7:
+        return "green"
+    if score >= 4:
+        return "yellow"
+    return "red"
+
+
+def _emit_job_block_header(
+    completed: int,
+    total: int,
+    score: int,
+    title: str,
+    outcome: str,
+) -> None:
+    marker_plain, marker_rich = _outcome_markers(outcome)
+    _TRACE_CONSOLE.print(f"[bold cyan][{completed}/{total}][/bold cyan] {title}{marker_rich}")
+    _TRACE_CONSOLE.print(
+        f"          [bright_black]└─[/bright_black] [bold]score[/bold] = "
+        f"[bold {_score_color(score, outcome)}]{score}[/bold {_score_color(score, outcome)}]"
+    )
+    _log_file_only(logging.INFO, "[%d/%d] %s%s", completed, total, title, marker_plain)
+    _log_file_only(logging.INFO, "          └─ score = %d", score)
+
+
 def _emit_score_trace(result: dict) -> None:
     outcome = str(result.get("outcome") or "")
     prefix = "          [bright_black]└─[/bright_black] "
@@ -402,15 +464,15 @@ def _log_score_trace(result: dict) -> None:
 
     if outcome == "excluded":
         reason = _compact_reasoning(str(result.get("reasoning") or ""), limit=120)
-        log.info("%sexcluded %s", prefix, reason)
+        _log_file_only(logging.INFO, "%sexcluded %s", prefix, reason)
         return
 
     if outcome == "llm_failed":
         category = _truncate_piece(str(result.get("parse_error_category") or "unknown"), limit=24)
         baseline = result.get("baseline_score")
         error = _compact_reasoning(str(result.get("reasoning") or ""), limit=120)
-        log.info("%sfailed cat=%s b=%s", prefix, category, baseline if baseline is not None else "-")
-        log.info("%swhy %s", prefix, error)
+        _log_file_only(logging.INFO, "%sfailed cat=%s b=%s", prefix, category, baseline if baseline is not None else "-")
+        _log_file_only(logging.INFO, "%swhy %s", prefix, error)
         return
 
     baseline = result.get("baseline_score")
@@ -428,7 +490,8 @@ def _log_score_trace(result: dict) -> None:
     confidence_text = f"{float(confidence):.2f}" if isinstance(confidence, (int, float)) else "-"
     delta_text = f"{int(delta):+d}" if isinstance(delta, int) else "-"
 
-    log.info(
+    _log_file_only(
+        logging.INFO,
         "%strace b=%s l=%s c=%s Δ=%s m=%s x=%s",
         prefix,
         baseline if baseline is not None else "-",
@@ -438,10 +501,10 @@ def _log_score_trace(result: dict) -> None:
         matched,
         missing,
     )
-    log.info("%swhy %s", prefix, why_short)
+    _log_file_only(logging.INFO, "%swhy %s", prefix, why_short)
     reasoning_text = re.sub(r"\s+", " ", full_reasoning).strip()
     if reasoning_text:
-        log.info("%sreasoning %s", prefix, reasoning_text)
+        _log_file_only(logging.INFO, "%sreasoning %s", prefix, reasoning_text)
 
 
 def _contains_phrase(text_lower: str, phrase: str) -> bool:
@@ -1237,22 +1300,30 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
             title_scores[title_key].append(int(result.get("score", 0)))
         results.append(result)
 
-        marker = (
-            " [EXCLUDED]"
-            if result["outcome"] == "excluded"
-            else (" [LLM_FAILED]" if result["outcome"] == "llm_failed" else "")
-        )
-        log.info(
-            "[%d/%d] score=%d  %s%s",
-            completed,
-            len(jobs),
-            int(result.get("score", 0)),
-            job.get("title", "?")[:60],
-            marker,
-        )
+        score_value = int(result.get("score", 0))
+        title_text = job.get("title", "?")[:60]
         if _SCORE_TRACE_ENABLED or result["outcome"] == "llm_failed":
+            _emit_job_block_header(
+                completed=completed,
+                total=len(jobs),
+                score=score_value,
+                title=title_text,
+                outcome=str(result.get("outcome") or ""),
+            )
             _emit_score_trace(result)
             _log_score_trace(result)
+            _TRACE_CONSOLE.print("[bright_black]" + ("─" * 110) + "[/bright_black]")
+            _log_file_only(logging.INFO, "          %s", "-" * 110)
+        else:
+            marker, _ = _outcome_markers(str(result.get("outcome") or ""))
+            log.info(
+                "[%d/%d] score=%d  %s%s",
+                completed,
+                len(jobs),
+                score_value,
+                title_text,
+                marker,
+            )
 
     now = datetime.now(timezone.utc).isoformat()
     for result in results:
