@@ -6,6 +6,7 @@ import json
 import inspect
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from importlib import metadata as importlib_metadata
@@ -46,14 +47,17 @@ def _configure_logging() -> None:
     except OSError as exc:
         bootstrap_log.debug("Could not create log directory %s: %s", LOG_DIR, exc)
         return
+    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     for logger_name in ("applypilot.scoring.tailor", "applypilot.scoring.cover_letter"):
         file_log = logging.getLogger(logger_name)
         file_log.propagate = False  # suppress terminal output
         if any(isinstance(handler, logging.FileHandler) for handler in file_log.handlers):
             continue
+        log_filename = f"{ts}_tailor.log" if logger_name == "applypilot.scoring.tailor" else "cover_letter.log"
+        delay_open = logger_name == "applypilot.scoring.tailor"
         try:
-            fh = logging.FileHandler(LOG_DIR / f"{logger_name.split('.')[-1]}.log", encoding="utf-8")
+            fh = logging.FileHandler(LOG_DIR / log_filename, encoding="utf-8", delay=delay_open)
         except OSError as exc:
             bootstrap_log.debug("Could not open log file for %s: %s", logger_name, exc)
             file_log.propagate = True

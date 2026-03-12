@@ -7,7 +7,7 @@ actual skills, companies, projects, and school.
 Validation modes
 ----------------
 strict  -- banned words = hard errors that trigger retries (original behavior)
-normal  -- banned words = warnings only; fabrication/structure = errors (default)
+normal  -- banned words = warnings only; requires at least one real company in experience
 lenient -- banned words ignored; only fabrication and required structure checked
 """
 
@@ -147,6 +147,15 @@ def _check_mechanism_required(text: str, role_type: str, config: dict) -> bool:
     return bool(re.search(pattern, text.lower()))
 
 
+def _company_is_present(experience_entry: dict, company: str) -> bool:
+    """Return whether a profile company appears in an experience entry."""
+
+    company_lower = company.lower()
+    header = str(experience_entry.get("header", "")).lower()
+    entry_company = str(experience_entry.get("company", "")).lower()
+    return company_lower in header or company_lower in entry_company
+
+
 # ── JSON Field Validation ─────────────────────────────────────────────────
 
 def validate_json_fields(
@@ -163,8 +172,8 @@ def validate_json_fields(
         profile: User profile dict from load_profile().
         mode:    Validation strictness — "strict", "normal", or "lenient".
                  strict  → banned words are errors (trigger retries)
-                 normal  → banned words are warnings (no retry)
-                 lenient → banned words ignored entirely
+                 normal  → banned words are warnings (no retry), at least one real company required
+                 lenient → banned words ignored entirely, company retention not enforced
 
     Returns:
         {"passed": bool, "errors": list[str], "warnings": list[str]}
@@ -229,17 +238,26 @@ def validate_json_fields(
             if fake in skills_text:
                 errors.append(f"Fabricated skill: '{fake}'")
 
-    work_companies = set(get_profile_company_names(profile))
+    work_companies = get_profile_company_names(profile)
 
     if isinstance(data["experience"], list):
+        matched_companies: set[str] = set()
         for company in work_companies:
-            has_company = any(
-                company.lower() in str(entry.get("header", "")).lower()
-                or company.lower() in str(entry.get("company", "")).lower()
-                for entry in data["experience"]
-            )
-            if not has_company:
-                errors.append(f"Company '{company}' missing from experience")
+            if any(_company_is_present(entry, company) for entry in data["experience"]):
+                matched_companies.add(company)
+
+        if mode == "strict":
+            for company in work_companies:
+                if company not in matched_companies:
+                    errors.append(f"Company '{company}' missing from experience")
+        elif mode == "normal":
+            if work_companies and not matched_companies:
+                errors.append("No profile companies found in experience")
+            for company in work_companies:
+                if company not in matched_companies:
+                    warnings.append(f"Company '{company}' missing from experience")
+        # lenient mode intentionally skips company-retention checks
+
         for entry in data["experience"]:
             for bullet in entry.get("bullets", []):
                 all_text_parts.append(sanitize_text(str(bullet)))
