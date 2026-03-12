@@ -21,6 +21,13 @@ from typing import Any
 from applypilot.config import TAILORED_DIR, load_profile, load_resume_text
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
+from applypilot.resume_json import (
+    get_profile_company_names,
+    get_profile_school_names,
+    get_profile_skill_keywords,
+    get_profile_skill_sections,
+    get_profile_verified_metrics,
+)
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     sanitize_text,
@@ -57,21 +64,17 @@ def _build_tailor_prompt(profile: dict, resume_text: str | None = None) -> str:
     All skills boundaries, preserved entities, and formatting rules are
     derived from the profile -- nothing is hardcoded.
     """
-    boundary = profile.get("skills_boundary", {})
-    resume_facts = profile.get("resume_facts", {})
-
     # Format skills boundary for the prompt
     skills_lines = []
-    for category, items in boundary.items():
-        if isinstance(items, list) and items:
-            label = category.replace("_", " ").title()
-            skills_lines.append(f"{label}: {', '.join(items)}")
+    for label, items in get_profile_skill_sections(profile):
+        skills_lines.append(f"{label}: {', '.join(items)}")
     skills_block = "\n".join(skills_lines)
 
     # Preserved entities
-    companies = resume_facts.get("preserved_companies", [])
-    school = resume_facts.get("preserved_school", "")
-    real_metrics = resume_facts.get("real_metrics", [])
+    companies = get_profile_company_names(profile)
+    schools = get_profile_school_names(profile)
+    school = schools[0] if schools else ""
+    real_metrics = get_profile_verified_metrics(profile)
 
     companies_str = ", ".join(companies) if companies else "N/A"
     metrics_str = ", ".join(real_metrics) if real_metrics else "N/A"
@@ -138,17 +141,8 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 
 def _build_judge_prompt(profile: dict) -> str:
     """Build the LLM judge prompt from the user's profile."""
-    boundary = profile.get("skills_boundary", {})
-    resume_facts = profile.get("resume_facts", {})
-
-    # Flatten allowed skills for the judge
-    all_skills: list[str] = []
-    for items in boundary.values():
-        if isinstance(items, list):
-            all_skills.extend(items)
-    skills_str = ", ".join(all_skills) if all_skills else "N/A"
-
-    real_metrics = resume_facts.get("real_metrics", [])
+    skills_str = ", ".join(get_profile_skill_keywords(profile)) or "N/A"
+    real_metrics = get_profile_verified_metrics(profile)
     metrics_str = ", ".join(real_metrics) if real_metrics else "N/A"
 
     return f"""You are a resume quality judge. A tailoring engine rewrote a resume to target a specific job. Your job is to catch LIES, not style changes.

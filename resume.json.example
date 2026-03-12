@@ -255,22 +255,6 @@
         "veteran_status": "Decline to self-identify",
         "disability_status": "Decline to self-identify"
       },
-      "resume_facts": {
-        "preserved_companies": [
-          "Northwind Labs",
-          "Acme Commerce"
-        ],
-        "preserved_projects": [
-          "Fulfillment Control Center",
-          "Revenue Reporting Pipeline"
-        ],
-        "preserved_school": "State University",
-        "real_metrics": [
-          "38% lower API latency",
-          "2 days to under 2 hours setup time",
-          "40+ internal operators onboarded"
-        ]
-      },
       "tailoring_config": {
         "default_role_type": "software_engineer",
         "validation": {

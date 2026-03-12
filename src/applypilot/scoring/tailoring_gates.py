@@ -439,16 +439,6 @@ def gate_credibility(output: dict, gate_config: dict, profile: dict) -> GateResu
                 "Add evidence sources for all claims or remove unsupported statements.",
             )
 
-    # Cross-check against resume_facts in profile
-    resume_facts = profile.get("resume_facts", {})
-    if resume_facts:
-        # Check companies are preserved
-        preserved_companies = resume_facts.get("preserved_companies", [])
-        if preserved_companies:
-            # This would need the actual resume text to verify
-            # For now, add a warning if we have no way to verify
-            pass
-
     # Set final pass status
     result.passed = len(result.errors) == 0
 
@@ -827,7 +817,7 @@ def gate_final_assembly(output: dict, gate_config: dict, profile: dict) -> GateR
     validation checks on the assembled resume. It catches issues that are
     difficult to detect during intermediate steps:
     
-    - Missing roles from profile work_history
+    - Missing roles from profile work entries
     - Incorrect bullet counts per role
     - Missing credentials in summary
     - Unquantified bullets

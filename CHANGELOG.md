@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
  **New CLI commands** - `applypilot greenhouse verify|discover|validate|list-employers|add-job` for managing Greenhouse employers
  **Pipeline integration** - Greenhouse fetcher runs automatically during `discover` stage alongside JobSpy, Workday, and SmartExtract
 
+### Changed
+- **Canonical resume contract** - Runtime personal info, work history, education, skills, projects, and verified metrics now come from `~/.applypilot/resume.json` instead of duplicated fields in `~/.applypilot/profile.json`
+- **Settings-only profile.json** - `~/.applypilot/profile.json` now stores ApplyPilot settings only (`work_authorization`, `compensation`, `availability`, `eeo_voluntary`, `tailoring_config`, `files`)
+- **Compatibility migration** - When canonical installs still have legacy profile data, ApplyPilot backfills missing personal/work/education/skills data into `resume.json` and rewrites `profile.json` to the settings-only format
+- **Validation and tailoring sources** - fabrication checks, cover-letter prompts, metrics validation, and comprehensive tailoring now derive companies, schools, skills, projects, and key metrics from normalized `resume.json` data
+
+### Removed
+- **`resume_facts` profile contract** - removed from runtime profile handling, setup flows, validation, tailoring, and documentation
+
 ## [0.2.0] - 2026-02-17
 
 ### Added

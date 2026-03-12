@@ -7,6 +7,7 @@ import pytest
 from applypilot.resume_json import (
     ResumeJsonError,
     build_resume_text_from_json,
+    get_profile_verified_metrics,
     load_resume_json_from_path,
     normalize_profile_from_resume_json,
     resolve_render_theme,
@@ -82,10 +83,6 @@ def sample_resume_json() -> dict:
                     "salary_range_max": "210000",
                 },
                 "availability": {"earliest_start_date": "Immediately"},
-                "resume_facts": {
-                    "preserved_projects": ["capstack.ai"],
-                    "real_metrics": ["10x throughput"],
-                },
                 "render": {"theme": "jsonresume-theme-even"},
             },
         },
@@ -99,9 +96,8 @@ def test_normalize_profile_from_resume_json_maps_internal_contract() -> None:
     assert profile["personal"]["linkedin_url"] == "https://linkedin.com/in/example"
     assert profile["experience"]["current_title"] == "Principal Developer"
     assert profile["experience"]["target_role"] == "Staff Software Engineer"
-    assert profile["work_history"][0]["company"] == "Watson Creative"
-    assert profile["resume_facts"]["real_metrics"] == [
-        "10x throughput",
+    assert profile["work"][0]["company"] == "Watson Creative"
+    assert get_profile_verified_metrics(profile) == [
         "99.9% uptime",
         "50% faster delivery",
     ]

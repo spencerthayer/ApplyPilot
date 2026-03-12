@@ -48,8 +48,9 @@ def run_comprehensive_test():
     print("\n[1/5] Loading profile from ~/.applypilot/profile.json...")
     profile = load_profile()
     print(f"    Loaded profile for {profile['personal']['full_name']}")
-    print(f"    Work history: {len(profile['work_history'])} roles")
-    print(f"    Key metrics: {len(profile['resume_facts']['real_metrics'])} preserved")
+    print(f"    Work entries: {len(profile['work'])} roles")
+    preserved_metrics = sum(len(role.get("key_metrics", [])) for role in profile["work"])
+    print(f"    Key metrics: {preserved_metrics} preserved")
 
     print("\n[2/5] Initializing ComprehensiveTailoringEngine with mocked LLM...")
     mock_llm = create_mock_llm()

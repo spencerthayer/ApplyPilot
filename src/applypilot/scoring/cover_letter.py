@@ -14,6 +14,11 @@ from pathlib import Path
 from applypilot.config import COVER_LETTER_DIR, load_profile, load_resume_text
 from applypilot.database import get_connection
 from applypilot.llm import get_client
+from applypilot.resume_json import (
+    get_profile_project_names,
+    get_profile_skill_keywords,
+    get_profile_verified_metrics,
+)
 from applypilot.scoring.validator import (
     BANNED_WORDS,
     LLM_LEAK_PHRASES,
@@ -35,22 +40,16 @@ def _build_cover_letter_prompt(profile: dict) -> str:
     All personal data, skills, and sign-off name come from the profile.
     """
     personal = profile.get("personal", {})
-    boundary = profile.get("skills_boundary", {})
-    resume_facts = profile.get("resume_facts", {})
 
     # Preferred name for the sign-off (falls back to full name)
     sign_off_name = personal.get("preferred_name") or personal.get("full_name", "")
 
     # Flatten all allowed skills
-    all_skills: list[str] = []
-    for items in boundary.values():
-        if isinstance(items, list):
-            all_skills.extend(items)
-    skills_str = ", ".join(all_skills) if all_skills else "the tools listed in the resume"
+    skills_str = ", ".join(get_profile_skill_keywords(profile)) or "the tools listed in the resume"
 
-    # Real metrics from resume_facts
-    real_metrics = resume_facts.get("real_metrics", [])
-    preserved_projects = resume_facts.get("preserved_projects", [])
+    # Real metrics and projects come from the canonical resume profile.
+    real_metrics = get_profile_verified_metrics(profile)
+    preserved_projects = get_profile_project_names(profile)
 
     # Build achievement examples for the prompt
     projects_hint = ""

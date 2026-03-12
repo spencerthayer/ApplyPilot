@@ -223,13 +223,14 @@ def test_load_profile_backfills_from_resume_json_once(monkeypatch, tmp_path: Pat
 
     assert profile.exists()
     assert first_profile["personal"]["full_name"] == "Alex Example"
-    assert json.loads(profile.read_text(encoding="utf-8"))["personal"]["full_name"] == "Alex Example"
+    written_profile = json.loads(profile.read_text(encoding="utf-8"))
+    assert "personal" not in written_profile
+    assert written_profile["work_authorization"]["legally_authorized_to_work"] == "Yes"
 
     canonical.write_text("{not valid json", encoding="utf-8")
 
-    second_profile = config.load_profile()
-
-    assert second_profile["personal"]["full_name"] == "Alex Example"
+    with pytest.raises(config.ResumeJsonError, match="Invalid resume.json"):
+        config.load_profile()
 
 
 def test_apply_backfills_profile_from_resume_json(monkeypatch, tmp_path: Path) -> None:
@@ -257,7 +258,88 @@ def test_apply_backfills_profile_from_resume_json(monkeypatch, tmp_path: Path) -
     assert result.exit_code == 0
     assert "Wrote prompt to:" in result.stdout
     assert profile.exists()
-    assert json.loads(profile.read_text(encoding="utf-8"))["personal"]["full_name"] == "Alex Example"
+    written_profile = json.loads(profile.read_text(encoding="utf-8"))
+    assert "personal" not in written_profile
+    assert written_profile["compensation"]["salary_expectation"] == "170000"
+
+
+def test_load_profile_migrates_missing_resume_content_from_legacy_profile(monkeypatch, tmp_path: Path) -> None:
+    pytest.importorskip("jsonschema")
+    canonical = tmp_path / "resume.json"
+    profile = tmp_path / "profile.json"
+    resume_data = _sample_resume_json()
+    resume_data["basics"]["email"] = ""
+    resume_data["basics"]["phone"] = ""
+    resume_data["basics"]["profiles"] = []
+    resume_data["work"] = []
+    resume_data["education"] = []
+    resume_data["skills"] = []
+    resume_data["projects"] = []
+    resume_data["meta"]["applypilot"]["personal"] = {}
+    resume_data["meta"]["applypilot"].pop("target_role", None)
+    canonical.write_text(json.dumps(resume_data), encoding="utf-8")
+    profile.write_text(
+        json.dumps(
+            {
+                "personal": {
+                    "full_name": "Alex Example",
+                    "email": "legacy@example.com",
+                    "phone": "5550001111",
+                    "linkedin_url": "https://linkedin.com/in/legacy-alex",
+                    "github_url": "https://github.com/legacy-alex",
+                },
+                "experience": {
+                    "target_role": "Principal Engineer",
+                    "years_of_experience_total": "9",
+                    "current_title": "Senior Engineer",
+                },
+                "work_authorization": {
+                    "legally_authorized_to_work": "Yes",
+                    "require_sponsorship": "No",
+                },
+                "work_history": [
+                    {
+                        "company": "Legacy Co",
+                        "position": "Senior Engineer",
+                        "start_date": "2018-01-01",
+                        "end_date": "2020-12-31",
+                        "highlights": ["Built API platform"],
+                        "key_metrics": ["2x throughput"],
+                    }
+                ],
+                "education": [
+                    {
+                        "institution": "Legacy University",
+                        "studyType": "B.S.",
+                        "area": "Computer Science",
+                        "endDate": "2017",
+                    }
+                ],
+                "skills_boundary": {
+                    "programming_languages": ["Python"],
+                    "frameworks": ["FastAPI"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(config, "PROFILE_PATH", profile)
+    monkeypatch.setattr(config, "RESUME_JSON_PATH", canonical)
+
+    loaded = config.load_profile()
+    saved_resume = json.loads(canonical.read_text(encoding="utf-8"))
+    saved_profile = json.loads(profile.read_text(encoding="utf-8"))
+
+    assert loaded["personal"]["email"] == "legacy@example.com"
+    assert loaded["work"][0]["company"] == "Legacy Co"
+    assert saved_resume["basics"]["email"] == "legacy@example.com"
+    assert saved_resume["work"][0]["name"] == "Legacy Co"
+    assert saved_resume["education"][0]["institution"] == "Legacy University"
+    assert saved_resume["skills"][0]["keywords"] == ["Python"]
+    assert saved_resume["meta"]["applypilot"]["target_role"] == "Principal Engineer"
+    assert "personal" not in saved_profile
+    assert saved_profile["work_authorization"]["legally_authorized_to_work"] == "Yes"
 
 
 def test_setup_canonical_resume_import_skips_metadata_prompts_when_complete(monkeypatch, tmp_path: Path) -> None:
@@ -285,7 +367,8 @@ def test_setup_canonical_resume_import_skips_metadata_prompts_when_complete(monk
     assert destination.exists()
     assert profile_path.exists()
     assert canonical["basics"]["name"] == "Alex Example"
-    assert profile["experience"]["target_role"] == "Staff Engineer"
+    assert "personal" not in profile
+    assert profile["work_authorization"]["legally_authorized_to_work"] == "Yes"
 
 
 def test_setup_canonical_resume_import_uses_social_profiles_from_basics(monkeypatch, tmp_path: Path) -> None:
@@ -348,7 +431,8 @@ def test_setup_canonical_resume_uses_single_role_default_from_multi_role_label(m
     canonical, profile = wizard_init._setup_canonical_resume(resume_json=source)
 
     assert canonical["meta"]["applypilot"]["target_role"] == "Systems Architect"
-    assert profile["experience"]["target_role"] == "Systems Architect"
+    assert "personal" not in profile
+    assert profile["work_authorization"]["legally_authorized_to_work"] == "Yes"
 
 
 def test_setup_canonical_resume_scaffold_writes_profile_json(monkeypatch, tmp_path: Path) -> None:
@@ -377,5 +461,7 @@ def test_setup_canonical_resume_scaffold_writes_profile_json(monkeypatch, tmp_pa
 
     assert canonical["basics"]["name"] == "Alex Example"
     assert profile_path.exists()
-    assert json.loads(profile_path.read_text(encoding="utf-8"))["personal"]["full_name"] == "Alex Example"
-    assert profile["personal"]["full_name"] == "Alex Example"
+    written_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert "personal" not in written_profile
+    assert written_profile["availability"]["earliest_start_date"] == "Immediately"
+    assert "personal" not in profile

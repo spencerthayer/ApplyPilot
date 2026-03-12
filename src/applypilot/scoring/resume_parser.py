@@ -1,4 +1,4 @@
-# Helper function to parse ALL roles from resume text (not just profile work_history)
+# Helper function to parse ALL roles from resume text (not just normalized profile work entries)
 def _parse_resume_roles(resume_text: str) -> list[dict]:
     """Parse all work history entries from resume text.
 

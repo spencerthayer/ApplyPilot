@@ -18,8 +18,11 @@ from applypilot.resume_json import (
     ResumeJsonError,
     build_resume_text_from_json,
     load_resume_json_from_path,
+    merge_resume_json_with_legacy_profile,
     normalize_legacy_profile,
     normalize_profile_from_resume_json,
+    normalize_profile_settings,
+    settings_from_resume_json,
 )
 
 # User data directory — all user-specific files live here
@@ -182,13 +185,20 @@ def _write_profile_payload(profile: dict) -> None:
     PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _write_resume_payload(data: dict) -> None:
+    """Persist resume.json with stable formatting."""
+
+    RESUME_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RESUME_JSON_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def _backfill_profile_from_resume_json() -> dict:
     """Create profile.json once from resume.json for compatibility."""
 
     resume_data = load_resume_json(RESUME_JSON_PATH)
-    profile = normalize_profile_from_resume_json(resume_data)
-    _write_profile_payload(profile)
-    return profile
+    profile_settings = settings_from_resume_json(resume_data)
+    _write_profile_payload(profile_settings)
+    return normalize_profile_from_resume_json(resume_data, settings=profile_settings)
 
 
 def load_profile() -> dict:
@@ -198,12 +208,31 @@ def load_profile() -> dict:
     once for compatibility and then continue using profile.json as the source of truth.
     """
 
-    if not PROFILE_PATH.exists() and RESUME_JSON_PATH.exists():
-        return _backfill_profile_from_resume_json()
+    if RESUME_JSON_PATH.exists():
+        resume_data = load_resume_json(RESUME_JSON_PATH)
+        if not PROFILE_PATH.exists():
+            return _backfill_profile_from_resume_json()
+        try:
+            payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Malformed profile JSON at {PROFILE_PATH}: line {exc.lineno}, column {exc.colno}: {exc.msg}"
+            ) from exc
+
+        repaired_resume, resume_changed = merge_resume_json_with_legacy_profile(resume_data, payload)
+        if resume_changed:
+            resume_data = repaired_resume
+            _write_resume_payload(resume_data)
+
+        profile_settings = normalize_profile_settings(payload)
+        if payload != profile_settings:
+            _write_profile_payload(profile_settings)
+
+        return normalize_profile_from_resume_json(resume_data, settings=profile_settings)
+
     if not PROFILE_PATH.exists():
-        raise FileNotFoundError(
-            f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
-        )
+        raise FileNotFoundError(f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first.")
+
     try:
         payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:

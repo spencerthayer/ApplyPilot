@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import List, Set
 
 from applypilot.config import load_profile
-from applypilot.resume_json import normalize_profile_data
+from applypilot.resume_json import get_profile_verified_metrics, normalize_profile_data
 
 
 @dataclass
@@ -25,8 +25,8 @@ class ValidationResult:
 class MetricsRegistry:
     """Registry of verified metrics loaded from user profile.
 
-    Parses work_history[].key_metrics[] and resume_facts.real_metrics[]
-    from the normalized profile contract to build a searchable registry of verified metrics.
+    Parses work[].key_metrics[] from the normalized profile contract to build
+    a searchable registry of verified metrics.
     """
 
     # Regex patterns for extracting metrics from text
@@ -47,9 +47,7 @@ class MetricsRegistry:
     def _load_profile(self, path: str | None) -> None:
         """Load and parse metrics from canonical or legacy profile storage.
 
-        Extracts metrics from:
-        - work_history[].key_metrics[] (array of strings per job)
-        - resume_facts.real_metrics[] (array of strings)
+        Extracts metrics from normalized work[].key_metrics[] entries.
         """
         profile = {}
         if path:
@@ -69,16 +67,7 @@ class MetricsRegistry:
                 except (FileNotFoundError, json.JSONDecodeError):
                     return
 
-        # Parse work_history[].key_metrics[]
-        for job in profile.get("work_history", []):
-            for metric in job.get("key_metrics", []):
-                normalized = self._normalize_metric(metric)
-                if normalized:
-                    self._verified_metrics.add(normalized)
-
-        # Parse resume_facts.real_metrics[]
-        resume_facts = profile.get("resume_facts", {})
-        for metric in resume_facts.get("real_metrics", []):
+        for metric in get_profile_verified_metrics(profile):
             normalized = self._normalize_metric(metric)
             if normalized:
                 self._verified_metrics.add(normalized)

@@ -36,8 +36,11 @@ from applypilot.llm_provider import LLM_PROVIDER_SPECS, WIZARD_PROVIDER_ORDER
 from applypilot.resume_json import (
     DEFAULT_RENDER_THEME,
     load_resume_json_from_path,
+    merge_resume_json_with_legacy_profile,
     normalize_legacy_profile,
     normalize_profile_from_resume_json,
+    normalize_profile_settings,
+    settings_from_resume_json,
 )
 
 console = Console()
@@ -126,11 +129,19 @@ def _profile_for_canonical_resume(resume_data: dict) -> dict:
 
     if PROFILE_PATH.exists():
         try:
-            return normalize_legacy_profile(json.loads(PROFILE_PATH.read_text(encoding="utf-8")))
+            payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+            merged_resume, changed = merge_resume_json_with_legacy_profile(resume_data, payload)
+            if changed:
+                resume_data.clear()
+                resume_data.update(merged_resume)
+                _write_resume_json(resume_data)
+            profile = normalize_profile_settings(payload)
+            _write_profile_json(profile)
+            return profile
         except json.JSONDecodeError:
             pass
 
-    profile = normalize_profile_from_resume_json(resume_data)
+    profile = settings_from_resume_json(resume_data)
     _write_profile_json(profile)
     return profile
 
@@ -141,12 +152,13 @@ def _legacy_profile_to_resume_json(profile: dict, resume_text: str = "") -> dict
     parsed_resume = parse_resume(resume_text) if resume_text.strip() else {"sections": {}, "name": "", "title": "", "contact": ""}
     sections = parsed_resume.get("sections", {})
 
-    personal = profile.get("personal", {})
-    experience = profile.get("experience", {})
-    work_history = profile.get("work_history", [])
-    education = profile.get("education", [])
-    skills_boundary = profile.get("skills_boundary", {})
-    resume_facts = profile.get("resume_facts", {})
+    normalized = normalize_legacy_profile(profile)
+    personal = normalized.get("personal", {})
+    experience = normalized.get("experience", {})
+    work_entries = normalized.get("work", [])
+    education = normalized.get("education", [])
+    skills = normalized.get("skills", [])
+    projects_from_profile = normalized.get("projects", [])
 
     basics = {
         "name": personal.get("full_name", "") or parsed_resume.get("name", ""),
@@ -174,8 +186,8 @@ def _legacy_profile_to_resume_json(profile: dict, resume_text: str = "") -> dict
 
     parsed_experience = parse_entries(sections.get("EXPERIENCE", "")) if sections.get("EXPERIENCE") else []
     work: list[dict] = []
-    if work_history:
-        for index, role in enumerate(work_history):
+    if work_entries:
+        for index, role in enumerate(work_entries):
             parsed_entry = parsed_experience[index] if index < len(parsed_experience) else {}
             highlights = parsed_entry.get("bullets", []) if parsed_entry else role.get("highlights", [])
             work.append(
@@ -183,8 +195,8 @@ def _legacy_profile_to_resume_json(profile: dict, resume_text: str = "") -> dict
                     "name": role.get("company", ""),
                     "position": role.get("position", ""),
                     "location": role.get("location", ""),
-                    "startDate": str(role.get("start_year") or role.get("start_date") or ""),
-                    "endDate": str(role.get("end_year") or role.get("end_date") or ""),
+                    "startDate": str(role.get("start_date") or ""),
+                    "endDate": str(role.get("end_date") or ""),
                     "summary": role.get("summary", ""),
                     "highlights": highlights,
                     "x-applypilot": {
@@ -213,29 +225,32 @@ def _legacy_profile_to_resume_json(profile: dict, resume_text: str = "") -> dict
 
     parsed_projects = parse_entries(sections.get("PROJECTS", "")) if sections.get("PROJECTS") else []
     projects = []
-    for entry in parsed_projects:
-        projects.append(
-            {
-                "name": entry.get("title", ""),
-                "description": entry.get("subtitle", ""),
-                "highlights": entry.get("bullets", []),
-            }
-        )
+    if projects_from_profile:
+        for project in projects_from_profile:
+            projects.append(
+                {
+                    "name": project.get("name", ""),
+                    "description": project.get("description", ""),
+                    "highlights": project.get("highlights", []),
+                    "url": project.get("url", ""),
+                }
+            )
+    else:
+        for entry in parsed_projects:
+            projects.append(
+                {
+                    "name": entry.get("title", ""),
+                    "description": entry.get("subtitle", ""),
+                    "highlights": entry.get("bullets", []),
+                }
+            )
 
     canonical_skills = []
     if sections.get("TECHNICAL SKILLS"):
         for label, value in parse_skills(sections["TECHNICAL SKILLS"]):
             canonical_skills.append({"name": label, "keywords": [s.strip() for s in value.split(",") if s.strip()]})
-    elif skills_boundary:
-        label_map = {
-            "programming_languages": "Programming Languages",
-            "frameworks": "Frameworks & Libraries",
-            "devops": "DevOps & Infra",
-            "databases": "Databases",
-            "tools": "Tools & Platforms",
-        }
-        for key, values in skills_boundary.items():
-            canonical_skills.append({"name": label_map.get(key, key.replace("_", " ").title()), "keywords": values})
+    elif skills:
+        canonical_skills = skills
 
     canonical_education = []
     for entry in education:
@@ -266,7 +281,6 @@ def _legacy_profile_to_resume_json(profile: dict, resume_text: str = "") -> dict
         "compensation": profile.get("compensation", {}),
         "availability": profile.get("availability", {}),
         "eeo_voluntary": profile.get("eeo_voluntary", {}),
-        "resume_facts": resume_facts,
         "tailoring_config": profile.get("tailoring_config", {}),
         "files": profile.get("files", {}),
         "render": {"theme": DEFAULT_RENDER_THEME},
@@ -340,8 +354,27 @@ def _prompt_missing_applypilot_fields(resume_data: dict) -> dict:
     compensation = applypilot.setdefault("compensation", {})
     availability = applypilot.setdefault("availability", {})
     eeo = applypilot.setdefault("eeo_voluntary", {})
-    resume_facts = applypilot.setdefault("resume_facts", {})
     applypilot.setdefault("files", {})
+
+    if PROFILE_PATH.exists():
+        try:
+            legacy_payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            legacy_payload = {}
+        merged_resume, changed = merge_resume_json_with_legacy_profile(resume_data, legacy_payload)
+        if changed:
+            resume_data = merged_resume
+            basics = resume_data.setdefault("basics", {})
+            location = basics.setdefault("location", {})
+            meta = resume_data.setdefault("meta", {})
+            applypilot = meta.setdefault("applypilot", {})
+            personal = applypilot.setdefault("personal", {})
+            work_auth = applypilot.setdefault("work_authorization", {})
+            compensation = applypilot.setdefault("compensation", {})
+            availability = applypilot.setdefault("availability", {})
+            eeo = applypilot.setdefault("eeo_voluntary", {})
+            applypilot.setdefault("files", {})
+
     derived_profile = normalize_profile_from_resume_json(resume_data)
     derived_personal = derived_profile.get("personal", {})
 
@@ -416,11 +449,6 @@ def _prompt_missing_applypilot_fields(resume_data: dict) -> dict:
     eeo.setdefault("ethnicity", eeo["race_ethnicity"])
     eeo.setdefault("veteran_status", "Decline to self-identify")
     eeo.setdefault("disability_status", "Decline to self-identify")
-
-    resume_facts.setdefault("preserved_companies", [])
-    resume_facts.setdefault("preserved_projects", [])
-    resume_facts.setdefault("preserved_school", "")
-    resume_facts.setdefault("real_metrics", [])
 
     if "tailoring_config" not in applypilot or not isinstance(applypilot.get("tailoring_config"), dict):
         applypilot["tailoring_config"] = _setup_tailoring_config(str(applypilot.get("target_role", "")))
@@ -591,25 +619,11 @@ def _setup_profile() -> dict:
     langs = Prompt.ask("Programming languages", default="")
     frameworks = Prompt.ask("Frameworks & libraries", default="")
     tools = Prompt.ask("Tools & platforms (e.g. Docker, AWS, Git)", default="")
-    profile["skills_boundary"] = {
-        "programming_languages": [s.strip() for s in langs.split(",") if s.strip()],
-        "frameworks": [s.strip() for s in frameworks.split(",") if s.strip()],
-        "tools": [s.strip() for s in tools.split(",") if s.strip()],
-    }
-
-    # -- Resume Facts (preserved truths for tailoring) --
-    console.print("\n[bold cyan]Resume Facts[/bold cyan]")
-    console.print("[dim]These are preserved exactly during resume tailoring — the AI will never change them.[/dim]")
-    companies = Prompt.ask("Companies to always keep (comma-separated)", default="")
-    projects = Prompt.ask("Projects to always keep (comma-separated)", default="")
-    school = Prompt.ask("School name(s) to preserve", default="")
-    metrics = Prompt.ask("Real metrics to preserve (e.g. '99.9% uptime, 50k users')", default="")
-    profile["resume_facts"] = {
-        "preserved_companies": [s.strip() for s in companies.split(",") if s.strip()],
-        "preserved_projects": [s.strip() for s in projects.split(",") if s.strip()],
-        "preserved_school": school.strip(),
-        "real_metrics": [s.strip() for s in metrics.split(",") if s.strip()],
-    }
+    profile["skills"] = [
+        {"name": "Programming Languages", "keywords": [s.strip() for s in langs.split(",") if s.strip()]},
+        {"name": "Frameworks & Libraries", "keywords": [s.strip() for s in frameworks.split(",") if s.strip()]},
+        {"name": "Tools & Platforms", "keywords": [s.strip() for s in tools.split(",") if s.strip()]},
+    ]
 
     # -- EEO Voluntary (defaults) --
     profile["eeo_voluntary"] = {

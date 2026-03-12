@@ -17,6 +17,12 @@ import logging
 import re
 from typing import Optional
 
+from applypilot.resume_json import (
+    get_profile_company_names,
+    get_profile_project_names,
+    get_profile_school_names,
+    get_profile_skill_keywords,
+)
 from applypilot.scoring.tailoring_config import (
     check_banned_phrases,
     check_required_patterns,
@@ -96,15 +102,9 @@ MECHANISM_VERBS: set[str] = {
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def _build_skills_set(profile: dict) -> set[str]:
-    """Build the set of allowed skills from the profile's skills_boundary."""
-    boundary = profile.get("skills_boundary", {})
-    allowed: set[str] = set()
-    for category in boundary.values():
-        if isinstance(category, list):
-            allowed.update(s.lower().strip() for s in category)
-        elif isinstance(category, set):
-            allowed.update(s.lower().strip() for s in category)
-    return allowed
+    """Build the set of allowed skills from the normalized profile skills."""
+
+    return {skill.lower().strip() for skill in get_profile_skill_keywords(profile)}
 
 
 def sanitize_text(text: str) -> str:
@@ -229,12 +229,7 @@ def validate_json_fields(
             if fake in skills_text:
                 errors.append(f"Fabricated skill: '{fake}'")
 
-    work_history = profile.get("work_history", [])
-    work_companies = {str(item.get("company", "")).strip() for item in work_history if item.get("company")}
-    resume_facts = profile.get("resume_facts", {})
-    preserved_companies = set(resume_facts.get("preserved_companies", []))
-    for company in preserved_companies:
-        work_companies.add(company)
+    work_companies = set(get_profile_company_names(profile))
 
     if isinstance(data["experience"], list):
         for company in work_companies:
@@ -254,9 +249,9 @@ def validate_json_fields(
             for bullet in entry.get("bullets", []):
                 all_text_parts.append(sanitize_text(str(bullet)))
 
-    preserved_school = resume_facts.get("preserved_school", "")
-    if preserved_school and preserved_school.lower() not in sanitized_education.lower():
-        errors.append(f"Education '{preserved_school}' missing")
+    schools = get_profile_school_names(profile)
+    if schools and schools[0].lower() not in sanitized_education.lower():
+        errors.append(f"Education '{schools[0]}' missing")
 
     all_text = " ".join(all_text_parts).lower()
 
@@ -327,8 +322,6 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
     text_lower = text.lower()
 
     personal = profile.get("personal", {})
-    resume_facts = profile.get("resume_facts", {})
-
     # 1. Check required sections exist (flexible matching)
     section_variants: dict[str, list[str]] = {
         "SUMMARY": ["summary", "professional summary", "profile"],
@@ -347,19 +340,19 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
         warnings.append(f"Name '{full_name}' missing -- will be injected")
 
     # 3. Check companies preserved
-    for company in resume_facts.get("preserved_companies", []):
+    for company in get_profile_company_names(profile):
         if company.lower() not in text_lower:
             errors.append(f"Company '{company}' missing -- cannot remove real experience")
 
     # 4. Check projects preserved
-    for project in resume_facts.get("preserved_projects", []):
+    for project in get_profile_project_names(profile):
         if project.lower() not in text_lower:
             warnings.append(f"Project '{project}' not found -- may have been renamed")
 
     # 5. Check school preserved
-    preserved_school = resume_facts.get("preserved_school", "")
-    if preserved_school and preserved_school.lower() not in text_lower:
-        errors.append(f"Education '{preserved_school}' missing")
+    schools = get_profile_school_names(profile)
+    if schools and schools[0].lower() not in text_lower:
+        errors.append(f"Education '{schools[0]}' missing")
 
     # 6. Check contact info preserved (warn, don't error -- we can inject)
     email = personal.get("email", "")

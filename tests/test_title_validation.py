@@ -5,8 +5,9 @@ from applypilot.scoring.validator import validate_json_fields
 
 def make_profile(target_title: str = ""):
     return {
-        "skills_boundary": {"Languages": ["Python"]},
-        "resume_facts": {"preserved_companies": ["Acme Corp"], "preserved_projects": [], "preserved_school": ""},
+        "skills": [{"name": "Languages", "keywords": ["Python"]}],
+        "work": [{"company": "Acme Corp", "position": "Engineer", "start_date": "2020-01-01", "end_date": ""}],
+        "education": [{"institution": "Acme University", "studyType": "B.S.", "area": "Computer Science", "endDate": "2020"}],
         "job_context": {"title": target_title},
     }
 

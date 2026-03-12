@@ -78,16 +78,6 @@ _APPLYPILOT_META_SCHEMA: dict = {
             },
             "additionalProperties": True,
         },
-        "resume_facts": {
-            "type": "object",
-            "properties": {
-                "preserved_companies": {"type": "array", "items": {"type": "string"}},
-                "preserved_projects": {"type": "array", "items": {"type": "string"}},
-                "preserved_school": {"type": "string"},
-                "real_metrics": {"type": "array", "items": {"type": "string"}},
-            },
-            "additionalProperties": True,
-        },
         "tailoring_config": {"type": "object"},
         "files": {
             "type": "object",
@@ -342,48 +332,37 @@ def _normalize_skill_category(name: str) -> str:
     return "tools"
 
 
-def _normalize_skill_sections(skills: list[dict[str, Any]]) -> dict[str, list[str]]:
-    normalized: dict[str, list[str]] = {
-        "programming_languages": [],
-        "frameworks": [],
-        "devops": [],
-        "databases": [],
-        "tools": [],
+def _skill_label_from_boundary_key(key: str) -> str:
+    label_map = {
+        "programming_languages": "Programming Languages",
+        "frameworks": "Frameworks & Libraries",
+        "devops": "DevOps & Infra",
+        "databases": "Databases",
+        "tools": "Tools & Platforms",
     }
-    for item in skills:
-        if not isinstance(item, dict):
-            continue
-        category = _normalize_skill_category(_coerce_str(item.get("name")))
-        for keyword in _coerce_list(item.get("keywords", [])):
-            if keyword not in normalized[category]:
-                normalized[category].append(keyword)
-    return normalized
+    return label_map.get(key, key.replace("_", " ").title())
 
 
-def _normalize_work_history(work: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+def _normalize_work_entries(work: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
-    metrics: list[str] = []
     for item in work:
         if not isinstance(item, dict):
             continue
         extension = item.get("x-applypilot", {}) if isinstance(item.get("x-applypilot"), dict) else {}
-        key_metrics = _coerce_list(extension.get("key_metrics", []))
-        metrics.extend(metric for metric in key_metrics if metric not in metrics)
         normalized.append(
             {
-                "company": _coerce_str(item.get("name")),
-                "position": _coerce_str(item.get("position")),
+                "company": _coerce_str(_safe_get(item, "company", "name")),
+                "position": _coerce_str(_safe_get(item, "position", "title")),
                 "location": _coerce_str(item.get("location")),
-                "start_year": _parse_year(item.get("startDate")),
-                "end_year": _parse_year(item.get("endDate")),
-                "start_date": _coerce_str(item.get("startDate")),
-                "end_date": _coerce_str(item.get("endDate")),
+                "start_date": _coerce_str(_safe_get(item, "startDate", "start_date", "start_year")),
+                "end_date": _coerce_str(_safe_get(item, "endDate", "end_date", "end_year")),
                 "summary": _coerce_str(item.get("summary")),
                 "highlights": _coerce_list(item.get("highlights", [])),
-                "key_metrics": key_metrics,
+                "key_metrics": _coerce_list(extension.get("key_metrics", item.get("key_metrics", []))),
+                "technologies": _coerce_list(item.get("technologies", [])),
             }
         )
-    return normalized, metrics
+    return normalized
 
 
 def _normalize_education(education: list[dict[str, Any]]) -> tuple[list[dict[str, str]], str]:
@@ -404,6 +383,44 @@ def _normalize_education(education: list[dict[str, Any]]) -> tuple[list[dict[str
     return normalized, latest_level
 
 
+def _normalize_skills(skills: list[dict[str, Any]]) -> list[dict[str, list[str]]]:
+    normalized: list[dict[str, list[str]]] = []
+    for item in skills:
+        if not isinstance(item, dict):
+            continue
+        name = _coerce_str(item.get("name"))
+        keywords = _coerce_list(item.get("keywords", []))
+        if not name and not keywords:
+            continue
+        normalized.append({"name": name or "Skills", "keywords": keywords})
+    return normalized
+
+
+def _skills_from_boundary(boundary: dict[str, Any]) -> list[dict[str, list[str]]]:
+    normalized: list[dict[str, list[str]]] = []
+    for key, value in boundary.items():
+        keywords = _coerce_list(value)
+        if keywords:
+            normalized.append({"name": _skill_label_from_boundary_key(key), "keywords": keywords})
+    return normalized
+
+
+def _normalize_projects(projects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in projects:
+        if not isinstance(item, dict):
+            continue
+        normalized.append(
+            {
+                "name": _coerce_str(item.get("name")),
+                "description": _coerce_str(_safe_get(item, "description", "summary")),
+                "highlights": _coerce_list(item.get("highlights", [])),
+                "url": _coerce_str(item.get("url")),
+            }
+        )
+    return normalized
+
+
 def _merge_unique(base: list[str], extra: list[str]) -> list[str]:
     merged = list(base)
     for item in extra:
@@ -412,124 +429,67 @@ def _merge_unique(base: list[str], extra: list[str]) -> list[str]:
     return merged
 
 
-def normalize_profile_from_resume_json(data: dict) -> dict:
-    """Map JSON Resume plus ApplyPilot extensions into the legacy profile contract."""
-
-    basics = data.get("basics", {}) if isinstance(data.get("basics"), dict) else {}
-    location = basics.get("location", {}) if isinstance(basics.get("location"), dict) else {}
-    meta = data.get("meta", {}) if isinstance(data.get("meta"), dict) else {}
-    applypilot = meta.get("applypilot", {}) if isinstance(meta.get("applypilot"), dict) else {}
-    personal_meta = applypilot.get("personal", {}) if isinstance(applypilot.get("personal"), dict) else {}
-    work_entries = data.get("work", []) if isinstance(data.get("work"), list) else []
-    education_entries = data.get("education", []) if isinstance(data.get("education"), list) else []
-    skills_entries = data.get("skills", []) if isinstance(data.get("skills"), list) else []
-
-    work_history, work_metrics = _normalize_work_history(work_entries)
-    education, education_level = _normalize_education(education_entries)
-    current_work = _select_current_work(work_entries)
+def _normalize_personal_from_resume_json(
+    basics: dict[str, Any],
+    location: dict[str, Any],
+    personal_meta: dict[str, Any],
+) -> dict[str, str]:
     profile_urls = _profile_urls(basics.get("profiles", []) if isinstance(basics.get("profiles"), list) else [])
-
-    experience_total = _coerce_str(applypilot.get("years_of_experience_total")) or _compute_years_experience(work_entries)
-    target_role = (
-        _coerce_str(applypilot.get("target_role"))
-        or _primary_role_from_label(_coerce_str(basics.get("label")))
-        or _coerce_str(current_work.get("position"))
-    )
-    current_title = _coerce_str(current_work.get("position"))
-    current_company = _coerce_str(current_work.get("name"))
-
-    resume_facts = applypilot.get("resume_facts", {}) if isinstance(applypilot.get("resume_facts"), dict) else {}
-    real_metrics = _merge_unique(_coerce_list(resume_facts.get("real_metrics", [])), work_metrics)
-
-    work_authorization = applypilot.get("work_authorization", {}) if isinstance(
-        applypilot.get("work_authorization"), dict
-    ) else {}
-    compensation = applypilot.get("compensation", {}) if isinstance(applypilot.get("compensation"), dict) else {}
-    availability = applypilot.get("availability", {}) if isinstance(applypilot.get("availability"), dict) else {}
-    eeo = applypilot.get("eeo_voluntary", {}) if isinstance(applypilot.get("eeo_voluntary"), dict) else {}
-
     website_url = _coerce_str(personal_meta.get("website_url")) or _coerce_str(basics.get("url"))
     linkedin_url = _coerce_str(personal_meta.get("linkedin_url")) or profile_urls["linkedin_url"]
     github_url = _coerce_str(personal_meta.get("github_url")) or profile_urls["github_url"]
     portfolio_url = _coerce_str(personal_meta.get("portfolio_url")) or profile_urls["portfolio_url"]
-
-    return normalize_legacy_profile(
-        {
-            "personal": {
-                "full_name": _coerce_str(basics.get("name")),
-                "preferred_name": _coerce_str(personal_meta.get("preferred_name")),
-                "email": _coerce_str(basics.get("email")),
-                "password": "",
-                "phone": _coerce_str(basics.get("phone")),
-                "address": _coerce_str(personal_meta.get("address")) or _coerce_str(location.get("address")),
-                "city": _coerce_str(location.get("city")),
-                "province_state": _coerce_str(personal_meta.get("province_state")) or _coerce_str(location.get("region")),
-                "country": _coerce_str(personal_meta.get("country")) or _coerce_str(location.get("countryCode")),
-                "postal_code": _coerce_str(personal_meta.get("postal_code")) or _coerce_str(location.get("postalCode")),
-                "linkedin_url": linkedin_url,
-                "github_url": github_url,
-                "portfolio_url": portfolio_url,
-                "website_url": website_url,
-            },
-            "work_authorization": work_authorization,
-            "availability": availability,
-            "compensation": compensation,
-            "work_history": work_history,
-            "experience": {
-                "years_of_experience_total": experience_total,
-                "education_level": education_level,
-                "current_title": current_title,
-                "current_job_title": current_title,
-                "current_company": current_company,
-                "target_role": target_role,
-            },
-            "education": education,
-            "skills_boundary": _normalize_skill_sections(skills_entries),
-            "resume_facts": {
-                "preserved_companies": _coerce_list(resume_facts.get("preserved_companies", [])),
-                "preserved_projects": _coerce_list(resume_facts.get("preserved_projects", [])),
-                "preserved_school": _coerce_str(resume_facts.get("preserved_school")),
-                "real_metrics": real_metrics,
-            },
-            "eeo_voluntary": eeo,
-            "tailoring_config": applypilot.get("tailoring_config", {}) if isinstance(
-                applypilot.get("tailoring_config"), dict
-            ) else {},
-            "files": applypilot.get("files", {}) if isinstance(applypilot.get("files"), dict) else {},
-        }
-    )
+    return {
+        "full_name": _coerce_str(basics.get("name")),
+        "preferred_name": _coerce_str(personal_meta.get("preferred_name")),
+        "email": _coerce_str(basics.get("email")),
+        "phone": _coerce_str(basics.get("phone")),
+        "address": _coerce_str(personal_meta.get("address")) or _coerce_str(location.get("address")),
+        "city": _coerce_str(location.get("city")),
+        "province_state": _coerce_str(personal_meta.get("province_state")) or _coerce_str(location.get("region")),
+        "country": _coerce_str(personal_meta.get("country")) or _coerce_str(location.get("countryCode")),
+        "postal_code": _coerce_str(personal_meta.get("postal_code")) or _coerce_str(location.get("postalCode")),
+        "linkedin_url": linkedin_url,
+        "github_url": github_url,
+        "portfolio_url": portfolio_url,
+        "website_url": website_url,
+    }
 
 
-def normalize_legacy_profile(profile: dict) -> dict:
-    """Normalize legacy profile.json payloads and fill contract aliases/defaults."""
+def _select_current_role(work: list[dict[str, Any]]) -> dict[str, Any]:
+    def sort_key(entry: dict[str, Any]) -> tuple[int, int, int]:
+        end_year = _parse_year(entry.get("end_date"))
+        start_year = _parse_year(entry.get("start_date"))
+        is_current = 1 if not _coerce_str(entry.get("end_date")) else 0
+        return (is_current, end_year or 0, start_year or 0)
 
-    normalized = copy.deepcopy(profile)
-    personal = normalized.setdefault("personal", {})
-    work_auth = normalized.setdefault("work_authorization", {})
-    availability = normalized.setdefault("availability", {})
-    compensation = normalized.setdefault("compensation", {})
-    experience = normalized.setdefault("experience", {})
-    resume_facts = normalized.setdefault("resume_facts", {})
-    eeo = normalized.setdefault("eeo_voluntary", {})
-    normalized.setdefault("education", [])
-    normalized.setdefault("work_history", [])
-    normalized.setdefault("tailoring_config", {})
-    normalized.setdefault("files", {})
+    valid = [entry for entry in work if isinstance(entry, dict)]
+    if not valid:
+        return {}
+    return sorted(valid, key=sort_key, reverse=True)[0]
 
-    personal.setdefault("full_name", "")
-    personal.setdefault("preferred_name", "")
-    personal.setdefault("email", "")
-    personal.setdefault("password", "")
-    personal.setdefault("phone", "")
-    personal.setdefault("address", "")
-    personal.setdefault("city", "")
-    personal.setdefault("province_state", "")
-    personal.setdefault("country", "")
-    personal.setdefault("postal_code", "")
-    personal.setdefault("linkedin_url", "")
-    personal.setdefault("github_url", "")
-    personal.setdefault("portfolio_url", "")
-    personal.setdefault("website_url", "")
+
+def normalize_profile_settings(profile: dict) -> dict:
+    """Normalize ApplyPilot settings and drop resume-derived content."""
+
+    source = profile if isinstance(profile, dict) else {}
+    normalized = {
+        "work_authorization": copy.deepcopy(source.get("work_authorization", {})),
+        "compensation": copy.deepcopy(source.get("compensation", {})),
+        "availability": copy.deepcopy(source.get("availability", {})),
+        "eeo_voluntary": copy.deepcopy(source.get("eeo_voluntary", {})),
+        "tailoring_config": copy.deepcopy(source.get("tailoring_config", {})),
+        "files": copy.deepcopy(source.get("files", {})),
+    }
+
+    work_auth = normalized["work_authorization"]
+    compensation = normalized["compensation"]
+    availability = normalized["availability"]
+    eeo = normalized["eeo_voluntary"]
+    if not isinstance(normalized["tailoring_config"], dict):
+        normalized["tailoring_config"] = {}
+    if not isinstance(normalized["files"], dict):
+        normalized["files"] = {}
 
     authorized = _safe_get(work_auth, "legally_authorized_to_work", "legally_authorized")
     sponsorship = _safe_get(work_auth, "require_sponsorship", "needs_sponsorship")
@@ -545,35 +505,6 @@ def normalize_legacy_profile(profile: dict) -> dict:
     compensation.setdefault("salary_range_max", "")
     compensation.setdefault("currency_conversion_note", "")
 
-    experience.setdefault("years_of_experience_total", "")
-    current_title = _safe_get(experience, "current_title", "current_job_title")
-    experience["current_title"] = current_title
-    experience["current_job_title"] = current_title
-    experience.setdefault("current_company", "")
-    experience.setdefault("education_level", "")
-    experience.setdefault("target_role", current_title)
-
-    skills = normalized.setdefault("skills_boundary", {})
-    if "languages" in skills and "programming_languages" not in skills:
-        skills["programming_languages"] = _coerce_list(skills.get("languages"))
-    if "frameworks" not in skills:
-        skills["frameworks"] = []
-    if "programming_languages" not in skills:
-        skills["programming_languages"] = []
-    if "tools" not in skills:
-        skills["tools"] = []
-    if "devops" not in skills:
-        skills["devops"] = _coerce_list(skills.get("devops"))
-    if "databases" not in skills:
-        skills["databases"] = _coerce_list(skills.get("databases"))
-    for key, value in list(skills.items()):
-        skills[key] = _coerce_list(value)
-
-    resume_facts.setdefault("preserved_companies", [])
-    resume_facts.setdefault("preserved_projects", [])
-    resume_facts.setdefault("preserved_school", "")
-    resume_facts["real_metrics"] = _merge_unique(_coerce_list(resume_facts.get("real_metrics", [])), [])
-
     availability.setdefault("earliest_start_date", "Immediately")
     availability.setdefault("available_for_full_time", "")
     availability.setdefault("available_for_contract", "")
@@ -585,20 +516,239 @@ def normalize_legacy_profile(profile: dict) -> dict:
     eeo.setdefault("veteran_status", "Decline to self-identify")
     eeo.setdefault("disability_status", "Decline to self-identify")
 
-    for role in normalized.get("work_history", []):
-        if not isinstance(role, dict):
-            continue
-        role.setdefault("company", "")
-        role.setdefault("position", "")
-        role.setdefault("location", "")
-        role.setdefault("start_year", _parse_year(role.get("start_date")))
-        role.setdefault("end_year", _parse_year(role.get("end_date")))
-        role.setdefault("start_date", "")
-        role.setdefault("end_date", "")
-        role["highlights"] = _coerce_list(role.get("highlights", []))
-        role["key_metrics"] = _coerce_list(role.get("key_metrics", []))
-
     return normalized
+
+
+def settings_from_resume_json(data: dict) -> dict:
+    """Extract profile.json settings from canonical resume metadata."""
+
+    meta = data.get("meta", {}) if isinstance(data.get("meta"), dict) else {}
+    applypilot = meta.get("applypilot", {}) if isinstance(meta.get("applypilot"), dict) else {}
+    return normalize_profile_settings(applypilot)
+
+
+def normalize_profile_from_resume_json(data: dict, settings: dict | None = None) -> dict:
+    """Map JSON Resume plus ApplyPilot extensions into the runtime profile contract."""
+
+    basics = data.get("basics", {}) if isinstance(data.get("basics"), dict) else {}
+    location = basics.get("location", {}) if isinstance(basics.get("location"), dict) else {}
+    meta = data.get("meta", {}) if isinstance(data.get("meta"), dict) else {}
+    applypilot = meta.get("applypilot", {}) if isinstance(meta.get("applypilot"), dict) else {}
+    personal_meta = applypilot.get("personal", {}) if isinstance(applypilot.get("personal"), dict) else {}
+    work_entries = data.get("work", []) if isinstance(data.get("work"), list) else []
+    education_entries = data.get("education", []) if isinstance(data.get("education"), list) else []
+    skills_entries = data.get("skills", []) if isinstance(data.get("skills"), list) else []
+    projects_entries = data.get("projects", []) if isinstance(data.get("projects"), list) else []
+
+    work = _normalize_work_entries(work_entries)
+    education, education_level = _normalize_education(education_entries)
+    skills = _normalize_skills(skills_entries)
+    projects = _normalize_projects(projects_entries)
+    current_work = _select_current_role(work)
+
+    experience_total = _coerce_str(applypilot.get("years_of_experience_total")) or _compute_years_experience(work_entries)
+    target_role = (
+        _coerce_str(applypilot.get("target_role"))
+        or _primary_role_from_label(_coerce_str(basics.get("label")))
+        or _coerce_str(current_work.get("position"))
+    )
+    current_title = _coerce_str(current_work.get("position"))
+    current_company = _coerce_str(current_work.get("company"))
+
+    profile_settings = normalize_profile_settings(settings or applypilot)
+    return {
+        "personal": _normalize_personal_from_resume_json(basics, location, personal_meta),
+        "work_authorization": profile_settings["work_authorization"],
+        "availability": profile_settings["availability"],
+        "compensation": profile_settings["compensation"],
+        "experience": {
+            "years_of_experience_total": experience_total,
+            "education_level": education_level,
+            "current_title": current_title,
+            "current_job_title": current_title,
+            "current_company": current_company,
+            "target_role": target_role,
+        },
+        "work": work,
+        "education": education,
+        "skills": skills,
+        "projects": projects,
+        "eeo_voluntary": profile_settings["eeo_voluntary"],
+        "tailoring_config": profile_settings["tailoring_config"],
+        "files": profile_settings["files"],
+    }
+
+
+def normalize_legacy_profile(profile: dict) -> dict:
+    """Normalize legacy profile.json payloads into the runtime profile contract."""
+
+    raw = copy.deepcopy(profile if isinstance(profile, dict) else {})
+    personal_raw = raw.get("personal", {}) if isinstance(raw.get("personal"), dict) else {}
+    experience_raw = raw.get("experience", {}) if isinstance(raw.get("experience"), dict) else {}
+    education_raw = raw.get("education", []) if isinstance(raw.get("education"), list) else []
+    work_history_raw = raw.get("work_history", []) if isinstance(raw.get("work_history"), list) else []
+    skills_boundary = raw.get("skills_boundary", {}) if isinstance(raw.get("skills_boundary"), dict) else {}
+    project_raw = raw.get("projects", []) if isinstance(raw.get("projects"), list) else []
+    project_highlights = raw.get("project_highlights", []) if isinstance(raw.get("project_highlights"), list) else []
+
+    work = _normalize_work_entries(work_history_raw)
+    education, education_level = _normalize_education(education_raw)
+    skills = _normalize_skills(raw.get("skills", [])) if isinstance(raw.get("skills"), list) else []
+    if not skills:
+        if "languages" in skills_boundary and "programming_languages" not in skills_boundary:
+            skills_boundary["programming_languages"] = _coerce_list(skills_boundary.get("languages"))
+        skills = _skills_from_boundary(skills_boundary)
+
+    projects = _normalize_projects(project_raw)
+    if not projects and project_highlights:
+        projects = _normalize_projects(project_highlights)
+
+    current_work = _select_current_role(work)
+    current_title = _coerce_str(_safe_get(experience_raw, "current_title", "current_job_title")) or _coerce_str(
+        current_work.get("position")
+    )
+    current_company = _coerce_str(experience_raw.get("current_company")) or _coerce_str(current_work.get("company"))
+    years_experience = _coerce_str(experience_raw.get("years_of_experience_total")) or _compute_years_experience(
+        [{"startDate": role.get("start_date", "")} for role in work]
+    )
+
+    settings = normalize_profile_settings(raw)
+
+    return {
+        "personal": {
+            "full_name": _coerce_str(personal_raw.get("full_name")),
+            "preferred_name": _coerce_str(personal_raw.get("preferred_name")),
+            "email": _coerce_str(personal_raw.get("email")),
+            "phone": _coerce_str(personal_raw.get("phone")),
+            "address": _coerce_str(personal_raw.get("address")),
+            "city": _coerce_str(personal_raw.get("city")),
+            "province_state": _coerce_str(personal_raw.get("province_state")),
+            "country": _coerce_str(personal_raw.get("country")),
+            "postal_code": _coerce_str(personal_raw.get("postal_code")),
+            "linkedin_url": _coerce_str(personal_raw.get("linkedin_url")),
+            "github_url": _coerce_str(personal_raw.get("github_url")),
+            "portfolio_url": _coerce_str(personal_raw.get("portfolio_url")),
+            "website_url": _coerce_str(personal_raw.get("website_url")),
+        },
+        "work_authorization": settings["work_authorization"],
+        "availability": settings["availability"],
+        "compensation": settings["compensation"],
+        "experience": {
+            "years_of_experience_total": years_experience,
+            "education_level": _coerce_str(experience_raw.get("education_level")) or education_level,
+            "current_title": current_title,
+            "current_job_title": current_title,
+            "current_company": current_company,
+            "target_role": _coerce_str(experience_raw.get("target_role")) or current_title,
+        },
+        "work": work,
+        "education": education,
+        "skills": skills,
+        "projects": projects,
+        "eeo_voluntary": settings["eeo_voluntary"],
+        "tailoring_config": settings["tailoring_config"],
+        "files": settings["files"],
+    }
+
+
+def _set_if_missing(mapping: dict[str, Any], key: str, value: Any) -> bool:
+    if value in (None, "", [], {}):
+        return False
+    if mapping.get(key) not in (None, "", [], {}):
+        return False
+    mapping[key] = copy.deepcopy(value)
+    return True
+
+
+def _ensure_profile_url(profiles: list[dict[str, Any]], network: str, url: str) -> bool:
+    if not url:
+        return False
+    for profile in profiles:
+        if not isinstance(profile, dict):
+            continue
+        if _coerce_str(profile.get("url")) == url:
+            return False
+        if _coerce_str(profile.get("network")).lower() == network.lower():
+            return False
+    profiles.append({"network": network, "url": url})
+    return True
+
+
+def merge_resume_json_with_legacy_profile(data: dict, profile: dict) -> tuple[dict, bool]:
+    """Backfill missing canonical resume fields from a legacy profile payload."""
+
+    merged = copy.deepcopy(data if isinstance(data, dict) else {})
+    legacy = normalize_legacy_profile(profile)
+    changed = False
+
+    basics = merged.setdefault("basics", {})
+    location = basics.setdefault("location", {})
+    profiles = basics.setdefault("profiles", [])
+    if not isinstance(profiles, list):
+        profiles = []
+        basics["profiles"] = profiles
+    meta = merged.setdefault("meta", {})
+    applypilot = meta.setdefault("applypilot", {})
+    personal_meta = applypilot.setdefault("personal", {})
+    personal = legacy.get("personal", {})
+    experience = legacy.get("experience", {})
+
+    changed |= _set_if_missing(basics, "name", personal.get("full_name"))
+    changed |= _set_if_missing(basics, "email", personal.get("email"))
+    changed |= _set_if_missing(basics, "phone", personal.get("phone"))
+    changed |= _set_if_missing(basics, "url", personal.get("website_url"))
+    changed |= _set_if_missing(location, "address", personal.get("address"))
+    changed |= _set_if_missing(location, "city", personal.get("city"))
+    changed |= _set_if_missing(location, "region", personal.get("province_state"))
+    changed |= _set_if_missing(location, "countryCode", personal.get("country"))
+    changed |= _set_if_missing(location, "postalCode", personal.get("postal_code"))
+    changed |= _set_if_missing(personal_meta, "preferred_name", personal.get("preferred_name"))
+    changed |= _set_if_missing(personal_meta, "address", personal.get("address"))
+    changed |= _set_if_missing(personal_meta, "province_state", personal.get("province_state"))
+    changed |= _set_if_missing(personal_meta, "country", personal.get("country"))
+    changed |= _set_if_missing(personal_meta, "postal_code", personal.get("postal_code"))
+    changed |= _set_if_missing(personal_meta, "linkedin_url", personal.get("linkedin_url"))
+    changed |= _set_if_missing(personal_meta, "github_url", personal.get("github_url"))
+    changed |= _set_if_missing(personal_meta, "portfolio_url", personal.get("portfolio_url"))
+    changed |= _set_if_missing(personal_meta, "website_url", personal.get("website_url"))
+    changed |= _ensure_profile_url(profiles, "LinkedIn", _coerce_str(personal.get("linkedin_url")))
+    changed |= _ensure_profile_url(profiles, "GitHub", _coerce_str(personal.get("github_url")))
+    changed |= _ensure_profile_url(profiles, "Portfolio", _coerce_str(personal.get("portfolio_url")))
+
+    changed |= _set_if_missing(applypilot, "target_role", experience.get("target_role"))
+    changed |= _set_if_missing(applypilot, "years_of_experience_total", experience.get("years_of_experience_total"))
+    for key in ("work_authorization", "compensation", "availability", "eeo_voluntary", "tailoring_config", "files"):
+        changed |= _set_if_missing(applypilot, key, legacy.get(key))
+
+    if not merged.get("work") and legacy.get("work"):
+        merged["work"] = [
+            {
+                "name": role.get("company", ""),
+                "position": role.get("position", ""),
+                "location": role.get("location", ""),
+                "startDate": role.get("start_date", ""),
+                "endDate": role.get("end_date", ""),
+                "summary": role.get("summary", ""),
+                "highlights": role.get("highlights", []),
+                "x-applypilot": {"key_metrics": role.get("key_metrics", [])},
+            }
+            for role in legacy["work"]
+        ]
+        changed = True
+
+    if not merged.get("education") and legacy.get("education"):
+        merged["education"] = copy.deepcopy(legacy["education"])
+        changed = True
+
+    if not merged.get("skills") and legacy.get("skills"):
+        merged["skills"] = copy.deepcopy(legacy["skills"])
+        changed = True
+
+    if not merged.get("projects") and legacy.get("projects"):
+        merged["projects"] = copy.deepcopy(legacy["projects"])
+        changed = True
+
+    return merged, changed
 
 
 def normalize_profile_data(data: dict) -> dict:
@@ -607,6 +757,79 @@ def normalize_profile_data(data: dict) -> dict:
     if looks_like_resume_json(data):
         return normalize_profile_from_resume_json(data)
     return normalize_legacy_profile(data)
+
+
+def get_profile_skill_sections(profile: dict) -> list[tuple[str, list[str]]]:
+    """Return normalized skill sections as (label, keywords) pairs."""
+
+    sections: list[tuple[str, list[str]]] = []
+    for item in profile.get("skills", []):
+        if not isinstance(item, dict):
+            continue
+        label = _coerce_str(item.get("name")) or "Skills"
+        keywords = _coerce_list(item.get("keywords", []))
+        if keywords:
+            sections.append((label, keywords))
+    return sections
+
+
+def get_profile_skill_keywords(profile: dict) -> list[str]:
+    """Return a deduplicated flat list of allowed skills."""
+
+    keywords: list[str] = []
+    for _, section_keywords in get_profile_skill_sections(profile):
+        keywords = _merge_unique(keywords, section_keywords)
+    return keywords
+
+
+def get_profile_company_names(profile: dict) -> list[str]:
+    """Return company names from the normalized work history."""
+
+    companies: list[str] = []
+    for job in profile.get("work", []):
+        if not isinstance(job, dict):
+            continue
+        company = _coerce_str(job.get("company"))
+        if company and company not in companies:
+            companies.append(company)
+    return companies
+
+
+def get_profile_project_names(profile: dict) -> list[str]:
+    """Return project names from the normalized runtime profile."""
+
+    projects: list[str] = []
+    for project in profile.get("projects", []):
+        if not isinstance(project, dict):
+            continue
+        name = _coerce_str(project.get("name"))
+        if name and name not in projects:
+            projects.append(name)
+    return projects
+
+
+def get_profile_school_names(profile: dict) -> list[str]:
+    """Return institution names from the normalized education section."""
+
+    schools: list[str] = []
+    for edu in profile.get("education", []):
+        if not isinstance(edu, dict):
+            continue
+        institution = _coerce_str(edu.get("institution"))
+        if institution and institution not in schools:
+            schools.append(institution)
+    return schools
+
+
+def get_profile_verified_metrics(profile: dict) -> list[str]:
+    """Return deduplicated verified metrics from normalized work entries."""
+
+    metrics: list[str] = []
+    for job in profile.get("work", []):
+        if not isinstance(job, dict):
+            continue
+        metrics = _merge_unique(metrics, _coerce_list(job.get("key_metrics", [])))
+    return metrics
 
 
 def build_resume_text_from_json(data: dict) -> str:

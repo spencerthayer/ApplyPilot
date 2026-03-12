@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from applypilot.resume_json import get_profile_project_names, get_profile_school_names
+
 log = logging.getLogger(__name__)
 
 
@@ -142,8 +144,14 @@ class ValidationConfig:
 # ── Individual Validation Checks ───────────────────────────────────────────
 
 
+def _year_from_date(value: Any) -> str:
+    text = str(value or "").strip()
+    match = re.match(r"^\s*(\d{4})", text)
+    return match.group(1) if match else ""
+
+
 def check_role_completeness(resume_data: dict, profile: dict, config: ValidationConfig) -> ValidationResult:
-    """Verify every role in profile.work_history appears in resume output.
+    """Verify every role in profile.work appears in resume output.
     
     Prevents missing entire roles (e.g., "MDA role from 2010-2011").
     """
@@ -152,11 +160,11 @@ def check_role_completeness(resume_data: dict, profile: dict, config: Validation
     
     # Extract roles from profile
     profile_roles = []
-    for role in profile.get("work_history", []):
+    for role in profile.get("work", []):
         company = str(role.get("company", "")).strip()
         position = str(role.get("position", "")).strip()
-        start_year = role.get("start_year", "")
-        end_year = role.get("end_year", "")
+        start_year = _year_from_date(role.get("start_date"))
+        end_year = _year_from_date(role.get("end_date"))
         
         if company:
             profile_roles.append({
@@ -171,7 +179,7 @@ def check_role_completeness(resume_data: dict, profile: dict, config: Validation
         return ValidationResult(
             passed=True,
             check_name="role_completeness",
-            warnings=["No work_history found in profile to validate against"],
+            warnings=["No work entries found in profile to validate against"],
         )
     
     # Extract companies from resume output
@@ -240,13 +248,13 @@ def check_project_completeness(resume_data: dict, profile: dict, config: Validat
     retry_instructions = []
     
     # Get preserved projects from profile
-    preserved_projects = profile.get("resume_facts", {}).get("preserved_projects", [])
+    preserved_projects = get_profile_project_names(profile)
     
     if not preserved_projects:
         return ValidationResult(
             passed=True,
             check_name="project_completeness",
-            warnings=["No preserved_projects found in profile"],
+            warnings=["No projects found in profile"],
         )
     
     # Extract projects from resume
@@ -736,7 +744,8 @@ def check_education_completeness(resume_data: dict, profile: dict, config: Valid
         )
     
     # Get expected school from profile
-    preserved_school = profile.get("resume_facts", {}).get("preserved_school", "")
+    schools = get_profile_school_names(profile)
+    preserved_school = schools[0] if schools else ""
     
     for i, edu in enumerate(education_list):
         entry_num = i + 1

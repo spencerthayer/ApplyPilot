@@ -1,20 +1,4 @@
 {
-  "personal": {
-    "full_name": "YOUR_LEGAL_NAME",
-    "preferred_name": "YOUR_PREFERRED_NAME",
-    "email": "your.email@example.com",
-    "password": "YOUR_JOB_SITE_PASSWORD",
-    "phone": "555-123-4567",
-    "address": "123 Main St",
-    "city": "Your City",
-    "province_state": "Your State/Province",
-    "country": "Your Country",
-    "postal_code": "A1B 2C3",
-    "linkedin_url": "https://www.linkedin.com/in/yourprofile",
-    "github_url": "https://github.com/yourusername",
-    "portfolio_url": "",
-    "website_url": ""
-  },
   "work_authorization": {
     "legally_authorized_to_work": "Yes",
     "require_sponsorship": "No",
@@ -32,30 +16,24 @@
     "salary_range_max": "100000",
     "currency_conversion_note": ""
   },
-  "experience": {
-    "years_of_experience_total": "3",
-    "education_level": "Bachelor's Degree",
-    "current_job_title": "",
-    "current_company": "",
-    "target_role": "software engineer"
-  },
-  "skills_boundary": {
-    "languages": ["Python", "SQL", "JavaScript"],
-    "frameworks": ["FastAPI", "Flask", "React"],
-    "devops": ["Docker", "AWS", "CI/CD"],
-    "databases": ["PostgreSQL", "MongoDB"],
-    "tools": ["Git", "Linux"]
-  },
-  "resume_facts": {
-    "preserved_companies": ["Company A", "Company B"],
-    "preserved_projects": ["Project X", "Project Y"],
-    "preserved_school": "Your University",
-    "real_metrics": ["50% improvement", "10x faster"]
-  },
   "eeo_voluntary": {
     "gender": "Decline to self-identify",
     "race_ethnicity": "Decline to self-identify",
     "veteran_status": "I am not a protected veteran",
     "disability_status": "I do not wish to answer"
+  },
+  "tailoring_config": {
+    "default_role_type": "software_engineer",
+    "validation": {
+      "enabled": true,
+      "max_retries": 3,
+      "min_bullets_per_role": 2,
+      "max_bullets_per_role": 5,
+      "min_metrics_ratio": 0.7
+    },
+    "role_types": {}
+  },
+  "files": {
+    "profile_photo": "~/.applypilot/files/profile_photo.jpg"
   }
 }

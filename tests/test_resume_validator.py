@@ -32,29 +32,36 @@ def sample_profile():
             "full_name": "Test User",
             "email": "test@example.com",
         },
-        "work_history": [
+        "work": [
             {
                 "company": "Tech Corp",
                 "position": "Software Engineer",
-                "start_year": 2019,
-                "end_year": 2023,
+                "start_date": "2019-01-01",
+                "end_date": "2023-12-31",
             },
             {
                 "company": "Startup Inc",
                 "position": "Senior Developer",
-                "start_year": 2023,
-                "end_year": None,
+                "start_date": "2023-01-01",
+                "end_date": "",
             },
+        ],
+        "education": [
+            {
+                "institution": "Test University",
+                "studyType": "Bachelor's Degree",
+                "area": "Computer Science",
+                "endDate": "2018",
+            }
+        ],
+        "projects": [
+            {"name": "Project Alpha"},
+            {"name": "Project Beta"},
         ],
         "experience": {
             "years_of_experience_total": "6",
             "education_level": "Bachelor's Degree",
             "target_role": "Senior Software Engineer",
-        },
-        "resume_facts": {
-            "preserved_companies": ["Tech Corp", "Startup Inc"],
-            "preserved_projects": ["Project Alpha", "Project Beta"],
-            "preserved_school": "Test University",
         },
         "tailoring_config": {
             "validation": {
@@ -216,8 +223,8 @@ class TestCheckRoleCompleteness:
         assert any("Add missing role" in instr for instr in result.retry_instructions)
     
     def test_no_work_history(self, sample_profile, sample_resume_data, validation_config):
-        """Test when profile has no work_history."""
-        sample_profile["work_history"] = []
+        """Test when profile has no work entries."""
+        sample_profile["work"] = []
         
         result = check_role_completeness(sample_resume_data, sample_profile, validation_config)
         assert result.passed is True
@@ -255,8 +262,8 @@ class TestCheckProjectCompleteness:
         assert len(result.warnings) > 0
     
     def test_no_preserved_projects(self, sample_profile, sample_resume_data, validation_config):
-        """Test when profile has no preserved_projects."""
-        sample_profile["resume_facts"]["preserved_projects"] = []
+        """Test when profile has no projects."""
+        sample_profile["projects"] = []
         
         result = check_project_completeness(sample_resume_data, sample_profile, validation_config)
         assert result.passed is True

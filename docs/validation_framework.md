@@ -115,7 +115,7 @@ result = validator.validate(
 **Purpose**: Ensure all roles from profile appear in resume
 
 **Logic**:
-- Extract companies from `profile.work_history`
+- Extract companies from `profile.work`
 - Extract companies from `resume_data.experience`
 - Fuzzy match company names
 - Flag missing roles with specific dates
@@ -132,10 +132,10 @@ Add missing role to EXPERIENCE section: Startup Inc - Senior Developer (2023 - P
 
 ### 2. Project Completeness (`check_project_completeness`)
 
-**Purpose**: Warn if preserved projects are missing
+**Purpose**: Warn if canonical projects are missing
 
 **Logic**:
-- Check `profile.resume_facts.preserved_projects`
+- Check project names from `profile.projects`
 - Match against `resume_data.projects`
 - Returns warning (not error) since projects can be intentionally omitted
 
@@ -203,7 +203,7 @@ Add missing role to EXPERIENCE section: Startup Inc - Senior Developer (2023 - P
 **Purpose**: Verify education section has required fields
 
 **Checks**:
-- School name matches `profile.resume_facts.preserved_school`
+- School name matches the primary institution in `profile.education`
 - Degree type present (B.S., M.S., Ph.D., etc.)
 - Graduation year included
 

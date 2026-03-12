@@ -1,8 +1,7 @@
 """Tests for the metrics registry module."""
 
 import json
-import os
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -16,12 +15,14 @@ from applypilot.tailoring.metrics_registry import MetricsRegistry, ValidationRes
 
 @pytest.fixture
 def sample_profile_data():
-    """Sample profile data with work_history and resume_facts."""
+    """Sample profile data with verified metrics in normalized work entries."""
     return {
-        "work_history": [
+        "work": [
             {
                 "company": "TechCorp",
-                "title": "Senior Engineer",
+                "position": "Senior Engineer",
+                "start_date": "2020-01-01",
+                "end_date": "2023-01-01",
                 "key_metrics": [
                     "Increased revenue by 40%",
                     "Led team of 12 engineers",
@@ -30,34 +31,25 @@ def sample_profile_data():
             },
             {
                 "company": "StartupInc",
-                "title": "Engineer",
+                "position": "Engineer",
+                "start_date": "2018-01-01",
+                "end_date": "2019-12-31",
                 "key_metrics": [
                     "Deployed 3 microservices",
                     "Managed $2M budget",
+                    "Improved performance 10x",
+                    "Served 50+ customers",
                 ],
             },
-        ],
-        "resume_facts": {
-            "real_metrics": [
-                "Improved performance 10x",
-                "Served 50+ customers",
-            ],
-        },
+        ]
     }
 
 
 @pytest.fixture
-def mock_profile_path(tmp_path):
-    """Return a path for a mock profile file."""
-    return str(tmp_path / "profile.json")
-
-
-@pytest.fixture
-def registry_with_mocked_profile(sample_profile_data, mock_profile_path):
+def registry_with_mocked_profile(sample_profile_data):
     """Create a MetricsRegistry with a mocked profile file."""
-    with patch("builtins.open", mock_open(read_data=json.dumps(sample_profile_data))):
-        with patch("os.path.expanduser", return_value=mock_profile_path):
-            return MetricsRegistry()
+    with patch("applypilot.tailoring.metrics_registry.load_profile", return_value=sample_profile_data):
+        return MetricsRegistry()
 
 
 # -----------------------------------------------------------------------------
@@ -66,11 +58,10 @@ def registry_with_mocked_profile(sample_profile_data, mock_profile_path):
 
 
 class TestMetricsRegistryInitialization:
-    def test_init_loads_from_default_path(self, sample_profile_data, mock_profile_path):
+    def test_init_loads_from_default_path(self, sample_profile_data):
         """Test that initialization loads metrics from default profile path."""
-        with patch("builtins.open", mock_open(read_data=json.dumps(sample_profile_data))):
-            with patch("os.path.expanduser", return_value=mock_profile_path):
-                registry = MetricsRegistry()
+        with patch("applypilot.tailoring.metrics_registry.load_profile", return_value=sample_profile_data):
+            registry = MetricsRegistry()
 
         assert len(registry._verified_metrics) == 7
 
@@ -122,9 +113,8 @@ class TestGetVerifiedMetrics:
 
     def test_returns_empty_list_when_no_metrics(self):
         """Test that empty list is returned when no metrics loaded."""
-        with patch("builtins.open", mock_open(read_data=json.dumps({}))):
-            with patch("os.path.expanduser", return_value="/mock/path"):
-                registry = MetricsRegistry()
+        with patch("applypilot.tailoring.metrics_registry.load_profile", return_value={}):
+            registry = MetricsRegistry()
 
         metrics = registry.get_verified_metrics()
 
@@ -259,25 +249,23 @@ class TestFlagMissingMetrics:
 
 
 class TestEdgeCases:
-    def test_profile_without_work_history(self, tmp_path):
-        """Test handling of profile without work_history section."""
+    def test_profile_without_work_entries(self, tmp_path):
+        """Test handling of profile without work section."""
         profile_data = {
-            "resume_facts": {
-                "real_metrics": ["Metric 1", "Metric 2"],
-            }
+            "work": []
         }
         profile_path = tmp_path / "profile.json"
         profile_path.write_text(json.dumps(profile_data))
 
         registry = MetricsRegistry(str(profile_path))
 
-        assert len(registry.get_verified_metrics()) == 2
+        assert len(registry.get_verified_metrics()) == 0
 
-    def test_profile_without_resume_facts(self, tmp_path):
-        """Test handling of profile without resume_facts section."""
+    def test_profile_with_work_metrics_only(self, tmp_path):
+        """Test handling of profile with work metrics only."""
         profile_data = {
-            "work_history": [
-                {"key_metrics": ["Metric 1"]},
+            "work": [
+                {"company": "Corp", "position": "Role", "key_metrics": ["Metric 1"]},
             ]
         }
         profile_path = tmp_path / "profile.json"
@@ -287,12 +275,12 @@ class TestEdgeCases:
 
         assert len(registry.get_verified_metrics()) == 1
 
-    def test_work_history_without_key_metrics(self, tmp_path):
-        """Test handling of work history entries without key_metrics."""
+    def test_work_entries_without_key_metrics(self, tmp_path):
+        """Test handling of work entries without key_metrics."""
         profile_data = {
-            "work_history": [
-                {"company": "Corp", "title": "Role"},  # No key_metrics
-                {"company": "Corp2", "key_metrics": ["Valid metric"]},
+            "work": [
+                {"company": "Corp", "position": "Role"},  # No key_metrics
+                {"company": "Corp2", "position": "Role", "key_metrics": ["Valid metric"]},
             ]
         }
         profile_path = tmp_path / "profile.json"
@@ -305,12 +293,13 @@ class TestEdgeCases:
     def test_metric_normalization(self, tmp_path):
         """Test that metrics are normalized (lowercase, whitespace)."""
         profile_data = {
-            "resume_facts": {
-                "real_metrics": [
-                    "  LEADING   Whitespace  ",
-                    "UPPERCASE METRIC",
-                ],
-            }
+            "work": [
+                {
+                    "company": "Corp",
+                    "position": "Role",
+                    "key_metrics": ["  LEADING   Whitespace  ", "UPPERCASE METRIC"],
+                }
+            ]
         }
         profile_path = tmp_path / "profile.json"
         profile_path.write_text(json.dumps(profile_data))

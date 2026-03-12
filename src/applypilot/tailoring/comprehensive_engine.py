@@ -16,8 +16,8 @@ from typing import Any, Dict, List, Optional
 from transitions import Machine
 
 from applypilot.llm import get_client
-
 from applypilot.intelligence.jd_parser import JobDescriptionParser
+from applypilot.resume_json import get_profile_skill_sections, get_profile_verified_metrics
 from applypilot.tailoring.models import Resume
 from applypilot.tailoring.quality_gates import MetricsGate, RelevanceGate
 from applypilot.tailoring.metrics_registry import MetricsRegistry
@@ -289,8 +289,8 @@ class ComprehensiveTailoringEngine:
 
         metrics_found = []
 
-        # Extract from work history
-        for job in self.profile.get("work_history", []):
+        # Extract from normalized work entries
+        for job in self.profile.get("work", []):
             if "key_metrics" in job:
                 for metric in job["key_metrics"]:
                     metrics_found.append(
@@ -320,7 +320,7 @@ class ComprehensiveTailoringEngine:
 
         achievements = []
 
-        for job in self.profile.get("work_history", []):
+        for job in self.profile.get("work", []):
             if "highlights" in job:
                 for highlight in job["highlights"]:
                     achievements.append(
@@ -909,6 +909,10 @@ class ComprehensiveTailoringEngine:
         """Build categorized skills section."""
         lines = []
         comprehensive = self.profile.get("comprehensive_skills", {})
+        if not comprehensive:
+            for label, keywords in get_profile_skill_sections(self.profile):
+                lines.append(f"{label}: {', '.join(keywords[:6])}")
+            return lines
         
         # Languages
         languages = comprehensive.get("languages", [])
@@ -965,7 +969,7 @@ class ComprehensiveTailoringEngine:
     def _build_experience_section(self) -> List[str]:
         """Build experience section from work history and selected bullets."""
         lines = []
-        work_history = self.profile.get("work_history", [])
+        work_history = self.profile.get("work", [])
         
         # Map bullets to companies by tag
         bullets_by_company: Dict[str, List[HardenedBullet]] = {}
@@ -1026,7 +1030,7 @@ class ComprehensiveTailoringEngine:
     def _build_projects_section(self) -> List[str]:
         """Build projects section from project highlights."""
         lines = []
-        projects = self.profile.get("project_highlights", [])
+        projects = self.profile.get("projects", [])
         
         for project in projects[:3]:  # Max 3 projects
             name = project.get("name", "")
@@ -1082,12 +1086,16 @@ class ComprehensiveTailoringEngine:
         """Format date range for display."""
         # Extract years
         start_year = ""
-        end_year = end_date if end_date else "Present"
+        end_year = "Present"
         
         if start_date:
             parts = start_date.split("-")
             if parts:
                 start_year = parts[0]
+        if end_date:
+            parts = end_date.split("-")
+            if parts:
+                end_year = parts[0]
         
         if start_year and end_year:
             return f"{start_year} - {end_year}"
@@ -1399,11 +1407,7 @@ class ComprehensiveTailoringEngine:
             return
 
         # Get verified metrics from profile
-        verified_metrics = []
-        resume_facts = self.profile.get("resume_facts", {})
-        verified_metrics.extend(resume_facts.get("real_metrics", []))
-        for job in self.profile.get("work_history", []):
-            verified_metrics.extend(job.get("key_metrics", []))
+        verified_metrics = get_profile_verified_metrics(self.profile)
 
         if not verified_metrics:
             logger.info("No verified metrics available to improve credibility")
