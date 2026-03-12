@@ -24,6 +24,7 @@ _LEGACY_SCORE_ERROR_PATTERN = "%LLM error:%"
 _MODEL_RESPONSE_SNIPPET_LIMIT = 320
 _SCORE_TRACE_ENABLED = os.environ.get("APPLYPILOT_SCORE_TRACE", "").strip().lower() in {"1", "true", "yes", "on"}
 _TRACE_CONSOLE = Console(stderr=True, highlight=False, soft_wrap=True)
+_SHORT_REASON_WORD_RE = re.compile(r"[A-Za-z0-9+#./'-]+")
 
 
 SCORE_PROMPT = """You are a job-fit scoring calibrator.
@@ -42,9 +43,10 @@ Return JSON ONLY with this schema:
 {
   "score": 1-10 integer,
   "confidence": 0.0-1.0 number,
+  "why_short": "3-9 word summary",
   "matched_skills": ["..."],
   "missing_requirements": ["..."],
-  "reasoning": "short explanation"
+  "reasoning": "full rationale with key evidence"
 }
 """
 
@@ -318,6 +320,35 @@ def _compact_reasoning(text: str, limit: int = 110) -> str:
     return compact[: limit - 3] + "..."
 
 
+def _normalize_short_reason(text: str) -> str:
+    words = _SHORT_REASON_WORD_RE.findall((text or "").strip())
+    if len(words) < 3:
+        return ""
+    if len(words) > 9:
+        words = words[:9]
+    return " ".join(words)
+
+
+def _derive_short_reason(reasoning: str) -> str:
+    text = re.sub(r"\s+", " ", (reasoning or "")).strip()
+    if not text:
+        return "Mixed fit with notable gaps"
+    first_sentence = re.split(r"[.!?]\s+", text, maxsplit=1)[0].strip()
+    candidate = first_sentence or text
+    normalized = _normalize_short_reason(candidate)
+    if normalized:
+        return normalized
+
+    lowered = text.lower()
+    if any(token in lowered for token in ("strong fit", "excellent", "high fit", "good fit")):
+        return "Strong fit with clear overlap"
+    if any(token in lowered for token in ("poor fit", "weak fit", "mismatch", "not a fit")):
+        return "Weak fit with major gaps"
+    if any(token in lowered for token in ("moderate fit", "mixed fit", "partial fit")):
+        return "Moderate fit with notable gaps"
+    return "Mixed fit with notable gaps"
+
+
 def _emit_score_trace(result: dict) -> None:
     outcome = str(result.get("outcome") or "")
     prefix = "          [bright_black]└─[/bright_black] "
@@ -345,7 +376,7 @@ def _emit_score_trace(result: dict) -> None:
     matched = _compact_values(_coerce_list(result.get("matched_skills")), limit=3, item_limit=22)
     missing = _compact_values(_coerce_list(result.get("missing_requirements")), limit=2, item_limit=28)
     full_reasoning = str(result.get("llm_reasoning_full") or result.get("reasoning") or "")
-    reasoning = _compact_reasoning(full_reasoning, limit=120)
+    why_short = _normalize_short_reason(str(result.get("llm_why_short") or "").strip()) if result.get("llm_why_short") else _derive_short_reason(full_reasoning)
     confidence_text = f"{float(confidence):.2f}" if isinstance(confidence, (int, float)) else "-"
     delta_value = int(delta) if isinstance(delta, int) else 0
     delta_style = "green" if delta_value > 0 else ("red" if delta_value < 0 else "yellow")
@@ -360,9 +391,57 @@ def _emit_score_trace(result: dict) -> None:
         f"[bold]m[/bold]=[green]{matched}[/green] "
         f"[bold]x[/bold]=[red]{missing}[/red]"
     )
-    _TRACE_CONSOLE.print(f"{prefix}[bright_black]why[/bright_black] [dim]{reasoning}[/dim]")
-    if full_reasoning and full_reasoning.strip() and reasoning.strip() != full_reasoning.strip():
-        _TRACE_CONSOLE.print(f"{prefix}[bright_black]full[/bright_black] [dim]{full_reasoning.strip()}[/dim]")
+    _TRACE_CONSOLE.print(f"{prefix}[bright_black]why[/bright_black] [cyan]{why_short}[/cyan]")
+    if full_reasoning and full_reasoning.strip():
+        _TRACE_CONSOLE.print(f"{prefix}[bright_black]reasoning[/bright_black] [dim]{full_reasoning.strip()}[/dim]")
+
+
+def _log_score_trace(result: dict) -> None:
+    outcome = str(result.get("outcome") or "")
+    prefix = "          └─ "
+
+    if outcome == "excluded":
+        reason = _compact_reasoning(str(result.get("reasoning") or ""), limit=120)
+        log.info("%sexcluded %s", prefix, reason)
+        return
+
+    if outcome == "llm_failed":
+        category = _truncate_piece(str(result.get("parse_error_category") or "unknown"), limit=24)
+        baseline = result.get("baseline_score")
+        error = _compact_reasoning(str(result.get("reasoning") or ""), limit=120)
+        log.info("%sfailed cat=%s b=%s", prefix, category, baseline if baseline is not None else "-")
+        log.info("%swhy %s", prefix, error)
+        return
+
+    baseline = result.get("baseline_score")
+    llm_score = result.get("llm_score")
+    confidence = result.get("llm_confidence")
+    delta = result.get("score_delta")
+    matched = _compact_values(_coerce_list(result.get("matched_skills")), limit=3, item_limit=22)
+    missing = _compact_values(_coerce_list(result.get("missing_requirements")), limit=2, item_limit=28)
+    full_reasoning = str(result.get("llm_reasoning_full") or result.get("reasoning") or "")
+    why_short = (
+        _normalize_short_reason(str(result.get("llm_why_short") or "").strip())
+        if result.get("llm_why_short")
+        else _derive_short_reason(full_reasoning)
+    )
+    confidence_text = f"{float(confidence):.2f}" if isinstance(confidence, (int, float)) else "-"
+    delta_text = f"{int(delta):+d}" if isinstance(delta, int) else "-"
+
+    log.info(
+        "%strace b=%s l=%s c=%s Δ=%s m=%s x=%s",
+        prefix,
+        baseline if baseline is not None else "-",
+        llm_score if llm_score is not None else "-",
+        confidence_text,
+        delta_text,
+        matched,
+        missing,
+    )
+    log.info("%swhy %s", prefix, why_short)
+    reasoning_text = re.sub(r"\s+", " ", full_reasoning).strip()
+    if reasoning_text:
+        log.info("%sreasoning %s", prefix, reasoning_text)
 
 
 def _contains_phrase(text_lower: str, phrase: str) -> bool:
@@ -687,10 +766,16 @@ def _parse_score_response(response: str) -> dict:
     matched_skills = _coerce_list(data.get("matched_skills"))
     missing_requirements = _coerce_list(data.get("missing_requirements"))
     reasoning = _coerce_text(data.get("reasoning")) or "No reasoning provided by model."
+    why_short_raw = _coerce_text(data.get("why_short") or data.get("reasoning_short") or data.get("summary_short"))
+    if why_short_raw:
+        why_short = _normalize_short_reason(why_short_raw) or _derive_short_reason(reasoning)
+    else:
+        why_short = _derive_short_reason(reasoning)
 
     return {
         "score": score,
         "confidence": confidence,
+        "why_short": why_short,
         "matched_skills": matched_skills[:12],
         "missing_requirements": missing_requirements[:12],
         "reasoning": reasoning,
@@ -902,6 +987,7 @@ def score_job(resume_text: str, job: dict, scoring_profile: dict) -> dict:
                     f"Baseline={baseline['score']} LLM={llm_score} Confidence={llm_confidence:.2f} Delta={delta}. "
                     f"{parsed['reasoning']}"
                 ),
+                "llm_why_short": str(parsed["why_short"]),
                 "llm_reasoning_full": str(parsed["reasoning"]),
                 "matched_skills": matched_skills[:12],
                 "missing_requirements": missing_requirements[:12],
@@ -1166,10 +1252,7 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
         )
         if _SCORE_TRACE_ENABLED or result["outcome"] == "llm_failed":
             _emit_score_trace(result)
-            full_reasoning = str(result.get("llm_reasoning_full") or result.get("reasoning") or "").strip()
-            if full_reasoning:
-                # Persist a full untruncated rationale in pipeline logs for auditability.
-                log.info("          rationale_full=%s", full_reasoning)
+            _log_score_trace(result)
 
     now = datetime.now(timezone.utc).isoformat()
     for result in results:

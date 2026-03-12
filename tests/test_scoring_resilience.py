@@ -80,6 +80,7 @@ def test_parse_score_response_accepts_strict_json_schema() -> None:
         {
           "score": 8,
           "confidence": 0.84,
+          "why_short": "Strong backend skill overlap",
           "matched_skills": ["python", "react"],
           "missing_requirements": ["graphql"],
           "reasoning": "Strong overlap with backend stack."
@@ -88,6 +89,7 @@ def test_parse_score_response_accepts_strict_json_schema() -> None:
     )
     assert parsed["score"] == 8
     assert parsed["confidence"] == pytest.approx(0.84)
+    assert parsed["why_short"] == "Strong backend skill overlap"
     assert parsed["matched_skills"] == ["python", "react"]
     assert parsed["missing_requirements"] == ["graphql"]
 
@@ -124,6 +126,8 @@ def test_score_job_retries_inline_until_it_gets_valid_json(monkeypatch) -> None:
     assert fake_client.calls == 2
     assert result["score"] > 0
     assert "parse_error_category" not in result
+    assert result["llm_why_short"] == "Strong fit with clear overlap"
+    assert result["llm_reasoning_full"] == "Strong fit"
 
 
 def test_engineering_fit_guardrail_blocks_bottom_bucket_without_hard_mismatch() -> None:
