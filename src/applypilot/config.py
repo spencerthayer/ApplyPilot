@@ -18,7 +18,8 @@ from applypilot.resume_json import (
     ResumeJsonError,
     build_resume_text_from_json,
     load_resume_json_from_path,
-    normalize_profile_data,
+    normalize_legacy_profile,
+    normalize_profile_from_resume_json,
 )
 
 # User data directory — all user-specific files live here
@@ -161,8 +162,8 @@ def get_resume_source() -> CanonicalResumeSource:
             return CanonicalResumeSource(mode="canonical_invalid", path=RESUME_JSON_PATH, detail=str(exc))
         return CanonicalResumeSource(mode="canonical", path=RESUME_JSON_PATH, detail="Using canonical resume.json")
 
-    if PROFILE_PATH.exists() or RESUME_PATH.exists():
-        return CanonicalResumeSource(mode="legacy", path=PROFILE_PATH if PROFILE_PATH.exists() else RESUME_PATH)
+    if RESUME_PATH.exists():
+        return CanonicalResumeSource(mode="legacy", path=RESUME_PATH)
 
     return CanonicalResumeSource(mode="missing", path=None)
 
@@ -174,14 +175,31 @@ def load_resume_json(path: Path | None = None) -> dict:
     return load_resume_json_from_path(candidate)
 
 
-def load_profile() -> dict:
-    """Load normalized user profile data from canonical or legacy storage."""
+def _write_profile_payload(profile: dict) -> None:
+    """Persist profile.json with stable formatting."""
 
-    source = get_resume_source()
-    if source.mode == "canonical":
-        return normalize_profile_data(load_resume_json(source.path))
-    if source.mode == "canonical_invalid":
-        raise ResumeJsonError(source.detail)
+    PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _backfill_profile_from_resume_json() -> dict:
+    """Create profile.json once from resume.json for compatibility."""
+
+    resume_data = load_resume_json(RESUME_JSON_PATH)
+    profile = normalize_profile_from_resume_json(resume_data)
+    _write_profile_payload(profile)
+    return profile
+
+
+def load_profile() -> dict:
+    """Load normalized user profile data from profile.json.
+
+    If profile.json is missing but a valid resume.json exists, derive profile.json
+    once for compatibility and then continue using profile.json as the source of truth.
+    """
+
+    if not PROFILE_PATH.exists() and RESUME_JSON_PATH.exists():
+        return _backfill_profile_from_resume_json()
     if not PROFILE_PATH.exists():
         raise FileNotFoundError(
             f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
@@ -192,7 +210,7 @@ def load_profile() -> dict:
         raise ValueError(
             f"Malformed profile JSON at {PROFILE_PATH}: line {exc.lineno}, column {exc.colno}: {exc.msg}"
         ) from exc
-    return normalize_profile_data(payload)
+    return normalize_legacy_profile(payload)
 
 
 def load_resume_text(path: Path | None = None) -> str:

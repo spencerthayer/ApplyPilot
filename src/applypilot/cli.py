@@ -332,7 +332,7 @@ def apply(
     """Launch auto-apply to submit job applications."""
     _bootstrap()
 
-    from applypilot.config import check_tier, PROFILE_PATH as _profile_path
+    from applypilot.config import check_tier, load_profile
     from applypilot.database import get_connection
 
     # --- Utility modes (no Chrome/browser agent needed) ---
@@ -361,13 +361,21 @@ def apply(
     check_tier(3, "auto-apply")
     resolved_agent, resolved_model = _resolve_backend_option(agent, backend, agent_model)
 
-    # Check 2: Profile exists
-    if not _profile_path.exists():
+    # Check 2: Profile exists or can be repaired from canonical resume.json.
+    try:
+        load_profile()
+    except FileNotFoundError:
         console.print(
             "[red]Profile not found.[/red]\n"
             "Run [bold]applypilot init[/bold] to create your profile first."
         )
         raise typer.Exit(code=1)
+    except ResumeJsonError as exc:
+        console.print(f"[red]Profile load failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    except ValueError as exc:
+        console.print(f"[red]Profile load failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
 
     # Check 3: Tailored resumes exist (skip for --gen with --url)
     if not (gen and url):
@@ -639,27 +647,50 @@ def doctor() -> None:
 
     # --- Tier 1 checks ---
     resume_source = get_resume_source()
+    if PROFILE_PATH.exists():
+        try:
+            json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
+            results.append(("profile.json", ok_mark, str(PROFILE_PATH)))
+        except json.JSONDecodeError as exc:
+            results.append(
+                (
+                    "profile.json",
+                    fail_mark,
+                    f"Malformed JSON: line {exc.lineno}, column {exc.colno}: {exc.msg}",
+                )
+            )
+    elif resume_source.mode == "canonical":
+        results.append(("profile.json", warn_mark, "Missing, but will be auto-generated from resume.json on next run"))
+    elif resume_source.mode == "canonical_invalid":
+        results.append(("profile.json", fail_mark, "Missing, and resume.json must be fixed before it can backfill"))
+    else:
+        results.append(("profile.json", fail_mark, "Run 'applypilot init' to create"))
+
     if resume_source.mode == "canonical":
         results.append(("resume.json", ok_mark, str(RESUME_JSON_PATH)))
-        results.append(("Profile source", ok_mark, "canonical resume.json"))
-        if PROFILE_PATH.exists() or RESUME_PATH.exists():
-            results.append(("Legacy resume files", warn_mark, "Ignored because resume.json is present"))
     elif resume_source.mode == "canonical_invalid":
         results.append(("resume.json", fail_mark, resume_source.detail))
-        results.append(("Profile source", fail_mark, "Fix resume.json before runtime commands will work"))
     else:
-        if PROFILE_PATH.exists():
-            results.append(("profile.json", ok_mark, str(PROFILE_PATH)))
-            results.append(("Profile source", warn_mark, "legacy profile.json + resume.txt"))
-        else:
-            results.append(("profile.json", fail_mark, "Run 'applypilot init' to create"))
+        results.append(("resume.json", warn_mark, "Optional, but required for JSON Resume import/render flows"))
 
+    if resume_source.mode == "canonical":
         if RESUME_PATH.exists():
-            results.append(("resume.txt", ok_mark, str(RESUME_PATH)))
+            results.append(("resume.txt", warn_mark, f"{RESUME_PATH} (legacy fallback still present)"))
+        else:
+            results.append(("resume.txt", ok_mark, "Not required when resume.json is present"))
+    elif resume_source.mode == "canonical_invalid":
+        if RESUME_PATH.exists():
+            results.append(("resume.txt", warn_mark, f"{RESUME_PATH} (present, but resume.json must be fixed first)"))
         elif RESUME_PDF_PATH.exists():
             results.append(("resume.txt", warn_mark, "Only PDF found - plain-text needed for AI stages"))
         else:
             results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
+    elif RESUME_PATH.exists():
+        results.append(("resume.txt", ok_mark, str(RESUME_PATH)))
+    elif RESUME_PDF_PATH.exists():
+        results.append(("resume.txt", warn_mark, "Only PDF found - plain-text needed for AI stages"))
+    else:
+        results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
 
     # Search config
     if SEARCH_CONFIG_PATH.exists():

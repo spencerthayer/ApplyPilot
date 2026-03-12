@@ -1,8 +1,9 @@
 """ApplyPilot first-time setup wizard.
 
 Interactive flow that creates ~/.applypilot/ with:
-  - resume.json (preferred canonical source)
-  - profile.json + resume.txt (legacy fallback, optional)
+  - profile.json (authoritative ApplyPilot profile/settings)
+  - resume.json (canonical JSON Resume artifact)
+  - resume.txt (legacy plain-text fallback, optional)
   - searches.yaml
   - .env (LLM provider config)
 """
@@ -35,6 +36,7 @@ from applypilot.llm_provider import LLM_PROVIDER_SPECS, WIZARD_PROVIDER_ORDER
 from applypilot.resume_json import (
     DEFAULT_RENDER_THEME,
     load_resume_json_from_path,
+    normalize_legacy_profile,
     normalize_profile_from_resume_json,
 )
 
@@ -104,6 +106,11 @@ def _write_resume_json(data: dict) -> None:
     RESUME_JSON_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _write_profile_json(profile: dict) -> None:
+    PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def _copy_resume_json(src_path: Path) -> dict:
     data = load_resume_json_from_path(src_path)
     if src_path.resolve() != RESUME_JSON_PATH.resolve():
@@ -112,6 +119,20 @@ def _copy_resume_json(src_path: Path) -> dict:
     else:
         console.print(f"[green]Using canonical resume at {RESUME_JSON_PATH}[/green]")
     return data
+
+
+def _profile_for_canonical_resume(resume_data: dict) -> dict:
+    """Return the authoritative profile for a canonical resume setup."""
+
+    if PROFILE_PATH.exists():
+        try:
+            return normalize_legacy_profile(json.loads(PROFILE_PATH.read_text(encoding="utf-8")))
+        except json.JSONDecodeError:
+            pass
+
+    profile = normalize_profile_from_resume_json(resume_data)
+    _write_profile_json(profile)
+    return profile
 
 
 def _legacy_profile_to_resume_json(profile: dict, resume_text: str = "") -> dict:
@@ -414,13 +435,13 @@ def _setup_canonical_resume(resume_json: Path | None = None) -> tuple[dict, dict
         data = load_resume_json_from_path(RESUME_JSON_PATH)
         data = _prompt_missing_applypilot_fields(data)
         _write_resume_json(data)
-        return data, normalize_profile_from_resume_json(data)
+        return data, _profile_for_canonical_resume(data)
 
     if resume_json is not None:
         data = _copy_resume_json(resume_json)
         data = _prompt_missing_applypilot_fields(data)
         _write_resume_json(data)
-        return data, normalize_profile_from_resume_json(data)
+        return data, _profile_for_canonical_resume(data)
 
     console.print(Panel(
         "[bold]Step 1: Resume Source[/bold]\n"
@@ -455,7 +476,7 @@ def _setup_canonical_resume(resume_json: Path | None = None) -> tuple[dict, dict
     data = load_resume_json_from_path(RESUME_JSON_PATH)
     data = _prompt_missing_applypilot_fields(data)
     _write_resume_json(data)
-    return data, normalize_profile_from_resume_json(data)
+    return data, _profile_for_canonical_resume(data)
 
 
 # ---------------------------------------------------------------------------
@@ -604,7 +625,7 @@ def _setup_profile() -> dict:
     }
 
     # Save
-    PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
+    _write_profile_json(profile)
     console.print(f"\n[green]Profile saved to {PROFILE_PATH}[/green]")
     return profile
 
@@ -868,7 +889,7 @@ def _setup_optional_files(profile: dict, canonical_resume: dict | None = None) -
     ))
 
     if not Confirm.ask("Do you have any optional documents to add?", default=False):
-        console.print("[dim]Skipped. Add files to ~/.applypilot/files/ and update your canonical profile metadata later.[/dim]")
+        console.print("[dim]Skipped. Add files to ~/.applypilot/files/ and update ~/.applypilot/profile.json later.[/dim]")
         return
 
     files: dict[str, str] = profile.get("files", {})
@@ -911,14 +932,14 @@ def _setup_optional_files(profile: dict, canonical_resume: dict | None = None) -
 
     if files:
         profile["files"] = files
+        _write_profile_json(profile)
         if canonical_resume is not None:
             meta = canonical_resume.setdefault("meta", {})
             applypilot = meta.setdefault("applypilot", {})
             applypilot["files"] = files
             _write_resume_json(canonical_resume)
-            console.print("[green]Document paths saved to resume.json[/green]")
+            console.print("[green]Document paths saved to profile.json and resume.json[/green]")
         else:
-            PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
             console.print("[green]Document paths saved to profile.json[/green]")
 
 

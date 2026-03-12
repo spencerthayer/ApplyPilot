@@ -171,7 +171,10 @@ def looks_like_resume_json(data: Any) -> bool:
 
     if not isinstance(data, dict):
         return False
-    return any(key in data for key in ("basics", "work", "education", "skills", "projects", "meta"))
+    if any(key in data for key in ("basics", "work", "skills", "projects")):
+        return True
+    meta = data.get("meta")
+    return isinstance(meta, dict) and any(key in meta for key in ("canonical", "version", "theme", "applypilot"))
 
 
 def validate_applypilot_meta(data: dict) -> None:
