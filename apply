@@ -5,8 +5,8 @@ echo "Activating virtual environment..."
 echo "> source .venv/bin/activate"
 source .venv/bin/activate
 echo "Applying with ApplyPilot..."
-echo "> applypilot apply"
-applypilot apply
+echo "> applypilot apply $*"
+applypilot apply "$@"
 rc=$?
 if [ "$rc" -eq 0 ]; then
   echo "ApplyPilot application completed."

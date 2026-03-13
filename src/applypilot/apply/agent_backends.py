@@ -250,7 +250,7 @@ def build_codex_command(
     cmd = [
         "codex",
         "exec",
-        "--full-auto",
+        "--dangerously-bypass-approvals-and-sandbox",
         "--ephemeral",
         "--skip-git-repo-check",
         "-C",
@@ -269,25 +269,21 @@ def build_codex_command(
 
 def extract_result_status(output: str) -> str | None:
     """Parse the normalized RESULT code from an agent transcript."""
+    token_re = re.compile(r"RESULT:(APPLIED|EXPIRED|CAPTCHA|LOGIN_ISSUE|FAILED(?::[^\r\n]*)?)")
+    matches = list(token_re.finditer(output))
+    if not matches:
+        return None
 
-    for result_status in ("APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"):
-        if f"RESULT:{result_status}" in output:
-            return result_status.lower()
+    token = matches[-1].group(1).strip()
+    if token in {"APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"}:
+        return token.lower()
 
-    for out_line in output.splitlines():
-        if "RESULT:FAILED" not in out_line:
-            continue
-        reason = (
-            out_line.split("RESULT:FAILED:", 1)[-1].strip()
-            if "RESULT:FAILED:" in out_line
-            else "unknown"
-        )
-        reason = re.sub(r'[*`"]+$', "", reason).strip() or "unknown"
-        if reason in {"captcha", "expired", "login_issue"}:
-            return reason
-        return f"failed:{reason}"
-
-    return None
+    # RESULT:FAILED or RESULT:FAILED:<reason>
+    reason = token.split(":", 1)[-1].strip() if ":" in token else "unknown"
+    reason = re.sub(r'[*`"\'\]\)\.!,;:]+$', "", reason).strip() or "unknown"
+    if reason in {"captcha", "expired", "login_issue"}:
+        return reason
+    return f"failed:{reason}"
 
 
 def build_manual_command(agent: str, prompt_file: Path, worker_id: int, model: str | None) -> str:

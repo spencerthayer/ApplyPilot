@@ -126,7 +126,7 @@ def test_build_codex_command_includes_required_flags_and_overrides(tmp_path: Pat
     )
 
     assert cmd[:2] == ["codex", "exec"]
-    assert "--full-auto" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
     assert "--ephemeral" in cmd
     assert "--skip-git-repo-check" in cmd
     assert ["-C", str(tmp_path)] == cmd[cmd.index("-C"):cmd.index("-C") + 2]
@@ -156,6 +156,19 @@ def test_extract_result_status_handles_success_and_failure() -> None:
     assert agent_backends.extract_result_status("RESULT:FAILED:not_eligible_location") == "failed:not_eligible_location"
     assert agent_backends.extract_result_status("RESULT:FAILED:captcha") == "captcha"
     assert agent_backends.extract_result_status("no result") is None
+
+
+def test_extract_result_status_uses_last_result_token() -> None:
+    output = "\n".join(
+        [
+            "Instructions:",
+            "RESULT:APPLIED",
+            "RESULT:EXPIRED",
+            "Agent concluded:",
+            "RESULT:FAILED:stuck",
+        ]
+    )
+    assert agent_backends.extract_result_status(output) == "failed:stuck"
 
 
 def test_codex_backend_run_reads_last_message_file(tmp_path: Path, monkeypatch) -> None:
