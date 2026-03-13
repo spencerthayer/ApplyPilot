@@ -221,6 +221,12 @@ def test_codex_backend_run_reads_last_message_file(tmp_path: Path, monkeypatch) 
     assert result.final_output == "RESULT:APPLIED\n"
     assert "progress line" in result.raw_output
     assert registered == [0, 0]
+    logs = sorted(tmp_path.glob("agent_codex_*_w0_Example.txt"))
+    assert len(logs) == 1
+    log_text = logs[0].read_text(encoding="utf-8")
+    assert "progress line" in log_text
+    assert "RESULT:APPLIED" in log_text
+    assert not (tmp_path / "worker-0.log").exists()
 
 
 def test_codex_backend_run_raises_timeout_when_process_hangs(tmp_path: Path, monkeypatch) -> None:

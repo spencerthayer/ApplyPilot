@@ -334,7 +334,7 @@ class ClaudeAutoApplyBackend(AutoApplyBackend):
         env.pop("CLAUDECODE", None)
         env.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
-        worker_log = _worker_log_path(worker_id)
+        job_log = _job_log_path(self.key, worker_id, job)
         start = time.time()
         stats: dict[str, float] = {}
         proc = None
@@ -359,7 +359,7 @@ class ClaudeAutoApplyBackend(AutoApplyBackend):
                 proc.stdin.write(prompt)
                 proc.stdin.close()
 
-            with open(worker_log, "a", encoding="utf-8") as lf:
+            with open(job_log, "a", encoding="utf-8") as lf:
                 lf.write(_log_header(job, self.label))
                 lf.write(f"$ {_shell_join(cmd)}\n")
 
@@ -409,7 +409,6 @@ class ClaudeAutoApplyBackend(AutoApplyBackend):
                 update_state(worker_id, total_cost=prev_cost + float(stats["cost_usd"]))
 
             combined_text = "\n".join(part for part in text_parts if part)
-            _write_job_log(self.key, worker_id, job, combined_text or "".join(raw_parts))
             return BackendExecution(
                 final_output=combined_text,
                 raw_output="".join(raw_parts),
@@ -459,7 +458,7 @@ class CodexAutoApplyBackend(AutoApplyBackend):
         cmd = build_codex_command(worker_dir=worker_dir, output_file=output_file, port=port, model=model)
         timeout_seconds = config.DEFAULTS["apply_timeout"]
 
-        worker_log = _worker_log_path(worker_id)
+        job_log = _job_log_path(self.key, worker_id, job)
         start = time.time()
         proc = None
         raw_output = ""
@@ -477,7 +476,7 @@ class CodexAutoApplyBackend(AutoApplyBackend):
             )
             register_process(worker_id, proc)
 
-            with open(worker_log, "a", encoding="utf-8") as lf:
+            with open(job_log, "a", encoding="utf-8") as lf:
                 lf.write(_log_header(job, self.label))
                 lf.write(f"$ {_shell_join(cmd)}\n")
                 update_state(worker_id, last_action="running Codex")
@@ -499,8 +498,12 @@ class CodexAutoApplyBackend(AutoApplyBackend):
             if output_file.exists():
                 final_output = output_file.read_text(encoding="utf-8", errors="replace")
 
-            log_output = final_output if final_output.strip() else raw_output
-            _write_job_log(self.key, worker_id, job, log_output)
+            if final_output.strip():
+                with open(job_log, "a", encoding="utf-8") as lf:
+                    lf.write("\n--- final message ---\n")
+                    lf.write(final_output)
+                    if not final_output.endswith("\n"):
+                        lf.write("\n")
 
             return BackendExecution(
                 final_output=final_output,
@@ -650,7 +653,7 @@ class OpenCodeAutoApplyBackend(AutoApplyBackend):
         agent_name = config.get_opencode_agent_setting()
         cmd = self._build_command(model=model, worker_dir=worker_dir, agent_name=agent_name)
 
-        worker_log = _worker_log_path(worker_id)
+        job_log = _job_log_path(self.key, worker_id, job)
         start = time.time()
         proc = None
         raw_parts: list[str] = []
@@ -674,7 +677,7 @@ class OpenCodeAutoApplyBackend(AutoApplyBackend):
                 proc.stdin.write(prompt)
                 proc.stdin.close()
 
-            with open(worker_log, "a", encoding="utf-8") as lf:
+            with open(job_log, "a", encoding="utf-8") as lf:
                 lf.write(_log_header(job, self.label))
                 lf.write(f"$ {_shell_join(cmd)}\n")
                 update_state(worker_id, last_action="running OpenCode")
@@ -711,8 +714,6 @@ class OpenCodeAutoApplyBackend(AutoApplyBackend):
             returncode = proc.returncode or 0
 
             final_output = "\n".join(part for part in text_parts if part).strip()
-            log_output = final_output if final_output else "".join(raw_parts)
-            _write_job_log(self.key, worker_id, job, log_output)
             return BackendExecution(
                 final_output=final_output,
                 raw_output="".join(raw_parts),
@@ -747,7 +748,7 @@ class OpenCodeAutoApplyBackend(AutoApplyBackend):
                 worker_dir=worker_dir,
                 agent_name=agent or config.get_opencode_agent_setting(),
             )
-            worker_log = _worker_log_path(worker_id)
+            job_log = _job_log_path(self.key, worker_id, job)
             start = time.time()
             raw_parts: list[str] = []
             text_parts: list[str] = []
@@ -770,7 +771,7 @@ class OpenCodeAutoApplyBackend(AutoApplyBackend):
             proc.stdin.write(prompt)
             proc.stdin.close()
 
-            with open(worker_log, "a", encoding="utf-8") as lf:
+            with open(job_log, "a", encoding="utf-8") as lf:
                 lf.write(_log_header(job, self.label))
                 lf.write(f"$ {_shell_join(cmd)}\n")
                 update_state(worker_id, last_action="running OpenCode")
@@ -953,14 +954,17 @@ def _describe_tool_use(block: dict) -> str:
     return name
 
 
-def _worker_log_path(worker_id: int) -> Path:
-    return config.LOG_DIR / f"worker-{worker_id}.log"
-
-
-def _write_job_log(agent: str, worker_id: int, job: dict, output: str) -> None:
+def _job_log_path(agent: str, worker_id: int, job: dict) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    job_log = config.LOG_DIR / f"agent_{agent}_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
-    job_log.write_text(output, encoding="utf-8")
+    site = _sanitize_log_site(str(job.get("site") or job.get("company") or "unknown"))
+    return config.LOG_DIR / f"agent_{agent}_{ts}_w{worker_id}_{site}.txt"
+
+
+def _sanitize_log_site(value: str) -> str:
+    cleaned = value.replace("/", " ").replace("\\", " ").replace(":", " ")
+    cleaned = re.sub(r"[^A-Za-z0-9 ._-]", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return (cleaned[:40].strip() or "unknown")
 
 
 def _log_header(job: dict, label: str) -> str:

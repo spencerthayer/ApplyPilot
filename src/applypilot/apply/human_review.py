@@ -22,6 +22,7 @@ import threading
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from urllib.parse import urlparse
 
 from applypilot import config
@@ -34,7 +35,8 @@ logger = logging.getLogger(__name__)
 
 # In-memory session state keyed by job hash
 # Each value: { "job": dict, "status": str, "result": str|None,
-#               "chrome_proc": Popen|None, "log_offset": int }
+#               "chrome_proc": Popen|None, "log_offset": int,
+#               "log_file": str|None, "agent_started_at": float }
 _sessions: dict[str, dict] = {}
 _sessions_lock = threading.Lock()
 
@@ -45,6 +47,23 @@ _hitl_chrome_lock = threading.Lock()
 
 def _job_hash(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:12]
+
+
+def _latest_worker_job_log(worker_id: int, started_at: float) -> str | None:
+    """Return the newest per-job log file for the worker started after started_at."""
+    pattern = f"agent_*_w{worker_id}_*.txt"
+    try:
+        candidates = sorted(config.LOG_DIR.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return None
+    for path in candidates:
+        try:
+            if path.stat().st_mtime + 2 < started_at:
+                continue
+        except OSError:
+            continue
+        return str(path)
+    return None
 
 
 def _cdp_list_targets(port: int) -> list[dict]:
@@ -881,6 +900,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "status": "chrome_open",
                 "result": None,
                 "log_offset": 0,
+                "log_file": None,
+                "agent_started_at": 0.0,
             }
 
         # Launch Chrome in background thread (may take a few seconds)
@@ -925,6 +946,9 @@ class _Handler(BaseHTTPRequestHandler):
         with _sessions_lock:
             if h in _sessions:
                 _sessions[h]["status"] = "agent_running"
+                _sessions[h]["log_offset"] = 0
+                _sessions[h]["log_file"] = None
+                _sessions[h]["agent_started_at"] = time.time()
                 if custom_instructions:
                     _sessions[h]["custom_instructions"] = custom_instructions
 
@@ -954,11 +978,12 @@ class _Handler(BaseHTTPRequestHandler):
     def _handle_sse(self, h: str) -> None:
         """Stream agent log output via SSE while the agent runs."""
         self._send_sse_headers()
-        worker_log = config.LOG_DIR / f"worker-{HITL_WORKER_ID}.log"
 
         with _sessions_lock:
             session = _sessions.get(h, {})
             offset = session.get("log_offset", 0)
+            active_log_file = session.get("log_file")
+            started_at = float(session.get("agent_started_at") or 0.0)
 
         try:
             while True:
@@ -966,11 +991,24 @@ class _Handler(BaseHTTPRequestHandler):
                     session = _sessions.get(h, {})
                     status = session.get("status", "idle")
                     result = session.get("result")
+                    started_at = float(session.get("agent_started_at") or started_at)
+                    active_log_file = session.get("log_file") or active_log_file
+
+                if not active_log_file:
+                    active_log_file = _latest_worker_job_log(HITL_WORKER_ID, started_at)
+                    if active_log_file:
+                        offset = 0
+                        with _sessions_lock:
+                            if h in _sessions:
+                                _sessions[h]["log_file"] = active_log_file
+                                _sessions[h]["log_offset"] = 0
 
                 # Tail the log file
-                if worker_log.exists():
+                if active_log_file:
                     try:
-                        content = worker_log.read_text(encoding="utf-8", errors="replace")
+                        content = Path(active_log_file).read_text(encoding="utf-8", errors="replace")
+                        if offset > len(content):
+                            offset = 0
                         if len(content) > offset:
                             new_text = content[offset:].replace("\n", "\\n")
                             offset = len(content)
