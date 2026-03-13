@@ -730,7 +730,8 @@ LINKEDIN EASY APPLY - CRITICAL FAST PATH:
    - Compare every other field to the APPLICANT PROFILE. Fix mismatches. Fill empty fields.
 11. Answer screening questions using the rules above.
 12. {submit_instruction}
-13. After submit: browser_snapshot. Run CAPTCHA DETECT -- submit buttons often trigger invisible CAPTCHAs. If found, solve it (the form will auto-submit once the token clears, or you may need to click Submit again). Then check for new tabs (browser_tabs action: "list"). Switch to newest, close old. Snapshot to confirm submission. Look for "thank you" or "application received".
+13. After submit: browser_snapshot and check for explicit success text first. If you see any confirmation such as "Application submitted", "Application received", "Thank you for applying", or LinkedIn "Application status" with submitted state, OUTPUT RESULT:APPLIED IMMEDIATELY and STOP.
+    Only if no confirmation text is visible: run CAPTCHA DETECT -- submit buttons often trigger invisible CAPTCHAs. If found, solve it (the form will auto-submit once the token clears, or you may need to click Submit again). Then check for new tabs (browser_tabs action: "list"). Switch to newest, close old. Snapshot to confirm submission. If confirmation appears, output RESULT:APPLIED.
 14. Output your result.
 
 == RESULT CODES (output EXACTLY one) ==

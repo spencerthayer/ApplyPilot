@@ -335,9 +335,9 @@ def load_base_urls() -> dict[str, str | None]:
 
 DEFAULTS = {
     "min_score": 7,
-    "max_apply_attempts": 3,
-    "max_tailor_attempts": 5,
-    "poll_interval": 60,
+    "max_apply_attempts": 10,
+    "max_tailor_attempts": 10,
+    "poll_interval": 30,
     "apply_timeout": 300,
     "viewport": "1280x900",
 }

@@ -115,6 +115,7 @@ def test_build_prompt_does_not_embed_secret_values(monkeypatch, tmp_path: Path) 
     assert "$CAPSOLVER_API_KEY" in prompt
     assert "APPLYPILOT_LOGIN_EXAMPLE_COM_PASSWORD" in prompt
     assert "APPLYPILOT_SITE_PASSWORD" in prompt
+    assert "After submit: browser_snapshot and check for explicit success text first." in prompt
 
 
 def test_build_prompt_marks_indeed_as_no_signup_domain(monkeypatch, tmp_path: Path) -> None:

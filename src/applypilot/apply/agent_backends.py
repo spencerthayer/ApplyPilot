@@ -457,11 +457,12 @@ class CodexAutoApplyBackend(AutoApplyBackend):
         worker_dir = reset_worker_dir(worker_id)
         output_file = worker_dir / "codex-last-message.txt"
         cmd = build_codex_command(worker_dir=worker_dir, output_file=output_file, port=port, model=model)
+        timeout_seconds = config.DEFAULTS["apply_timeout"]
 
         worker_log = _worker_log_path(worker_id)
         start = time.time()
         proc = None
-        raw_parts: list[str] = []
+        raw_output = ""
 
         try:
             proc = subprocess.Popen(
@@ -476,33 +477,34 @@ class CodexAutoApplyBackend(AutoApplyBackend):
             )
             register_process(worker_id, proc)
 
-            if proc.stdin is not None:
-                proc.stdin.write(prompt)
-                proc.stdin.close()
-
             with open(worker_log, "a", encoding="utf-8") as lf:
                 lf.write(_log_header(job, self.label))
                 lf.write(f"$ {_shell_join(cmd)}\n")
                 update_state(worker_id, last_action="running Codex")
+                try:
+                    stdout, _ = proc.communicate(prompt, timeout=timeout_seconds)
+                except subprocess.TimeoutExpired as exc:
+                    partial = exc.output if isinstance(exc.output, str) else ""
+                    if partial:
+                        lf.write(partial)
+                    _terminate_process(proc)
+                    raise
+                raw_output = stdout or ""
+                if raw_output:
+                    lf.write(raw_output)
 
-                if proc.stdout is not None:
-                    for line in proc.stdout:
-                        raw_parts.append(line)
-                        lf.write(line)
-
-            proc.wait(timeout=config.DEFAULTS["apply_timeout"])
             duration_ms = int((time.time() - start) * 1000)
             returncode = proc.returncode or 0
             final_output = ""
             if output_file.exists():
                 final_output = output_file.read_text(encoding="utf-8", errors="replace")
 
-            log_output = final_output if final_output.strip() else "".join(raw_parts)
+            log_output = final_output if final_output.strip() else raw_output
             _write_job_log(self.key, worker_id, job, log_output)
 
             return BackendExecution(
                 final_output=final_output,
-                raw_output="".join(raw_parts),
+                raw_output=raw_output,
                 duration_ms=duration_ms,
                 returncode=returncode,
                 skipped=returncode < 0,
@@ -974,6 +976,20 @@ def _log_header(job: dict, label: str) -> str:
 
 def _shell_join(cmd: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in cmd)
+
+
+def _terminate_process(proc: subprocess.Popen) -> None:
+    """Best-effort process termination helper used on backend timeouts."""
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            return
 
 
 def _fallback_failure_reason(output: str, returncode: int, agent: str) -> str:

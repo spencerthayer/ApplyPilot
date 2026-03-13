@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import shutil
 from pathlib import Path
 
@@ -191,13 +192,14 @@ def test_codex_backend_run_reads_last_message_file(tmp_path: Path, monkeypatch) 
         def __init__(self, cmd: list[str], **_: object) -> None:
             self.cmd = cmd
             self.stdin = FakeStdin()
-            self.stdout = iter(["progress line\n"])
             self.returncode = 0
 
-        def wait(self, timeout: int | None = None) -> int:
+        def communicate(self, input: str | None = None, timeout: int | None = None) -> tuple[str, str]:
+            assert input == "PROMPT"
+            assert timeout is not None
             output_path = Path(self.cmd[self.cmd.index("--output-last-message") + 1])
             output_path.write_text("RESULT:APPLIED\n", encoding="utf-8")
-            return self.returncode
+            return ("progress line\n", "")
 
         def poll(self) -> int:
             return self.returncode
@@ -219,6 +221,71 @@ def test_codex_backend_run_reads_last_message_file(tmp_path: Path, monkeypatch) 
     assert result.final_output == "RESULT:APPLIED\n"
     assert "progress line" in result.raw_output
     assert registered == [0, 0]
+
+
+def test_codex_backend_run_raises_timeout_when_process_hangs(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(agent_backends, "reset_worker_dir", lambda worker_id: tmp_path)
+    monkeypatch.setattr(agent_backends.config, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(agent_backends.config, "APP_DIR", tmp_path)
+    monkeypatch.setitem(agent_backends.config.DEFAULTS, "apply_timeout", 1)
+
+    class FakeStdin:
+        def __init__(self) -> None:
+            self.buffer = ""
+
+        def write(self, text: str) -> int:
+            self.buffer += text
+            return len(text)
+
+        def close(self) -> None:
+            return None
+
+    class FakePopen:
+        def __init__(self, cmd: list[str], **_: object) -> None:
+            self.cmd = cmd
+            self.stdin = FakeStdin()
+            self.returncode = None
+            self._terminated = False
+
+        def communicate(self, input: str | None = None, timeout: int | None = None) -> tuple[str, str]:
+            assert input == "PROMPT"
+            raise subprocess.TimeoutExpired(cmd=self.cmd, timeout=timeout or 0, output="partial output")
+
+        def poll(self) -> int | None:
+            if self._terminated:
+                return -15
+            return None
+
+        def terminate(self) -> None:
+            self._terminated = True
+            self.returncode = -15
+
+        def wait(self, timeout: int | None = None) -> int:
+            if not self._terminated:
+                raise subprocess.TimeoutExpired(cmd=self.cmd, timeout=timeout or 0)
+            return -15
+
+        def kill(self) -> None:
+            self._terminated = True
+            self.returncode = -9
+
+    monkeypatch.setattr(agent_backends.subprocess, "Popen", FakePopen)
+
+    backend = agent_backends.CodexAutoApplyBackend()
+    try:
+        backend.run(
+            job={"title": "Engineer", "site": "Example", "url": "https://example.com"},
+            port=9222,
+            worker_id=0,
+            prompt="PROMPT",
+            model="gpt-5.4",
+            register_process=lambda worker_id, proc: None,
+            unregister_process=lambda worker_id: None,
+        )
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise AssertionError("Expected subprocess.TimeoutExpired")
 
 
 def test_run_job_returns_deterministic_runtime_failure_without_result(monkeypatch) -> None:
