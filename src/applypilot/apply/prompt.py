@@ -10,6 +10,7 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from applypilot import config
 
@@ -392,6 +393,92 @@ If CapSolver genuinely failed (errorId > 0):
 4. All else fails -> Output RESULT:CAPTCHA."""
 
 
+def _extract_domain(url: str | None) -> str:
+    """Extract normalized domain from a URL."""
+    if not url:
+        return ""
+    try:
+        host = (urlparse(url).hostname or "").lower().strip()
+    except Exception:
+        return ""
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _base_domain(host: str) -> str:
+    """Return simple base domain fallback (last two labels)."""
+    parts = [p for p in host.split(".") if p]
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return host
+
+
+def _domain_env_key(domain: str) -> str:
+    """Map a domain to an env-var-safe key."""
+    key = "".join(ch if ch.isalnum() else "_" for ch in domain.upper())
+    return key.strip("_") or "SITE"
+
+
+def _build_site_login_section(job_url: str) -> str:
+    """Build per-domain login credential instructions."""
+    host = _extract_domain(job_url)
+    base = _base_domain(host)
+    host_key = _domain_env_key(host)
+    base_key = _domain_env_key(base)
+
+    host_email = f"APPLYPILOT_LOGIN_{host_key}_EMAIL"
+    host_password = f"APPLYPILOT_LOGIN_{host_key}_PASSWORD"
+    base_email = f"APPLYPILOT_LOGIN_{base_key}_EMAIL"
+    base_password = f"APPLYPILOT_LOGIN_{base_key}_PASSWORD"
+
+    strict_domain = os.environ.get("APPLYPILOT_REQUIRE_DOMAIN_CREDENTIALS", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    no_signup_domains = [d.lower().strip() for d in config.load_no_signup_domains() if d]
+
+    def _matches_no_signup(candidate: str) -> bool:
+        candidate = candidate.lower().strip()
+        if not candidate:
+            return False
+        return any(candidate == domain or candidate.endswith(f".{domain}") for domain in no_signup_domains)
+
+    no_signup_for_target = _matches_no_signup(host) or _matches_no_signup(base)
+
+    fallback_rule = (
+        "Domain credentials are REQUIRED (APPLYPILOT_REQUIRE_DOMAIN_CREDENTIALS=1). "
+        "If no domain credential vars are set, output RESULT:FAILED:login_issue."
+        if strict_domain
+        else "Legacy fallback is allowed only when domain vars are missing: "
+             "use profile email + APPLYPILOT_SITE_PASSWORD."
+    )
+    signup_rule = (
+        "Signup policy: NO SIGNUP for this domain. If login fails, output RESULT:FAILED:login_issue."
+        if no_signup_for_target
+        else "Signup policy: If sign in fails, signup is allowed only with credentials for this same domain."
+    )
+
+    if host and base and host != base:
+        domain_lines = (
+            f"- Exact host ({host}): {host_email}, {host_password}\n"
+            f"- Base domain fallback ({base}): {base_email}, {base_password}"
+        )
+    else:
+        domain_lines = f"- Domain ({host or 'unknown'}): {host_email}, {host_password}"
+
+    return (
+        f"Target domain: {host or 'unknown'}\n"
+        "Credential policy: use unique credentials per domain. Never reuse a password from another domain.\n"
+        "Read credentials from environment variables in this order:\n"
+        f"{domain_lines}\n"
+        f"{signup_rule}\n"
+        f"{fallback_rule}"
+    )
+
+
 def build_prompt(job: dict, tailored_resume: str,
                  cover_letter: str | None = None,
                  dry_run: bool = False) -> str:
@@ -458,6 +545,7 @@ def build_prompt(job: dict, tailored_resume: str,
     screening_section = _build_screening_section(profile)
     hard_rules = _build_hard_rules(profile)
     captcha_section = _build_captcha_section()
+    site_login_section = _build_site_login_section(job.get("application_url") or job["url"])
 
     # Cover letter fallback text
     city = personal.get("city", "the area")
@@ -520,6 +608,9 @@ For form fields: Use browser_evaluate to discover all inputs on page first.
 
 == APPLICANT PROFILE ==
 {profile_summary}
+
+== SITE LOGIN CREDENTIALS ==
+{site_login_section}
 
 == YOUR MISSION ==
 Submit a complete, accurate application. Use the profile and resume as source data -- adapt to fit each form's format.
@@ -617,9 +708,9 @@ LINKEDIN EASY APPLY - CRITICAL FAST PATH:
         - Once back on the job site, continue with the application flow
     7c. If you land on SSO/OAuth pages other than Google (Microsoft, Okta, corporate SSO) -> STOP. Output RESULT:FAILED:sso_required.
     7d. Check for popups. Run browser_tabs action "list". If a new tab/window appeared (login popup), switch to it with browser_tabs action "select". Check the URL there too -- if it's non-Google SSO -> RESULT:FAILED:sso_required.
-    7e. Regular login form (employer's own site)? Try sign in with email {personal['email']}. For the password, read APPLYPILOT_SITE_PASSWORD from the environment.
+    7e. Regular login form (employer's own site)? Use credentials from the SITE LOGIN CREDENTIALS section (domain env vars first; legacy APPLYPILOT_SITE_PASSWORD fallback only if policy allows).
     7f. After clicking Login/Sign-in: run CAPTCHA DETECT. Login pages frequently have invisible CAPTCHAs that silently block form submissions. If found, solve it then retry login.
-    7g. Sign in failed? Try sign up with the same email and the APPLYPILOT_SITE_PASSWORD value.
+    7g. Sign in failed? Follow the signup policy in SITE LOGIN CREDENTIALS. If the domain is NO SIGNUP, output RESULT:FAILED:login_issue immediately.
     7h. Need email verification? Use search_emails + read_email to get the code.
     7i. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
     7j. All failed? Output RESULT:FAILED:login_issue. Do not loop.

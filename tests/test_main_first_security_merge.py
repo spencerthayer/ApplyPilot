@@ -91,6 +91,7 @@ def test_build_prompt_does_not_embed_secret_values(monkeypatch, tmp_path: Path) 
     )
     monkeypatch.setattr(prompt_module.config, "load_search_config", lambda: {"locations": []})
     monkeypatch.setattr(config_module, "load_blocked_sso", lambda: [])
+    monkeypatch.setattr(config_module, "load_no_signup_domains", lambda: [])
     monkeypatch.setattr(prompt_module, "_build_profile_summary", lambda profile: "PROFILE")
     monkeypatch.setattr(prompt_module, "_build_location_check", lambda profile, cfg: "LOCATION")
     monkeypatch.setattr(prompt_module, "_build_salary_section", lambda profile: "SALARY")
@@ -112,7 +113,56 @@ def test_build_prompt_does_not_embed_secret_values(monkeypatch, tmp_path: Path) 
     assert "cap-secret-key" not in prompt
     assert "plaintext-password" not in prompt
     assert "$CAPSOLVER_API_KEY" in prompt
+    assert "APPLYPILOT_LOGIN_EXAMPLE_COM_PASSWORD" in prompt
     assert "APPLYPILOT_SITE_PASSWORD" in prompt
+
+
+def test_build_prompt_marks_indeed_as_no_signup_domain(monkeypatch, tmp_path: Path) -> None:
+    resume_txt = tmp_path / "tailored_resume.txt"
+    resume_pdf = tmp_path / "tailored_resume.pdf"
+    resume_txt.write_text("Tailored resume", encoding="utf-8")
+    resume_pdf.write_text("pdf-bytes", encoding="utf-8")
+
+    monkeypatch.setenv("CAPSOLVER_API_KEY", "cap-secret-key")
+    monkeypatch.setattr(prompt_module.config, "load_env", lambda: None)
+    monkeypatch.setattr(prompt_module.config, "APPLY_WORKER_DIR", tmp_path / "apply-workers")
+    monkeypatch.setattr(
+        prompt_module.config,
+        "load_profile",
+        lambda: {
+            "personal": {
+                "full_name": "Alex Example",
+                "preferred_name": "Alex",
+                "email": "alex@example.com",
+                "phone": "5551234567",
+                "city": "Seattle",
+            }
+        },
+    )
+    monkeypatch.setattr(prompt_module.config, "load_search_config", lambda: {"locations": []})
+    monkeypatch.setattr(config_module, "load_blocked_sso", lambda: [])
+    monkeypatch.setattr(config_module, "load_no_signup_domains", lambda: ["indeed.com", "ziprecruiter.com"])
+    monkeypatch.setattr(prompt_module, "_build_profile_summary", lambda profile: "PROFILE")
+    monkeypatch.setattr(prompt_module, "_build_location_check", lambda profile, cfg: "LOCATION")
+    monkeypatch.setattr(prompt_module, "_build_salary_section", lambda profile: "SALARY")
+    monkeypatch.setattr(prompt_module, "_build_screening_section", lambda profile: "SCREENING")
+    monkeypatch.setattr(prompt_module, "_build_hard_rules", lambda profile: "HARD RULES")
+
+    prompt = prompt_module.build_prompt(
+        job={
+            "url": "https://www.indeed.com/viewjob?jk=abc123",
+            "title": "Engineer",
+            "site": "Indeed",
+            "application_url": "https://www.indeed.com/viewjob?jk=abc123",
+            "fit_score": 8,
+            "tailored_resume_path": str(resume_txt),
+        },
+        tailored_resume="Tailored resume",
+    )
+
+    assert "APPLYPILOT_LOGIN_INDEED_COM_EMAIL" in prompt
+    assert "APPLYPILOT_LOGIN_INDEED_COM_PASSWORD" in prompt
+    assert "Signup policy: NO SIGNUP for this domain." in prompt
 
 
 def test_generate_dashboard_escapes_attribute_bound_values(monkeypatch, tmp_path: Path) -> None:

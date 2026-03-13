@@ -132,7 +132,21 @@ Still supported for LLM-facing resume text when `resume.json` is absent.
 Job search queries, target titles, locations, boards. Run multiple searches with different parameters.
 
 ### `.env`
-API keys and runtime config: `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `LLM_URL`, `LLM_MODEL`, `AUTO_APPLY_AGENT`, `AUTO_APPLY_AGENT_PRIORITY`, `AUTO_APPLY_MODEL`, `CAPSOLVER_API_KEY` (optional), `APPLYPILOT_SCORE_TRACE` (optional, set `1` for per-job scoring rationale logs).
+API keys and runtime config: `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `LLM_URL`, `LLM_MODEL`, `AUTO_APPLY_AGENT`, `AUTO_APPLY_AGENT_PRIORITY`, `AUTO_APPLY_MODEL`, `CAPSOLVER_API_KEY` (optional), `APPLYPILOT_LOGIN_<DOMAIN>_EMAIL`, `APPLYPILOT_LOGIN_<DOMAIN>_PASSWORD`, `APPLYPILOT_REQUIRE_DOMAIN_CREDENTIALS` (optional, `1` = fail when domain creds missing), `APPLYPILOT_SITE_PASSWORD` (legacy shared-password fallback), `APPLYPILOT_SCORE_TRACE` (optional, set `1` for per-job scoring rationale logs).
+
+Per-domain credential examples:
+```bash
+APPLYPILOT_LOGIN_LINKEDIN_COM_EMAIL=you@example.com
+APPLYPILOT_LOGIN_LINKEDIN_COM_PASSWORD=your-linkedin-password
+APPLYPILOT_LOGIN_INDEED_COM_EMAIL=you@example.com
+APPLYPILOT_LOGIN_INDEED_COM_PASSWORD=your-indeed-password
+APPLYPILOT_LOGIN_ZIPRECRUITER_COM_EMAIL=you@example.com
+APPLYPILOT_LOGIN_ZIPRECRUITER_COM_PASSWORD=your-ziprecruiter-password
+APPLYPILOT_LOGIN_GREENHOUSE_IO_EMAIL=you@example.com
+APPLYPILOT_LOGIN_GREENHOUSE_IO_PASSWORD=your-greenhouse-password
+APPLYPILOT_REQUIRE_DOMAIN_CREDENTIALS=1
+```
+Domain transform rule: uppercase the hostname and replace non-alphanumeric chars with `_` (for example, `jobs.lever.co` -> `APPLYPILOT_LOGIN_JOBS_LEVER_CO_*`).
 
 ## Two AI Layers
 
