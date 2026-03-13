@@ -269,7 +269,9 @@ def build_codex_command(
 
 def extract_result_status(output: str) -> str | None:
     """Parse the normalized RESULT code from an agent transcript."""
-    token_re = re.compile(r"RESULT:(APPLIED|EXPIRED|CAPTCHA|LOGIN_ISSUE|FAILED(?::[^\r\n]*)?)")
+    token_re = re.compile(
+        r"RESULT:(APPLIED|EXPIRED|CAPTCHA|LOGIN_ISSUE|FAILED(?::[A-Za-z0-9_.:-]+)?)"
+    )
     matches = list(token_re.finditer(output))
     if not matches:
         return None
@@ -280,7 +282,7 @@ def extract_result_status(output: str) -> str | None:
 
     # RESULT:FAILED or RESULT:FAILED:<reason>
     reason = token.split(":", 1)[-1].strip() if ":" in token else "unknown"
-    reason = re.sub(r'[*`"\'\]\)\.!,;:]+$', "", reason).strip() or "unknown"
+    reason = re.sub(r"[^A-Za-z0-9_.:-]+$", "", reason).strip() or "unknown"
     if reason in {"captcha", "expired", "login_issue"}:
         return reason
     return f"failed:{reason}"
