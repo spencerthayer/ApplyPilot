@@ -178,6 +178,7 @@ def test_generate_dashboard_escapes_attribute_bound_values(monkeypatch, tmp_path
         "full_description": "full description",
         "application_url": "https://example.com/apply",
         "detail_error": None,
+        "tailored_resume_path": None,
         "fit_score": 8,
         "score_reasoning": "python\nstrong fit",
         "applied_at": None,
@@ -198,6 +199,7 @@ def test_generate_dashboard_escapes_attribute_bound_values(monkeypatch, tmp_path
     assert 'data-location="remote" onclick=' not in html
     assert 'data-cmd="/tmp/venv/bin/applypilot apply --url &#x27;https://example.com/job?q=&quot;quoted&quot;&#x27;"' in html
     assert 'data-cmd="/tmp/venv/bin/applypilot apply --url https://example.com/job?q="quoted""' not in html
+    assert 'data-cmd="/tmp/venv/bin/applypilot tailor --url &#x27;https://example.com/job?q=&quot;quoted&quot;&#x27; --force"' in html
 
 
 def test_generate_dashboard_manual_ats_shows_test_auto_apply_button(monkeypatch, tmp_path: Path) -> None:
@@ -212,6 +214,7 @@ def test_generate_dashboard_manual_ats_shows_test_auto_apply_button(monkeypatch,
         "full_description": "full description",
         "application_url": "https://thomsonreuters.wd5.myworkdayjobs.com/External_Career_Site/job/USA/Role_123",
         "detail_error": None,
+        "tailored_resume_path": None,
         "fit_score": 8,
         "score_reasoning": "python\nstrong fit",
         "applied_at": None,
@@ -229,6 +232,7 @@ def test_generate_dashboard_manual_ats_shows_test_auto_apply_button(monkeypatch,
     html = output_path.read_text(encoding="utf-8")
 
     assert "Auto-Apply (Test)" in html
+    assert "Force Tailor Resume" in html
     assert "Manual ATS: may fail (testing)" not in html
     assert "auto-apply-btn--manual" in html
     assert 'onclick="copyApplyCmd(this)"' in html

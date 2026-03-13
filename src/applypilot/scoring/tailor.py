@@ -589,14 +589,22 @@ def tailor_resume(
 
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
-def run_tailoring(min_score: int = 7, limit: int = 0,
-                  validation_mode: str = "normal") -> dict:
+def run_tailoring(
+    min_score: int = 7,
+    limit: int = 0,
+    validation_mode: str = "normal",
+    target_url: str | None = None,
+    force: bool = False,
+) -> dict:
     """Generate tailored resumes for high-scoring jobs.
 
     Args:
         min_score:       Minimum fit_score to tailor for.
         limit:           Maximum jobs to process (0 = all eligible jobs).
         validation_mode: "strict", "normal", or "lenient".
+        target_url:      Optional URL to tailor a single matched job.
+        force:           When target_url is provided, regenerate even if tailored resume exists
+                         or fit_score is below min_score.
 
     Returns:
         {"approved": int, "failed": int, "errors": int, "elapsed": float}
@@ -609,7 +617,42 @@ def run_tailoring(min_score: int = 7, limit: int = 0,
         return {"approved": 0, "failed": 0, "errors": 0, "elapsed": 0.0}
     conn = get_connection()
 
-    jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=limit)
+    if target_url:
+        like = f"%{target_url.split('?')[0].rstrip('/')}%"
+        row = conn.execute(
+            """
+            SELECT * FROM jobs
+            WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
+            LIMIT 1
+            """,
+            (target_url, target_url, like, like),
+        ).fetchone()
+        if not row:
+            log.info("Target URL not found in database: %s", target_url)
+            return {"approved": 0, "failed": 0, "errors": 0, "elapsed": 0.0}
+
+        if isinstance(row, dict):
+            target_job = dict(row)
+        else:
+            columns = row.keys()
+            target_job = dict(zip(columns, row))
+        if not target_job.get("full_description"):
+            log.error("Target job has no full description. Run 'applypilot run enrich' first.")
+            return {"approved": 0, "failed": 0, "errors": 0, "elapsed": 0.0}
+        score = target_job.get("fit_score")
+        if not force and score is not None and score < min_score:
+            log.info(
+                "Target job score %s is below min-score %d. Use --force to override.",
+                score,
+                min_score,
+            )
+            return {"approved": 0, "failed": 0, "errors": 0, "elapsed": 0.0}
+        if not force and target_job.get("tailored_resume_path"):
+            log.info("Target job already has a tailored resume. Use --force to regenerate.")
+            return {"approved": 0, "failed": 0, "errors": 0, "elapsed": 0.0}
+        jobs = [target_job]
+    else:
+        jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=limit)
 
     if not jobs:
         log.info("No untailored jobs with score >= %d.", min_score)

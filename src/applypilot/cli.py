@@ -445,6 +445,52 @@ def apply(
     )
 
 
+@app.command("tailor")
+def tailor_cmd(
+    url: Optional[str] = typer.Option(None, "--url", help="Tailor resume for a specific job URL."),
+    min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for tailoring."),
+    limit: int = typer.Option(0, "--limit", "-l", help="Max jobs to process when --url is not provided."),
+    force: bool = typer.Option(False, "--force", help="Regenerate even if a tailored resume already exists."),
+    validation: str = typer.Option(
+        "normal",
+        "--validation",
+        help=(
+            "Validation strictness: strict, normal, lenient. "
+            "Use normal unless you specifically want stricter/faster behavior."
+        ),
+    ),
+) -> None:
+    """Generate tailored resume artifacts."""
+    _bootstrap()
+
+    from applypilot.config import check_tier
+    from applypilot.scoring.tailor import run_tailoring
+
+    valid_modes = ("strict", "normal", "lenient")
+    if validation not in valid_modes:
+        console.print(
+            f"[red]Invalid --validation value:[/red] '{validation}'. "
+            f"Choose from: {', '.join(valid_modes)}"
+        )
+        raise typer.Exit(code=1)
+
+    check_tier(2, "resume tailoring")
+
+    result = run_tailoring(
+        min_score=min_score,
+        limit=limit,
+        validation_mode=validation,
+        target_url=url,
+        force=force,
+    )
+    console.print(
+        "[green]Tailoring finished:[/green] "
+        f"{result.get('approved', 0)} approved, "
+        f"{result.get('failed', 0)} failed, "
+        f"{result.get('errors', 0)} errors."
+    )
+
+
 @app.command()
 def analyze(
     url: Optional[str] = typer.Option(None, "--url", help="Analyze a job already stored in the database by URL."),

@@ -42,6 +42,11 @@ def _build_auto_apply_command(url: str, applypilot_binary: str) -> str:
     return f"{shlex.quote(applypilot_binary)} apply --url {shlex.quote(url)}"
 
 
+def _build_force_tailor_command(url: str, applypilot_binary: str) -> str:
+    """Build a shell-safe force-tailor command for a specific listing."""
+    return f"{shlex.quote(applypilot_binary)} tailor --url {shlex.quote(url)} --force"
+
+
 def generate_dashboard(output_path: str | None = None) -> str:
     """Generate an HTML dashboard of all jobs with fit scores.
 
@@ -95,6 +100,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
     jobs = conn.execute("""
         SELECT url, title, salary, description, location, site, strategy,
                full_description, application_url, detail_error,
+               tailored_resume_path,
                fit_score, score_reasoning,
                applied_at, apply_status, apply_error, last_attempted_at
         FROM jobs
@@ -225,6 +231,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
         # Auto-apply command button (only for jobs not yet applied)
         raw_url = j["url"] or ""
         auto_apply_cmd = _build_auto_apply_command(raw_url, applypilot_binary)
+        force_tailor_cmd = _build_force_tailor_command(raw_url, applypilot_binary)
         data_location = escape((j["location"] or "").lower())
         manual_ats = is_manual_ats(j["application_url"] or j["url"])
 
@@ -285,20 +292,20 @@ def generate_dashboard(output_path: str | None = None) -> str:
 
         action_html = ""
         if not was_applied:
-            if manual_ats:
-                action_html = (
-                    '<div class="manual-ats-action">'
-                    f'<button class="auto-apply-btn auto-apply-btn--manual" onclick="copyApplyCmd(this)" '
-                    f'data-cmd="{escape(auto_apply_cmd)}" title="{escape(auto_apply_cmd)}">'
-                    "&#9888; Auto-Apply (Test)</button>"
-                    "</div>"
-                )
-            else:
-                action_html = (
-                    f'<button class="auto-apply-btn" onclick="copyApplyCmd(this)" '
-                    f'data-cmd="{escape(auto_apply_cmd)}" title="{escape(auto_apply_cmd)}">'
-                    "&#9654; Auto-Apply</button>"
-                )
+            auto_apply_label = "&#9888; Auto-Apply (Test)" if manual_ats else "&#9654; Auto-Apply"
+            auto_apply_class = "auto-apply-btn auto-apply-btn--manual" if manual_ats else "auto-apply-btn"
+            action_html = (
+                '<div class="action-buttons">'
+                f'<button class="{auto_apply_class}" onclick="copyApplyCmd(this)" '
+                f'data-cmd="{escape(auto_apply_cmd)}" '
+                f'data-label="{auto_apply_label}" '
+                f'title="{escape(auto_apply_cmd)}">{auto_apply_label}</button>'
+                f'<button class="tailor-btn" onclick="copyApplyCmd(this)" '
+                f'data-cmd="{escape(force_tailor_cmd)}" '
+                f'data-label="&#9998; Force Tailor Resume" '
+                f'title="{escape(force_tailor_cmd)}">&#9998; Force Tailor Resume</button>'
+                "</div>"
+            )
 
         job_sections += f"""
         <div class="job-card{card_extra_class}" data-score="{score}" data-site="{escape(j['site'] or '')}" data-location="{data_location}"{applied_attr}>
@@ -501,7 +508,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
 
   .desc-preview {{ font-size: 0.8rem; color: #64748b; line-height: 1.5; margin-bottom: 0.75rem; max-height: 3.6em; overflow: hidden; }}
 
-  .card-footer {{ display: flex; justify-content: flex-end; }}
+  .card-footer {{ display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }}
   .apply-link {{ font-size: 0.8rem; color: #60a5fa; text-decoration: none; padding: 0.3rem 0.8rem; border: 1px solid #60a5fa33; border-radius: 6px; font-weight: 500; }}
   .apply-link:hover {{ background: #60a5fa22; }}
 
@@ -549,7 +556,11 @@ def generate_dashboard(output_path: str | None = None) -> str:
   .auto-apply-btn.copied {{ background: #064e3b; border-color: #10b981; color: #6ee7b7; }}
   .auto-apply-btn--manual {{ border-color: #ef4444; color: #fca5a5; background: #3f1111; }}
   .auto-apply-btn--manual:hover {{ border-color: #f87171; color: #fecaca; background: #571515; }}
-  .manual-ats-action {{ display: flex; justify-content: flex-end; }}
+  .tailor-btn {{ background: transparent; border: 1px solid #f59e0b; color: #fbbf24; padding: 0.3rem 0.8rem;
+    border-radius: 6px; cursor: pointer; font-size: 0.78rem; font-weight: 600; transition: all 0.15s; white-space: nowrap; }}
+  .tailor-btn:hover {{ background: #f59e0b22; color: #fcd34d; border-color: #fbbf24; }}
+  .tailor-btn.copied {{ background: #064e3b; border-color: #10b981; color: #6ee7b7; }}
+  .action-buttons {{ display: flex; gap: 0.5rem; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }}
 
   /* Applied indicator */
   .job-card--applied {{ border-left-color: #10b981 !important; background: #0d2b1e; }}
@@ -630,11 +641,12 @@ let hideApplied = false;
 
 function copyApplyCmd(btn) {{
   const cmd = btn.dataset.cmd;
+  const resetLabel = btn.dataset.label || btn.innerHTML;
   navigator.clipboard.writeText(cmd).then(() => {{
     btn.textContent = '✓ Copied!';
     btn.classList.add('copied');
     setTimeout(() => {{
-      btn.innerHTML = '&#9654; Auto-Apply';
+      btn.innerHTML = resetLabel;
       btn.classList.remove('copied');
     }}, 2000);
   }}).catch(() => {{
@@ -650,7 +662,7 @@ function copyApplyCmd(btn) {{
     btn.textContent = '✓ Copied!';
     btn.classList.add('copied');
     setTimeout(() => {{
-      btn.innerHTML = '&#9654; Auto-Apply';
+      btn.innerHTML = resetLabel;
       btn.classList.remove('copied');
     }}, 2000);
   }});
