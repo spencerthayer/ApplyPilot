@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Settings-only profile.json** - `~/.applypilot/profile.json` now stores ApplyPilot settings only (`work_authorization`, `compensation`, `availability`, `eeo_voluntary`, `tailoring_config`, `files`)
 - **Compatibility migration** - When canonical installs still have legacy profile data, ApplyPilot backfills missing personal/work/education/skills data into `resume.json` and rewrites `profile.json` to the settings-only format
 - **Validation and tailoring sources** - fabrication checks, cover-letter prompts, metrics validation, and comprehensive tailoring now derive companies, schools, skills, projects, and key metrics from normalized `resume.json` data
+- **Apply batch default** - `applypilot apply` now drains all currently eligible jobs in one batch by default; `--continuous` remains the polling mode
 
 ### Removed
 - **`resume_facts` profile contract** - removed from runtime profile handling, setup flows, validation, tailoring, and documentation

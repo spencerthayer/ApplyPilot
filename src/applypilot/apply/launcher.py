@@ -714,36 +714,37 @@ def _fallback_failure_reason(output: str, returncode: int, agent: str) -> str:
 # Worker loop
 # ---------------------------------------------------------------------------
 
-def worker_loop(worker_id: int = 0, limit: int = 1,
+def worker_loop(worker_id: int = 0, limit: int | None = None,
                 target_url: str | None = None,
                 min_score: int = 7, headless: bool = False,
                 agent: str = "claude", model: str | None = None,
                 opencode_agent: str | None = None,
-                dry_run: bool = False) -> tuple[int, int]:
-    """Run jobs sequentially until limit is reached or queue is empty.
+                dry_run: bool = False,
+                continuous: bool = False) -> tuple[int, int]:
+    """Run jobs sequentially until the cap is reached or the queue is empty.
 
     Args:
         worker_id: Numeric worker identifier.
-        limit: Max jobs to process (0 = continuous).
+        limit: Max jobs to process. ``None`` drains the current queue.
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome headless.
         agent: Auto-apply browser agent backend.
         model: Backend model override.
         dry_run: Don't click Submit.
+        continuous: Keep polling for newly available jobs after the queue empties.
 
     Returns:
         Tuple of (applied_count, failed_count).
     """
     applied = 0
     failed = 0
-    continuous = limit == 0
     jobs_done = 0
     empty_polls = 0
     port = BASE_CDP_PORT + worker_id
 
     while not _stop_event.is_set():
-        if not continuous and jobs_done >= limit:
+        if not continuous and limit is not None and jobs_done >= limit:
             break
 
         update_state(worker_id, status="idle", job_title="", company="",
@@ -837,7 +838,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 # Main entry point (called from cli.py)
 # ---------------------------------------------------------------------------
 
-def main(limit: int = 1, target_url: str | None = None,
+def main(limit: int | None = None, target_url: str | None = None,
          min_score: int = 7, headless: bool = False, agent: str = "claude",
          model: str | None = None, opencode_agent: str | None = None,
          dry_run: bool = False, continuous: bool = False,
@@ -845,14 +846,14 @@ def main(limit: int = 1, target_url: str | None = None,
     """Launch the apply pipeline.
 
     Args:
-        limit: Max jobs to apply to (0 or with continuous=True means run forever).
+        limit: Max jobs to apply to. ``None`` drains all currently eligible jobs.
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome in headless mode.
         agent: Auto-apply browser agent backend.
         model: Backend model override.
         dry_run: Don't click Submit.
-        continuous: Run forever, polling for new jobs.
+        continuous: Run forever, polling for new jobs after the queue empties.
         poll_interval: Seconds between DB polls when queue is empty.
         workers: Number of parallel workers (default 1).
     """
@@ -864,8 +865,11 @@ def main(limit: int = 1, target_url: str | None = None,
     console = Console()
 
     if continuous:
-        effective_limit = 0
+        effective_limit = None
         mode_label = "continuous"
+    elif limit in (None, 0):
+        effective_limit = None
+        mode_label = "all available jobs"
     else:
         effective_limit = limit
         mode_label = f"{limit} jobs"
@@ -928,16 +932,19 @@ def main(limit: int = 1, target_url: str | None = None,
                     model=model,
                     opencode_agent=opencode_agent,
                     dry_run=dry_run,
+                    continuous=continuous,
                 )
             else:
-                # Multi-worker — distribute limit across workers
-                if effective_limit:
+                # Multi-worker — distribute explicit caps across workers.
+                if effective_limit is None:
+                    limits = [None] * workers
+                elif effective_limit > 0:
                     base = effective_limit // workers
                     extra = effective_limit % workers
                     limits = [base + (1 if i < extra else 0)
                               for i in range(workers)]
                 else:
-                    limits = [0] * workers  # continuous mode
+                    limits = [0] * workers
 
                 with ThreadPoolExecutor(max_workers=workers,
                                         thread_name_prefix="apply-worker") as executor:
@@ -953,6 +960,7 @@ def main(limit: int = 1, target_url: str | None = None,
                             model=model,
                             opencode_agent=opencode_agent,
                             dry_run=dry_run,
+                            continuous=continuous,
                         ): i
                         for i in range(workers)
                     }

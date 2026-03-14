@@ -300,7 +300,12 @@ def run(
 
 @app.command()
 def apply(
-    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
+    limit: Optional[int] = typer.Option(
+        None,
+        "--limit",
+        "-l",
+        help="Max applications to submit (default: all currently eligible jobs).",
+    ),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
     min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
     agent: Optional[str] = typer.Option(
@@ -414,14 +419,19 @@ def apply(
 
     from applypilot.apply.launcher import main as apply_main
 
-    effective_limit = limit if limit is not None else (0 if continuous else 1)
+    if limit is not None and limit < 0:
+        console.print("[red]--limit must be 0 or greater.[/red]")
+        raise typer.Exit(code=1)
+
+    effective_limit = None if continuous or limit in (None, 0) else limit
+    limit_label = "unlimited" if continuous else ("all available" if effective_limit is None else effective_limit)
 
     console.print(
         "[yellow]Security: Auto-apply runs with --permission-mode bypassPermissions. "
         "Review generated prompts before use.[/yellow]"
     )
     console.print("\n[bold blue]Launching Auto-Apply[/bold blue]")
-    console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
+    console.print(f"  Limit:    {limit_label}")
     console.print(f"  Workers:  {workers}")
     console.print(f"  Agent:    {resolved_agent}")
     console.print(f"  Model:    {resolved_model or '(default)'}")

@@ -36,7 +36,7 @@ applypilot resume render --format html   # render the canonical resume.json with
 applypilot resume render --format pdf    # render canonical resume.json to PDF
 applypilot run           # discover > enrich > score > tailor > cover letters
 applypilot run -w 4      # same but parallel (4 threads for discovery/enrichment)
-applypilot apply         # autonomous browser-driven submission
+applypilot apply         # autonomous browser-driven submission for all ready jobs
 applypilot apply -w 3    # parallel apply (3 Chrome instances)
 applypilot apply --dry-run  # fill forms without submitting
 ```
@@ -222,8 +222,9 @@ applypilot run --min-score 8            # Override score threshold
 applypilot run --dry-run                # Preview without executing
 applypilot run --validation lenient     # Relax validation (recommended for Gemini free tier)
 applypilot run --validation strict      # Strictest validation (retries on any banned word)
-applypilot apply                        # Launch auto-apply
+applypilot apply                        # Launch auto-apply for all ready jobs
 applypilot apply --workers 3            # Parallel browser workers
+applypilot apply --limit 10             # Cap a batch to 10 applications
 applypilot apply --dry-run              # Fill forms without submitting
 applypilot apply --continuous           # Run forever, polling for new jobs
 applypilot apply --headless             # Headless browser mode
