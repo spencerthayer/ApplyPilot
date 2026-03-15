@@ -7,7 +7,8 @@ in a terminal dashboard using the Rich library.
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+import urllib.request
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +37,7 @@ class WorkerState:
     jobs_done: int = 0
     total_cost: float = 0.0
     log_file: Path | None = None
+    chrome_ok: bool | None = None  # None=unknown, True=connected, False=unreachable
 
 
 # Module-level state (thread-safe via _lock)
@@ -89,6 +91,71 @@ def add_event(msg: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Chrome health checks
+# ---------------------------------------------------------------------------
+
+# CDP port formula: 9222 + worker_id  (matches launch_chrome in chrome.py)
+_CDP_BASE_PORT = 9222
+_HEALTH_CHECK_INTERVAL = 5  # seconds
+_HEALTH_CHECK_TIMEOUT = 0.5  # seconds
+
+_health_thread: threading.Thread | None = None
+_health_stop = threading.Event()
+
+
+def _check_chrome_health(worker_id: int) -> bool:
+    """Return True if Chrome CDP port for this worker is reachable."""
+    port = _CDP_BASE_PORT + worker_id
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/version",
+            timeout=_HEALTH_CHECK_TIMEOUT,
+        ) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def _health_check_loop() -> None:
+    """Background thread: poll Chrome CDP ports and update chrome_ok."""
+    while not _health_stop.wait(_HEALTH_CHECK_INTERVAL):
+        with _lock:
+            worker_ids = list(_worker_states.keys())
+        for wid in worker_ids:
+            ok = _check_chrome_health(wid)
+            with _lock:
+                state = _worker_states.get(wid)
+                if state is None:
+                    continue
+                prev = state.chrome_ok
+                state.chrome_ok = ok
+            # Log only on transitions
+            if prev is True and not ok:
+                logger.error("[worker-%d] Chrome CDP unreachable (port %d)", wid, _CDP_BASE_PORT + wid)
+            elif prev is False and ok:
+                logger.info("[worker-%d] Chrome CDP reconnected (port %d)", wid, _CDP_BASE_PORT + wid)
+            elif prev is None and not ok:
+                logger.warning("[worker-%d] Chrome CDP not reachable at startup (port %d)", wid, _CDP_BASE_PORT + wid)
+
+
+def start_health_checks() -> None:
+    """Start the background Chrome health-check thread (idempotent)."""
+    global _health_thread
+    if _health_thread is not None and _health_thread.is_alive():
+        return
+    _health_stop.clear()
+    _health_thread = threading.Thread(
+        target=_health_check_loop, daemon=True, name="chrome-health"
+    )
+    _health_thread.start()
+
+
+def stop_health_checks() -> None:
+    """Stop the background Chrome health-check thread."""
+    _health_stop.set()
+
+
+# ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
 
@@ -103,6 +170,8 @@ _STATUS_STYLES: dict[str, str] = {
     "captcha": "magenta",
     "login_issue": "red",
     "done": "bold",
+    "waiting_human": "bold magenta",
+    "waiting_answer": "bold cyan",
 }
 
 
@@ -113,7 +182,7 @@ def render_dashboard() -> Table:
         A Rich Table object ready for display.
     """
     table = Table(title="ApplyPilot Dashboard", expand=True, show_lines=False)
-    table.add_column("W", style="bold", width=3, justify="center")
+    table.add_column("W", width=3, justify="center")
     table.add_column("Job", min_width=30, max_width=50, no_wrap=True)
     table.add_column("Status", width=12, justify="center")
     table.add_column("Time", width=6, justify="right")
@@ -140,8 +209,16 @@ def render_dashboard() -> Table:
 
         job_text = f"{s.job_title[:28]} @ {s.company[:16]}" if s.job_title else ""
 
+        if s.chrome_ok is True:
+            w_style = "bold blue"
+        elif s.chrome_ok is False:
+            w_style = "bold red"
+        else:
+            w_style = "bold"
+        w_text = Text(str(s.worker_id), style=w_style)
+
         table.add_row(
-            str(s.worker_id),
+            w_text,
             job_text,
             status_text,
             elapsed,

@@ -110,6 +110,7 @@ sites:
   - name: "Dice"
     url: "https://www.dice.com/jobs?q={query_encoded}&location=Remote&pageSize=100"
     type: search
+    no_headful: true  # dice.com is a SPA that requires login; headful retry is pointless
 
   - name: "SimplyHired"
     url: "https://www.simplyhired.com/search?q={query_encoded}&l={location_encoded}"

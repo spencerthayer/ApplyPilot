@@ -5,18 +5,17 @@ postings. All personal data (name, skills, achievements) comes from the user's
 profile at runtime. No hardcoded personal information.
 """
 
-import json
+import hashlib
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.database import get_connection, write_with_retry
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
-    BANNED_WORDS,
-    LLM_LEAK_PHRASES,
     sanitize_text,
     validate_cover_letter,
 )
@@ -60,11 +59,6 @@ def _build_cover_letter_prompt(profile: dict) -> str:
     if real_metrics:
         metrics_hint = f"\nReal metrics to use: {', '.join(real_metrics)}"
 
-    # Build the full banned list from the validator so the prompt stays in sync
-    # with what will actually be rejected — the validator checks all of these.
-    all_banned = ", ".join(f'"{w}"' for w in BANNED_WORDS)
-    leak_banned = ", ".join(f'"{p}"' for p in LLM_LEAK_PHRASES)
-
     return f"""Write a cover letter for {sign_off_name}. The goal is to get an interview.
 
 STRUCTURE: 3 short paragraphs. Under 250 words. Every sentence must earn its place.
@@ -75,20 +69,30 @@ PARAGRAPH 2 (3-4 sentences): Pick 2 achievements from the resume that are MOST r
 
 PARAGRAPH 3 (1-2 sentences): One specific thing about the company from the job description (a product, a technical challenge, a team structure). Then close. "Happy to walk through any of this in more detail." or "Let's discuss." Nothing else.
 
-BANNED WORDS AND PHRASES (automated validator rejects ANY of these — do not use even once):
-{all_banned}
+BANNED WORDS/PHRASES (using ANY of these = instant rejection):
+"resonated", "aligns with", "passionate", "eager", "eager to", "excited to apply", "I am confident",
+"I believe", "proven track record", "strong track record", "cutting-edge", "innovative", "innovative solutions",
+"leverage", "leveraging", "robust", "driven", "dedicated", "committed to",
+"I look forward to hearing from you", "great fit", "unique opportunity",
+"commitment to excellence", "dynamic team", "fast-paced environment",
+"I am writing to express", "caught my eye", "caught my attention"
 
-ALSO BANNED (meta-commentary the validator catches):
-{leak_banned}
-
-BANNED PUNCTUATION: No em dashes (—) or en dashes (–). Use commas or periods.
+BANNED PUNCTUATION: No em dashes. Use commas or periods.
 
 VOICE:
 - Write like a real engineer emailing someone they respect. Not formal, not casual. Just direct.
 - NEVER narrate or explain what you're doing. BAD: "This demonstrates my commitment to X." GOOD: Just state the fact and move on.
 - NEVER hedge. BAD: "might address some of your challenges." GOOD: "solves the same problem your team is facing."
+- NEVER use "Also," to start a sentence. NEVER use "Furthermore," or "Additionally,".
 - Every sentence should contain either a number, a tool name, or a specific outcome. If it doesn't, cut it.
 - Read it out loud. If it sounds like a robot wrote it, rewrite it.
+
+ADDITIONAL BANNED PHRASES:
+"This demonstrates", "This reflects", "This showcases", "This shows",
+"This experience translates", "which aligns with", "which is relevant to",
+"as demonstrated by", "showing experience with", "reflecting the need for",
+"which directly addresses", "I have experience with",
+"Also,", "Furthermore,", "Additionally,", "Moreover,"
 
 FABRICATION = INSTANT REJECTION:
 The candidate's real tools are ONLY: {skills_str}.
@@ -96,30 +100,13 @@ Do NOT mention ANY tool not in this list. If the job asks for tools not listed, 
 
 Sign off: just "{sign_off_name}"
 
-Output ONLY the letter text. No subject lines. No "Here is the cover letter:" preamble. No notes after the sign-off.
-Start DIRECTLY with "Dear Hiring Manager," and end with the name."""
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────
-
-def _strip_preamble(text: str) -> str:
-    """Remove LLM preamble before 'Dear Hiring Manager,' if present.
-
-    Gemini and other models sometimes output "Here is the cover letter:" or
-    similar meta-commentary before the actual letter text. Strip everything
-    before the first occurrence of "Dear" so the validator's start-check passes.
-    """
-    dear_idx = text.lower().find("dear")
-    if dear_idx > 0:
-        return text[dear_idx:]
-    return text
+Output ONLY the letter. Start with "Dear Hiring Manager," end with the name."""
 
 
 # ── Core Generation ──────────────────────────────────────────────────────
 
 def generate_cover_letter(
-    resume_text: str, job: dict, profile: dict,
-    max_retries: int = 3, validation_mode: str = "normal",
+    resume_text: str, job: dict, profile: dict, max_retries: int = 3
 ) -> str:
     """Generate a cover letter with fresh context on each retry + auto-sanitize.
 
@@ -127,11 +114,10 @@ def generate_cover_letter(
     in the prompt, no conversation history stacking.
 
     Args:
-        resume_text:      The candidate's resume text (base or tailored).
-        job:              Job dict with title, site, location, full_description.
-        profile:          User profile dict.
-        max_retries:      Maximum retry attempts.
-        validation_mode:  "strict", "normal", or "lenient".
+        resume_text: The candidate's resume text (base or tailored).
+        job: Job dict with title, site, location, full_description.
+        profile: User profile dict.
+        max_retries: Maximum retry attempts.
 
     Returns:
         The cover letter text (best attempt even if validation failed).
@@ -167,14 +153,12 @@ def generate_cover_letter(
 
         letter = client.chat(messages, max_tokens=8192, temperature=0.7)
         letter = sanitize_text(letter)  # auto-fix em dashes, smart quotes
-        letter = _strip_preamble(letter)  # remove any "Here is the letter:" prefix
 
-        validation = validate_cover_letter(letter, mode=validation_mode)
+        validation = validate_cover_letter(letter)
         if validation["passed"]:
             return letter
 
         avoid_notes.extend(validation["errors"])
-        # Warnings never block — only hard errors trigger a retry
         log.debug(
             "Cover letter attempt %d/%d failed: %s",
             attempt + 1, max_retries + 1, validation["errors"],
@@ -185,14 +169,41 @@ def generate_cover_letter(
 
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
-def run_cover_letters(min_score: int = 7, limit: int = 20,
-                      validation_mode: str = "normal") -> dict:
+def _cover_one_job(job: dict, resume_text: str, profile: dict) -> dict:
+    """Generate cover letter for a single job. Safe to call from multiple threads."""
+    letter = generate_cover_letter(resume_text, job, profile)
+
+    safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "untitled")[:50].strip().replace(" ", "_")
+    safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
+    url_hash = hashlib.md5(job["url"].encode()).hexdigest()[:8]
+    prefix = f"{safe_site}_{safe_title}_{url_hash}"
+
+    cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
+    cl_path.write_text(letter, encoding="utf-8")
+
+    pdf_path = None
+    try:
+        from applypilot.scoring.pdf import convert_to_pdf
+        pdf_path = str(convert_to_pdf(cl_path))
+    except Exception:
+        log.debug("PDF generation failed for %s", cl_path, exc_info=True)
+
+    return {
+        "url": job["url"],
+        "path": str(cl_path),
+        "pdf_path": pdf_path,
+        "title": job["title"],
+        "site": job["site"],
+    }
+
+
+def run_cover_letters(min_score: int = 7, limit: int = 20, workers: int = 1) -> dict:
     """Generate cover letters for high-scoring jobs that have tailored resumes.
 
     Args:
-        min_score:       Minimum fit_score threshold.
-        limit:           Maximum jobs to process.
-        validation_mode: "strict", "normal", or "lenient".
+        min_score: Minimum fit_score threshold.
+        limit: Maximum jobs to process.
+        workers: Parallel LLM threads (default 1 = sequential).
 
     Returns:
         {"generated": int, "errors": int, "elapsed": float}
@@ -203,14 +214,21 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
 
     # Fetch jobs that have tailored resumes but no cover letter yet
     jobs = conn.execute(
-        "SELECT * FROM jobs "
-        "WHERE fit_score >= ? AND tailored_resume_path IS NOT NULL "
-        "AND full_description IS NOT NULL "
-        "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
-        "AND COALESCE(cover_attempts, 0) < ? "
-        "ORDER BY fit_score DESC LIMIT ?",
+        "SELECT * FROM ("
+        "    SELECT *, ROW_NUMBER() OVER ("
+        "        PARTITION BY COALESCE(site, 'unknown')"
+        "        ORDER BY discovered_at DESC"
+        "    ) AS _site_rank"
+        "    FROM jobs"
+        "    WHERE fit_score >= ? AND tailored_resume_path IS NOT NULL"
+        "    AND full_description IS NOT NULL"
+        "    AND (cover_letter_path IS NULL OR cover_letter_path = '')"
+        "    AND COALESCE(cover_attempts, 0) < ?"
+        ") ORDER BY fit_score DESC NULLS LAST, _site_rank ASC, discovered_at DESC"
+        " LIMIT ?",
         (min_score, MAX_ATTEMPTS, limit),
     ).fetchall()
+    conn.commit()  # Close read transaction before long LLM phase
 
     if not jobs:
         log.info("No jobs needing cover letters (score >= %d).", min_score)
@@ -223,79 +241,77 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
 
     COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
     log.info(
-        "Generating cover letters for %d jobs (score >= %d)...",
-        len(jobs), min_score,
+        "Generating cover letters for %d jobs (score >= %d, workers=%d)...",
+        len(jobs), min_score, workers,
     )
     t0 = time.time()
     completed = 0
     results: list[dict] = []
     error_count = 0
 
-    for job in jobs:
-        completed += 1
-        try:
-            letter = generate_cover_letter(resume_text, job, profile,
-                                          validation_mode=validation_mode)
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_cover_one_job, job, resume_text, profile): job for job in jobs}
+            for future in as_completed(futures):
+                job = futures[future]
+                completed += 1
+                try:
+                    result = future.result()
+                except Exception as e:
+                    result = {
+                        "url": job["url"], "title": job.get("title") or "", "site": job["site"],
+                        "path": None, "pdf_path": None, "error": str(e),
+                    }
+                    error_count += 1
+                    log.error("[ERROR] %s -- %s", (job.get("title") or "")[:40], e)
 
-            # Build safe filename prefix (include URL hash to avoid collisions)
-            import hashlib
-            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
-            safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
-            url_hash = hashlib.md5(job["url"].encode()).hexdigest()[:8]
-            prefix = f"{safe_site}_{safe_title}_{url_hash}"
-
-            cl_path = COVER_LETTER_DIR / f"{prefix}_CL.txt"
-            cl_path.write_text(letter, encoding="utf-8")
-
-            # Generate PDF (best-effort)
-            pdf_path = None
+                results.append(result)
+                elapsed = time.time() - t0
+                rate = completed / elapsed if elapsed > 0 else 0
+                status = "OK" if result.get("path") else "ERR"
+                log.info("%d/%d [%s] | %.1f jobs/min | %s", completed, len(jobs), status, rate * 60,
+                         (result.get("title") or "")[:40])
+    else:
+        for job in jobs:
+            completed += 1
             try:
-                from applypilot.scoring.pdf import convert_to_pdf
-                pdf_path = str(convert_to_pdf(cl_path))
-            except Exception:
-                log.debug("PDF generation failed for %s", cl_path, exc_info=True)
-
-            result = {
-                "url": job["url"],
-                "path": str(cl_path),
-                "pdf_path": pdf_path,
-                "title": job["title"],
-                "site": job["site"],
-            }
+                result = _cover_one_job(job, resume_text, profile)
+                elapsed = time.time() - t0
+                rate = completed / elapsed if elapsed > 0 else 0
+                log.info("%d/%d [OK] | %.1f jobs/min | %s", completed, len(jobs), rate * 60,
+                         (result.get("title") or "")[:40])
+            except Exception as e:
+                result = {
+                    "url": job["url"], "title": job.get("title") or "", "site": job["site"],
+                    "path": None, "pdf_path": None, "error": str(e),
+                }
+                error_count += 1
+                log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs),
+                          (job.get("title") or "")[:40], e)
             results.append(result)
-
-            elapsed = time.time() - t0
-            rate = completed / elapsed if elapsed > 0 else 0
-            log.info(
-                "%d/%d [OK] | %.1f jobs/min | %s",
-                completed, len(jobs), rate * 60, result["title"][:40],
-            )
-        except Exception as e:
-            result = {
-                "url": job["url"], "title": job["title"], "site": job["site"],
-                "path": None, "pdf_path": None, "error": str(e),
-            }
-            error_count += 1
-            results.append(result)
-            log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
 
     # Persist to DB: increment attempt counter for ALL, save path only for successes
     now = datetime.now(timezone.utc).isoformat()
-    saved = 0
-    for r in results:
-        if r.get("path"):
-            conn.execute(
-                "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
-                "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
-            )
-            saved += 1
-        else:
-            conn.execute(
-                "UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
-    conn.commit()
+    saved = sum(1 for r in results if r.get("path"))
+
+    def _flush_cover_results(conn, results, now):
+        for r in results:
+            if r.get("path"):
+                conn.execute(
+                    "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, "
+                    "cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
+                    (r["path"], now, r["url"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
+                    (r["url"],),
+                )
+
+    try:
+        write_with_retry(conn, _flush_cover_results, conn, results, now)
+    except Exception as flush_err:
+        log.exception("DB flush failed for cover letter batch: %s", flush_err)
 
     elapsed = time.time() - t0
     log.info("Cover letters done in %.1fs: %d generated, %d errors", elapsed, saved, error_count)

@@ -6,7 +6,7 @@ structured job listings from each top-level comment.
 Flow:
   1. Find the latest "Ask HN: Who is Hiring?" thread via HN Algolia API
   2. Fetch all top-level comment IDs from the HN Firebase API
-  3. Pre-filter comments by location keywords (from search config)
+  3. Pre-filter comments by location keywords (Remote / Seattle / etc.)
   4. Use LLM to extract structured fields from each matching comment
   5. Store results in the ApplyPilot jobs DB
 
@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 import httpx
 
 from applypilot import config
-from applypilot.database import get_connection, init_db
+from applypilot.database import commit_with_retry, init_db
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -207,7 +207,7 @@ def _store_hn_job(conn: sqlite3.Connection, job: dict, thread_title: str) -> boo
             (url, title, salary, description, location,
              f"HN: {company}", "hackernews", now, description, now),
         )
-        conn.commit()
+        commit_with_retry(conn)
         return True
     except sqlite3.IntegrityError:
         return False
@@ -222,7 +222,7 @@ def run_hn_discovery(
 
     Args:
         accept_keywords: Location keywords for pre-filtering comments.
-                         Defaults to Remote + locations from search config.
+                         Defaults to Remote + Seattle metro.
         max_comments: Max top-level comments to process (HN threads can
                       have 1000+; most relevant are in the first 500).
         delay: Seconds between HN API requests to be polite.
@@ -274,45 +274,49 @@ def run_hn_discovery(
             log.info("Progress: %d/%d comments | %d new, %d filtered, %d skipped",
                      i, len(kids), new, filtered, skipped)
 
-        comment = _fetch_item(kid_id)
-        if not comment:
+        try:
+            comment = _fetch_item(kid_id)
+            if not comment:
+                errors += 1
+                continue
+
+            text = comment.get("text") or ""
+            if not text or comment.get("dead") or comment.get("deleted"):
+                skipped += 1
+                continue
+
+            # Pre-filter by location keywords
+            if not _prefilter_comment(text, accept_keywords):
+                filtered += 1
+                continue
+
+            # LLM extraction
+            llm_calls += 1
+            job = _extract_job(text)
+
+            if not job or not isinstance(job, dict):
+                errors += 1
+                continue
+
+            if job.get("skip"):
+                skipped += 1
+                continue
+
+            if _store_hn_job(conn, job, thread_title):
+                new += 1
+                log.info("  + %s @ %s (%s)",
+                         job.get("title", "?")[:50],
+                         job.get("company", "?")[:30],
+                         job.get("location", "?")[:25])
+            else:
+                skipped += 1
+
+            # Polite delay between HN API calls
+            if delay > 0:
+                time.sleep(delay)
+        except Exception as e:
+            log.warning("Error processing HN comment %d: %s", kid_id, e)
             errors += 1
-            continue
-
-        text = comment.get("text", "")
-        if not text or comment.get("dead") or comment.get("deleted"):
-            skipped += 1
-            continue
-
-        # Pre-filter by location keywords
-        if not _prefilter_comment(text, accept_keywords):
-            filtered += 1
-            continue
-
-        # LLM extraction
-        llm_calls += 1
-        job = _extract_job(text)
-
-        if not job:
-            errors += 1
-            continue
-
-        if job.get("skip"):
-            skipped += 1
-            continue
-
-        if _store_hn_job(conn, job, thread_title):
-            new += 1
-            log.info("  + %s @ %s (%s)",
-                     job.get("title", "?")[:50],
-                     job.get("company", "?")[:30],
-                     job.get("location", "?")[:25])
-        else:
-            skipped += 1
-
-        # Polite delay between HN API calls
-        if delay > 0:
-            time.sleep(delay)
 
     log.info(
         "HN discovery complete: %d new | %d filtered | %d skipped | %d errors | %d LLM calls",

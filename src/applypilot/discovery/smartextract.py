@@ -20,17 +20,15 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import quote_plus
 
-import httpx
 import yaml
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 from applypilot import config
 from applypilot.config import CONFIG_DIR
-from applypilot.database import get_connection, init_db, store_jobs, get_stats
+from applypilot.database import init_db, get_stats
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -43,7 +41,13 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     except Exception:
         pass
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+def _get_ua() -> str:
+    """Build a realistic UA from the actual installed Chrome version."""
+    from applypilot.apply.chrome import _get_real_user_agent
+    return _get_real_user_agent()
+
+
+UA = _get_ua()
 
 
 # -- Location filtering -------------------------------------------------------
@@ -162,12 +166,15 @@ def collect_page_intelligence(url: str, headless: bool = True) -> dict:
                 pass
 
     with sync_playwright() as p:
+        from applypilot.enrichment.detail import _STEALTH_INIT_SCRIPT
         browser = p.chromium.launch(headless=headless)
-        page = browser.new_page(user_agent=UA)
+        context = browser.new_context(user_agent=UA)
+        context.add_init_script(_STEALTH_INIT_SCRIPT)
+        page = context.new_page()
         page.on("response", on_response)
 
         page.goto(url, timeout=60000)
-        page.wait_for_load_state("networkidle")
+        page.wait_for_load_state("networkidle", timeout=60000)
 
         intel["page_title"] = page.title()
 
@@ -383,6 +390,9 @@ def judge_api_responses(api_responses: list[dict]) -> list[dict]:
         else:
             fields = "no structured data"
 
+        # Strip non-printable / high-codepoint chars that trigger Gemini safety blocks
+        sample = "".join(c for c in sample if c.isprintable() and ord(c) < 0x10000)
+
         prompt = JUDGE_PROMPT.format(
             url=resp.get("url", "?")[:200],
             status=resp.get("status", "?"),
@@ -424,7 +434,7 @@ def format_strategy_briefing(intel: dict) -> str:
             sections.append(f"\nJSON-LD: {len(job_postings)} JobPosting entries found (usable!)")
             sections.append(f"First JobPosting:\n{json.dumps(job_postings[0], indent=2)[:3000]}")
         else:
-            sections.append(f"\nJSON-LD: NO JobPosting entries (json_ld strategy will NOT work)")
+            sections.append("\nJSON-LD: NO JobPosting entries (json_ld strategy will NOT work)")
         if other:
             types = [j.get("@type", "?") if isinstance(j, dict) else "?" for j in other]
             sections.append(f"Other JSON-LD types (NOT job data): {types}")
@@ -847,7 +857,7 @@ def execute_css_selectors(intel: dict) -> tuple[dict, list[dict]]:
 
 # -- Main per-site extraction ------------------------------------------------
 
-def _run_one_site(name: str, url: str) -> dict:
+def _run_one_site(name: str, url: str, no_headful: bool = False) -> dict:
     """Run full smart extraction pipeline on one site URL."""
     log.info("=" * 60)
     log.info("%s: %s", name, url)
@@ -855,7 +865,11 @@ def _run_one_site(name: str, url: str) -> dict:
     # Step 1: Collect intelligence
     log.info("[1] Collecting page intelligence...")
     t0 = time.time()
-    intel = collect_page_intelligence(url)
+    try:
+        intel = collect_page_intelligence(url)
+    except Exception as e:
+        log.error("Page intelligence collection failed (timeout or error): %s", e)
+        return {"name": name, "status": "ERROR", "error": str(e), "jobs": [], "total": 0, "titles": 0}
     collect_time = time.time() - t0
     log.info("Done in %.1fs | JSON-LD: %d | API: %d | testids: %d | cards: %d",
              collect_time, len(intel["json_ld"]), len(intel["api_responses"]),
@@ -867,9 +881,12 @@ def _run_one_site(name: str, url: str) -> dict:
     _captcha_signals = ["captcha", "are you a human", "verify you", "unusual requests",
                         "access denied", "please verify", "bot detection"]
     _is_captcha = any(s in full_html.lower() for s in _captcha_signals) if full_html else False
-    if len(cleaned_check) < 5000 and full_html and not _is_captcha:
+    if len(cleaned_check) < 5000 and full_html and not _is_captcha and not no_headful:
         log.info("Cleaned HTML only %s chars -- retrying headful...", f"{len(cleaned_check):,}")
-        intel = collect_page_intelligence(url, headless=False)
+        try:
+            intel = collect_page_intelligence(url, headless=False)
+        except Exception as e:
+            log.warning("Headful retry failed: %s", e)
         collect_time = time.time() - t0
         log.info("Headful done in %.1fs | JSON-LD: %d | API: %d",
                  collect_time, len(intel["json_ld"]), len(intel["api_responses"]))
@@ -987,6 +1004,7 @@ def build_scrape_targets(
         site_name = site.get("name", "Unknown")
         site_type = site.get("type", "static")
 
+        no_headful = site.get("no_headful", False)
         if site_type == "search" and queries:
             for query in queries:
                 expanded_url = site_url
@@ -997,6 +1015,7 @@ def build_scrape_targets(
                     "name": site_name,
                     "url": expanded_url,
                     "query": query,
+                    "no_headful": no_headful,
                 })
         else:
             expanded_url = site_url
@@ -1005,6 +1024,7 @@ def build_scrape_targets(
                 "name": site_name,
                 "url": expanded_url,
                 "query": None,
+                "no_headful": no_headful,
             })
 
     return targets
@@ -1047,7 +1067,8 @@ def _run_all(
         # Parallel mode
         with ThreadPoolExecutor(max_workers=min(workers, len(targets))) as pool:
             future_to_target = {
-                pool.submit(_run_one_site, target["name"], target["url"]): target
+                pool.submit(_run_one_site, target["name"], target["url"],
+                            target.get("no_headful", False)): target
                 for target in targets
             }
             for future in as_completed(future_to_target):
@@ -1063,7 +1084,7 @@ def _run_all(
                 label = f"{target['name']} [{target['query']}]"
             log.info("[%d/%d] %s", i + 1, len(targets), label)
 
-            r = _run_one_site(target["name"], target["url"])
+            r = _run_one_site(target["name"], target["url"], target.get("no_headful", False))
             results.append(r)
             _process_result(r, target)
 

@@ -22,6 +22,16 @@ tmp_*
 # Playwright MCP
 .playwright-mcp/
 
+# direnv (per-machine venv activation)
+.envrc
+.direnv/
+
+# Node
+node_modules/
+
+# Python venv
+.venv/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -43,3 +53,5 @@ Thumbs.db
 
 # Claude Code
 .claude/
+# CLAUDE.md is machine/user-specific — copy CLAUDE.md.example to customize
+CLAUDE.md

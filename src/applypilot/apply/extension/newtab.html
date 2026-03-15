@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ApplyPilot</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+    }
+    .card {
+      background: #1a1a2e;
+      border: 1px solid #2d2d4e;
+      border-radius: 12px;
+      padding: 32px 40px;
+      width: 480px;
+      max-width: 90vw;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .logo { font-size: 20px; font-weight: 700; color: #818cf8; }
+    .wid-badge {
+      font-size: 12px; font-weight: 700;
+      padding: 3px 8px; border-radius: 4px;
+      background: #eab308; color: #000;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .status-dot {
+      width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+    }
+    .dot-green  { background: #22c55e; animation: pulse 2s infinite; }
+    .dot-yellow { background: #eab308; }
+    .dot-purple { background: #a855f7; animation: pulse 1s infinite; }
+    .dot-gray   { background: #475569; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.35; }
+    }
+    .status-label {
+      font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .c-green  { color: #22c55e; }
+    .c-yellow { color: #eab308; }
+    .c-purple { color: #c084fc; }
+    .c-gray   { color: #64748b; }
+    .job-title {
+      font-size: 22px; font-weight: 700; line-height: 1.3;
+      margin-bottom: 6px; color: #f1f5f9;
+    }
+    .job-meta {
+      font-size: 13px; color: #64748b; margin-bottom: 20px;
+    }
+    .score-badge {
+      display: inline-block;
+      font-size: 12px; font-weight: 700;
+      padding: 2px 8px; border-radius: 10px;
+      background: #1e3a5f; color: #60a5fa;
+      margin-left: 8px;
+    }
+    .instructions {
+      background: #0f172a;
+      border: 1px solid #2d2d4e;
+      border-radius: 8px;
+      padding: 12px 16px;
+      font-size: 12px;
+      color: #94a3b8;
+      line-height: 1.6;
+      white-space: pre-wrap;
+    }
+    .instructions-label {
+      font-size: 11px; font-weight: 600;
+      color: #c084fc; text-transform: uppercase;
+      letter-spacing: 0.5px; margin-bottom: 8px;
+    }
+    .offline {
+      text-align: center;
+      color: #475569;
+      font-size: 14px;
+      padding: 20px 0;
+    }
+    .hint {
+      margin-top: 20px;
+      font-size: 11px;
+      color: #334155;
+      text-align: center;
+    }
+    .updated {
+      font-size: 10px; color: #334155;
+      text-align: right; margin-top: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card" id="card">
+    <div class="offline">Loading…</div>
+  </div>
+
+  <script src="config.js"></script>
+  <script>
+    const wid  = (typeof WORKER_CONFIG !== 'undefined' && WORKER_CONFIG.workerId !== null)
+                 ? WORKER_CONFIG.workerId : null;
+    const port = (typeof WORKER_CONFIG !== 'undefined')
+                 ? WORKER_CONFIG.serverPort : 7380;
+
+    function esc(s) {
+      return String(s || '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+
+    function render(data) {
+      const card  = document.getElementById('card');
+      const s     = data ? data.status : null;
+      const now   = new Date().toLocaleTimeString();
+
+      if (!data) {
+        card.innerHTML = `
+          <div class="header">
+            <span class="logo">ApplyPilot</span>
+            ${wid !== null ? `<span class="wid-badge">W${wid}</span>` : ''}
+          </div>
+          <div class="offline">Worker offline — waiting for <code>applypilot apply</code></div>
+          <div class="hint">Updated ${now}</div>`;
+        return;
+      }
+
+      let dotClass, statusText, statusClass;
+      if (s === 'applying') {
+        dotClass = 'dot-green';  statusText = 'Applying';            statusClass = 'c-green';
+      } else if (s === 'paused_by_user') {
+        dotClass = 'dot-yellow'; statusText = 'You Have Control';    statusClass = 'c-yellow';
+      } else if (s === 'waiting_human' || s === 'needs_human') {
+        dotClass = 'dot-purple'; statusText = 'Human Review Needed'; statusClass = 'c-purple';
+      } else {
+        dotClass = 'dot-gray';   statusText = s || 'Idle';           statusClass = 'c-gray';
+      }
+
+      const scoreHtml = data.score
+        ? `<span class="score-badge">${data.score}/10</span>` : '';
+      const metaParts = [data.jobCompany, data.jobSite].filter(Boolean);
+      const instr     = data.instructions;
+      const instrHtml = instr ? `
+        <div class="instructions-label">${esc(data.reason || 'Instructions')}</div>
+        <div class="instructions">${esc(instr)}</div>` : '';
+
+      card.innerHTML = `
+        <div class="header">
+          <span class="logo">ApplyPilot</span>
+          ${wid !== null ? `<span class="wid-badge">W${wid}</span>` : ''}
+        </div>
+        <div class="status-row">
+          <div class="status-dot ${dotClass}"></div>
+          <span class="status-label ${statusClass}">${esc(statusText)}</span>
+        </div>
+        <div class="job-title">${esc(data.jobTitle || '—')}${scoreHtml}</div>
+        <div class="job-meta">${metaParts.map(esc).join(' · ')}</div>
+        ${instrHtml}
+        <div class="updated">Updated ${now}</div>`;
+    }
+
+    async function refresh() {
+      try {
+        const resp = await fetch(`http://localhost:${port}/api/status`,
+                                 { signal: AbortSignal.timeout(2000) });
+        render(resp.ok ? await resp.json() : null);
+      } catch {
+        render(null);
+      }
+    }
+
+    refresh();
+    setInterval(refresh, 5000);
+  </script>
+</body>
+</html>

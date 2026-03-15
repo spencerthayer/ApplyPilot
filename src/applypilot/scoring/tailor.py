@@ -9,22 +9,20 @@ is always code-injected, never LLM-generated. Each retry starts a fresh conversa
 to avoid apologetic spirals.
 """
 
+import hashlib
 import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from pathlib import Path
 
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.database import get_connection, get_jobs_by_stage, write_with_retry
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
-    BANNED_WORDS,
-    FABRICATION_WATCHLIST,
     sanitize_text,
     validate_json_fields,
-    validate_tailored_resume,
 )
 
 log = logging.getLogger(__name__)
@@ -58,12 +56,8 @@ def _build_tailor_prompt(profile: dict) -> str:
     real_metrics = resume_facts.get("real_metrics", [])
 
     companies_str = ", ".join(companies) if companies else "N/A"
-    projects_str = ", ".join(projects) if projects else "N/A"
+    _projects_str = ", ".join(projects) if projects else "N/A"
     metrics_str = ", ".join(real_metrics) if real_metrics else "N/A"
-
-    # Include ALL banned words from the validator so the LLM knows exactly
-    # what will be rejected — the validator checks for these automatically.
-    banned_str = ", ".join(BANNED_WORDS)
 
     education = profile.get("experience", {})
     education_level = education.get("education_level", "")
@@ -101,8 +95,7 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 - Write like a real engineer. Short, direct.
 - GOOD: "Automated financial reporting with Python + API integrations, cut processing time from 10 hours to 2"
 - BAD: "Leveraged cutting-edge AI technologies to drive transformative operational efficiencies"
-- BANNED WORDS (using ANY of these = validation failure — do not use them even once):
-  {banned_str}
+- NEVER use: passionate, dedicated, leveraging, spearheaded, robust, cutting-edge, proven track record, strong track record, eager, stakeholders, synergy, seamless, streamlined, end-to-end, detail-oriented, results-driven, I am confident, I believe, I am excited
 - No em dashes. Use commas, periods, or hyphens.
 
 ## HARD RULES:
@@ -345,8 +338,7 @@ def judge_tailored_resume(
 # ── Core Tailoring ───────────────────────────────────────────────────────
 
 def tailor_resume(
-    resume_text: str, job: dict, profile: dict,
-    max_retries: int = 2, validation_mode: str = "normal",
+    resume_text: str, job: dict, profile: dict, max_retries: int = 2
 ) -> tuple[str, dict]:
     """Generate a tailored resume via JSON output + fresh context on each retry.
 
@@ -359,14 +351,10 @@ def tailor_resume(
     - Final attempt accepts validation-passing resumes even if judge disagrees
 
     Args:
-        resume_text:      Base resume text.
-        job:              Job dict with title, site, location, full_description.
-        profile:          User profile dict.
-        max_retries:      Maximum retry attempts.
-        validation_mode:  "strict", "normal", or "lenient".
-                          strict  -- banned words trigger retries; judge must pass
-                          normal  -- banned words = warnings only; judge can fail on last retry
-                          lenient -- banned words ignored; LLM judge skipped
+        resume_text: Base resume text.
+        job: Job dict with title, site, location, full_description.
+        profile: User profile dict.
+        max_retries: Maximum retry attempts.
 
     Returns:
         (tailored_text, report) where report contains validation details.
@@ -378,10 +366,7 @@ def tailor_resume(
         f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
     )
 
-    report: dict = {
-        "attempts": 0, "validator": None, "judge": None,
-        "status": "pending", "validation_mode": validation_mode,
-    }
+    report: dict = {"attempts": 0, "validator": None, "judge": None, "status": "pending"}
     avoid_notes: list[str] = []
     tailored = ""
     client = get_client(quality=True)
@@ -412,15 +397,14 @@ def tailor_resume(
             continue
 
         # Layer 1: Validate JSON fields
-        validation = validate_json_fields(data, profile, mode=validation_mode)
+        validation = validate_json_fields(data, profile)
         report["validator"] = validation
 
         if not validation["passed"]:
-            # Only retry if there are hard errors (warnings never block)
             avoid_notes.extend(validation["errors"])
             if attempt < max_retries:
                 continue
-            # Last attempt — assemble whatever we got
+            # Last attempt -- assemble whatever we got
             tailored = assemble_resume_text(data, profile)
             report["status"] = "failed_validation"
             return tailored, report
@@ -428,15 +412,9 @@ def tailor_resume(
         # Assemble text (header injected by code, em dashes auto-fixed)
         tailored = assemble_resume_text(data, profile)
 
-        # Layer 2: LLM judge — skip on first clean pass to save an LLM call,
-        # and skip entirely in lenient mode
+        # Layer 2: LLM judge — skip on first clean pass to save an LLM call
         is_clean = not validation.get("warnings")
         is_last = attempt >= max_retries
-
-        if validation_mode == "lenient":
-            report["judge"] = {"verdict": "SKIPPED", "passed": True, "issues": "none"}
-            report["status"] = "approved"
-            return tailored, report
 
         if attempt == 0 and is_clean:
             # First attempt with zero warnings — trust programmatic validation
@@ -444,7 +422,6 @@ def tailor_resume(
             report["judge"] = {"passed": True, "verdict": "SKIP", "issues": "none", "raw": "skipped (clean first pass)"}
             report["status"] = "approved"
             return tailored, report
-
 
         judge = judge_tailored_resume(resume_text, tailored, job.get("title", ""), profile)
         report["judge"] = judge
@@ -455,7 +432,7 @@ def tailor_resume(
                 # Final attempt: accept if validation passed (judge is advisory)
                 log.warning("Judge failed on final attempt for %s, accepting anyway (validation passed)",
                            job.get("title", "")[:40])
-                report["status"] = "approved_with_judge_warning"
+                report["status"] = "approved"
                 return tailored, report
             continue
 
@@ -469,14 +446,58 @@ def tailor_resume(
 
 # ── Batch Entry Point ────────────────────────────────────────────────────
 
-def run_tailoring(min_score: int = 7, limit: int = 20,
-                  validation_mode: str = "normal") -> dict:
+def _tailor_one_job(job: dict, resume_text: str, profile: dict) -> dict:
+    """Tailor resume for a single job. Safe to call from multiple threads."""
+    tailored, report = tailor_resume(resume_text, job, profile)
+
+    safe_title = re.sub(r"[^\w\s-]", "", job.get("title") or "untitled")[:50].strip().replace(" ", "_")
+    safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
+    url_hash = hashlib.md5(job["url"].encode()).hexdigest()[:8]
+    prefix = f"{safe_site}_{safe_title}_{url_hash}"
+
+    txt_path = TAILORED_DIR / f"{prefix}.txt"
+    txt_path.write_text(tailored, encoding="utf-8")
+
+    job_path = TAILORED_DIR / f"{prefix}_JOB.txt"
+    job_desc = (
+        f"Title: {job['title']}\n"
+        f"Company: {job['site']}\n"
+        f"Location: {job.get('location', 'N/A')}\n"
+        f"Score: {job.get('fit_score', 'N/A')}\n"
+        f"URL: {job['url']}\n\n"
+        f"{job.get('full_description', '')}"
+    )
+    job_path.write_text(job_desc, encoding="utf-8")
+
+    report_path = TAILORED_DIR / f"{prefix}_REPORT.json"
+    report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    pdf_path = None
+    if report["status"] == "approved":
+        try:
+            from applypilot.scoring.pdf import convert_to_pdf
+            pdf_path = str(convert_to_pdf(txt_path))
+        except Exception:
+            log.debug("PDF generation failed for %s", txt_path, exc_info=True)
+
+    return {
+        "url": job["url"],
+        "path": str(txt_path),
+        "pdf_path": pdf_path,
+        "title": job["title"],
+        "site": job["site"],
+        "status": report["status"],
+        "attempts": report["attempts"],
+    }
+
+
+def run_tailoring(min_score: int = 7, limit: int = 20, workers: int = 1) -> dict:
     """Generate tailored resumes for high-scoring jobs.
 
     Args:
-        min_score:       Minimum fit_score to tailor for.
-        limit:           Maximum jobs to process.
-        validation_mode: "strict", "normal", or "lenient".
+        min_score: Minimum fit_score to tailor for.
+        limit: Maximum jobs to process.
+        workers: Parallel LLM threads (default 1 = sequential).
 
     Returns:
         {"approved": int, "failed": int, "errors": int, "elapsed": float}
@@ -486,107 +507,89 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
     conn = get_connection()
 
     jobs = get_jobs_by_stage(conn=conn, stage="pending_tailor", min_score=min_score, limit=limit)
+    conn.commit()  # Close read transaction before long LLM phase
 
     if not jobs:
         log.info("No untailored jobs with score >= %d.", min_score)
         return {"approved": 0, "failed": 0, "errors": 0, "elapsed": 0.0}
 
     TAILORED_DIR.mkdir(parents=True, exist_ok=True)
-    log.info("Tailoring resumes for %d jobs (score >= %d)...", len(jobs), min_score)
+    log.info("Tailoring resumes for %d jobs (score >= %d, workers=%d)...", len(jobs), min_score, workers)
     t0 = time.time()
     completed = 0
     results: list[dict] = []
     stats: dict[str, int] = {"approved": 0, "failed_validation": 0, "failed_judge": 0, "error": 0}
 
-    for job in jobs:
-        completed += 1
-        try:
-            tailored, report = tailor_resume(resume_text, job, profile,
-                                             validation_mode=validation_mode)
-
-            # Build safe filename prefix (include URL hash to avoid collisions)
-            import hashlib
-            safe_title = re.sub(r"[^\w\s-]", "", job["title"])[:50].strip().replace(" ", "_")
-            safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
-            url_hash = hashlib.md5(job["url"].encode()).hexdigest()[:8]
-            prefix = f"{safe_site}_{safe_title}_{url_hash}"
-
-            # Save tailored resume text
-            txt_path = TAILORED_DIR / f"{prefix}.txt"
-            txt_path.write_text(tailored, encoding="utf-8")
-
-            # Save job description for traceability
-            job_path = TAILORED_DIR / f"{prefix}_JOB.txt"
-            job_desc = (
-                f"Title: {job['title']}\n"
-                f"Company: {job['site']}\n"
-                f"Location: {job.get('location', 'N/A')}\n"
-                f"Score: {job.get('fit_score', 'N/A')}\n"
-                f"URL: {job['url']}\n\n"
-                f"{job.get('full_description', '')}"
-            )
-            job_path.write_text(job_desc, encoding="utf-8")
-
-            # Save validation report
-            report_path = TAILORED_DIR / f"{prefix}_REPORT.json"
-            report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-
-            # Generate PDF for approved resumes (best-effort)
-            # "approved_with_judge_warning" is also a success — resume was generated.
-            pdf_path = None
-            if report["status"] in ("approved", "approved_with_judge_warning"):
+    if workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_tailor_one_job, job, resume_text, profile): job for job in jobs}
+            for future in as_completed(futures):
+                job = futures[future]
+                completed += 1
                 try:
-                    from applypilot.scoring.pdf import convert_to_pdf
-                    pdf_path = str(convert_to_pdf(txt_path))
-                except Exception:
-                    log.debug("PDF generation failed for %s", txt_path, exc_info=True)
+                    result = future.result()
+                except Exception as e:
+                    result = {
+                        "url": job["url"], "title": job["title"], "site": job["site"],
+                        "status": "error", "attempts": 0, "path": None, "pdf_path": None,
+                    }
+                    log.error("[ERROR] %s -- %s", (job.get("title") or "")[:40], e)
 
-            result = {
-                "url": job["url"],
-                "path": str(txt_path),
-                "pdf_path": pdf_path,
-                "title": job["title"],
-                "site": job["site"],
-                "status": report["status"],
-                "attempts": report["attempts"],
-            }
-        except Exception as e:
-            result = {
-                "url": job["url"], "title": job["title"], "site": job["site"],
-                "status": "error", "attempts": 0, "path": None, "pdf_path": None,
-            }
-            log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs), job["title"][:40], e)
+                results.append(result)
+                stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
+                elapsed = time.time() - t0
+                rate = completed / elapsed if elapsed > 0 else 0
+                log.info(
+                    "%d/%d [%s] attempts=%s | %.1f jobs/min | %s",
+                    completed, len(jobs), result["status"].upper(),
+                    result.get("attempts", "?"), rate * 60,
+                    (result.get("title") or "")[:40],
+                )
+    else:
+        for job in jobs:
+            completed += 1
+            try:
+                result = _tailor_one_job(job, resume_text, profile)
+            except Exception as e:
+                result = {
+                    "url": job["url"], "title": job.get("title") or "", "site": job["site"],
+                    "status": "error", "attempts": 0, "path": None, "pdf_path": None,
+                }
+                log.error("%d/%d [ERROR] %s -- %s", completed, len(jobs),
+                          (job.get("title") or "")[:40], e)
 
-        results.append(result)
-        stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
-
-        elapsed = time.time() - t0
-        rate = completed / elapsed if elapsed > 0 else 0
-        log.info(
-            "%d/%d [%s] attempts=%s | %.1f jobs/min | %s",
-            completed, len(jobs),
-            result["status"].upper(),
-            result.get("attempts", "?"),
-            rate * 60,
-            result["title"][:40],
-        )
+            results.append(result)
+            stats[result.get("status", "error")] = stats.get(result.get("status", "error"), 0) + 1
+            elapsed = time.time() - t0
+            rate = completed / elapsed if elapsed > 0 else 0
+            log.info(
+                "%d/%d [%s] attempts=%s | %.1f jobs/min | %s",
+                completed, len(jobs), result["status"].upper(),
+                result.get("attempts", "?"), rate * 60,
+                (result.get("title") or "")[:40],
+            )
 
     # Persist to DB: increment attempt counter for ALL, save path only for approved
     now = datetime.now(timezone.utc).isoformat()
-    _success_statuses = {"approved", "approved_with_judge_warning"}
-    for r in results:
-        if r["status"] in _success_statuses:
-            conn.execute(
-                "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
-                "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["path"], now, r["url"]),
-            )
-        else:
-            conn.execute(
-                "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                (r["url"],),
-            )
-    conn.commit()
+
+    def _flush_tailor_results(conn, results, now):
+        for r in results:
+            if r["status"] == "approved":
+                conn.execute(
+                    "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, "
+                    "tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                    (r["path"], now, r["url"]),
+                )
+            else:
+                conn.execute(
+                    "UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
+                    (r["url"],),
+                )
+
+    try:
+        write_with_retry(conn, _flush_tailor_results, conn, results, now)
+    except Exception as flush_err:
+        log.exception("DB flush failed for tailor batch: %s", flush_err)
 
     elapsed = time.time() - t0
     log.info(

@@ -14,8 +14,43 @@ from datetime import datetime, timezone
 
 from jobspy import scrape_jobs
 
+# Patch TLSRotating to always specify a client_identifier.
+# Without one, the tls-client Go binary receives a nil JA3 string and panics
+# (SIGABRT), killing the process. A named profile avoids the crash.
+try:
+    import tls_client
+
+    _orig_tls_init = tls_client.Session.__init__
+
+    def _safe_tls_init(self, *args, **kwargs):
+        if not kwargs.get("client_identifier") and not kwargs.get("ja3_string"):
+            kwargs["client_identifier"] = "chrome_120"
+        _orig_tls_init(self, *args, **kwargs)
+
+    tls_client.Session.__init__ = _safe_tls_init
+except Exception:
+    pass  # If tls_client isn't available, jobspy will use regular requests
+
+# Patch Country.from_string to return WORLDWIDE for unsupported country strings
+# (e.g. "sri lanka") instead of raising ValueError that kills the entire scrape.
+try:
+    from jobspy.model import Country as _Country
+
+    _orig_country_from_string = _Country.from_string.__func__
+
+    @classmethod  # type: ignore[misc]
+    def _safe_country_from_string(cls, country_str: str):
+        try:
+            return _orig_country_from_string(cls, country_str)
+        except ValueError:
+            return cls.WORLDWIDE
+
+    _Country.from_string = _safe_country_from_string
+except Exception:
+    pass  # If patching fails, fall back to original behavior
+
 from applypilot import config
-from applypilot.database import get_connection, init_db, store_jobs
+from applypilot.database import commit_with_retry, get_connection, init_db
 
 log = logging.getLogger(__name__)
 
@@ -129,7 +164,7 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
             continue
 
         title = str(row.get("title", "")) if str(row.get("title", "")) != "nan" else None
-        company = str(row.get("company", "")) if str(row.get("company", "")) != "nan" else None
+        _company = str(row.get("company", "")) if str(row.get("company", "")) != "nan" else None
         location_str = str(row.get("location", "")) if str(row.get("location", "")) != "nan" else None
 
         # Build salary string from min/max
@@ -178,7 +213,7 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
         except sqlite3.IntegrityError:
             existing += 1
 
-    conn.commit()
+    commit_with_retry(conn)
     return new, existing
 
 
@@ -205,7 +240,12 @@ def _run_one_search(
     # Split sites: Glassdoor needs simplified location, others use original
     gd_location = glassdoor_map.get(s["location"], s["location"].split(",")[0])
     has_glassdoor = "glassdoor" in sites
-    other_sites = [si for si in sites if si != "glassdoor"]
+    # Indeed auto-detects country from IP for remote searches, causing failures
+    # when the network exits through a non-USA IP. Skip Indeed for remote-only.
+    effective_sites = [si for si in sites if si != "glassdoor"]
+    if s.get("remote") and "indeed" in effective_sites:
+        effective_sites = [si for si in effective_sites if si != "indeed"]
+    other_sites = effective_sites
 
     all_dfs = []
 
@@ -218,9 +258,13 @@ def _run_one_search(
             "results_wanted": results_per_site,
             "hours_old": hours_old,
             "description_format": "markdown",
-            "country_indeed": defaults.get("country_indeed", "usa"),
             "verbose": 0,
         }
+        # Only pass country_indeed when Indeed is actually in the site list;
+        # jobspy validates this param even if Indeed isn't being used, and
+        # may auto-detect a non-US country from the exit IP causing failures.
+        if "indeed" in other_sites:
+            kwargs["country_indeed"] = defaults.get("country_indeed", "usa")
         if s.get("remote"):
             kwargs["is_remote"] = True
         if proxy_config:
@@ -440,7 +484,7 @@ def _full_crawl(
 
 # -- Public entry point ------------------------------------------------------
 
-def run_discovery(cfg: dict | None = None) -> dict:
+def run_discovery(cfg: dict | None = None, sites_override: list[str] | None = None) -> dict:
     """Main entry point for JobSpy-based job discovery.
 
     Loads search queries and locations from the user's search config YAML,
@@ -449,6 +493,8 @@ def run_discovery(cfg: dict | None = None) -> dict:
     Args:
         cfg: Override the search configuration dict. If None, loads from
              the user's searches.yaml file.
+        sites_override: If provided, use these sites instead of the config's
+             sites key. Used to run a specific board (e.g. ["dice"]).
 
     Returns:
         Dict with stats: new, existing, errors, db_total, queries.
@@ -461,7 +507,7 @@ def run_discovery(cfg: dict | None = None) -> dict:
         return {"new": 0, "existing": 0, "errors": 0, "db_total": 0, "queries": 0}
 
     proxy = cfg.get("proxy")
-    sites = cfg.get("sites")
+    sites = sites_override or cfg.get("sites")
     results_per_site = cfg.get("defaults", {}).get("results_per_site", 100)
     hours_old = cfg.get("defaults", {}).get("hours_old", 72)
     tiers = cfg.get("tiers")

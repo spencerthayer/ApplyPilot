@@ -26,16 +26,6 @@ from applypilot.database import get_connection, get_stats
 
 console = Console()
 
-# Permanent apply failures — jobs that will never succeed
-PERMANENT_FAILURES = {
-    "expired", "captcha", "login_issue",
-    "not_eligible_location", "not_eligible_salary",
-    "already_applied", "account_required",
-    "not_a_job_application", "unsafe_permissions",
-    "unsafe_verification", "sso_required",
-    "site_blocked", "cloudflare_blocked", "blocked_by_cloudflare",
-}
-
 # Stage definitions: (label, bg_color, text_color)
 STAGE_META = {
     "discovered":    ("Discovered",    "#64748b", "#e2e8f0"),
@@ -46,9 +36,36 @@ STAGE_META = {
     "tailor_failed": ("Tailor Failed", "#ef4444", "#fecaca"),
     "tailored":      ("Tailored",      "#14b8a6", "#ccfbf1"),
     "cover_ready":   ("Cover Ready",   "#06b6d4", "#cffafe"),
+    "needs_human":   ("Needs Human",   "#7c3aed", "#ede9fe"),
     "applied":       ("Applied",       "#10b981", "#d1fae5"),
+    # Apply category stages
+    "blocked_auth":         ("Auth Barrier",      "#f59e0b", "#fef3c7"),
+    "blocked_technical":    ("Technical Issue",   "#f97316", "#ffedd5"),
+    "archived_ineligible":  ("Ineligible",        "#6b7280", "#e5e7eb"),
+    "archived_expired":     ("Expired",           "#6b7280", "#e5e7eb"),
+    "archived_platform":    ("Platform Blocked",  "#ef4444", "#fecaca"),
+    "archived_no_url":      ("No URL",            "#6b7280", "#e5e7eb"),
+    "manual_only":          ("Manual Only",       "#64748b", "#e2e8f0"),
+    # Legacy stages (kept for backward compat until all rows have apply_category)
     "apply_failed":  ("Apply Failed",  "#ef4444", "#fecaca"),
     "apply_retry":   ("Retry Apply",   "#f97316", "#ffedd5"),
+    # Tracking stages
+    "track_confirmation": ("Confirmation", "#10b981", "#d1fae5"),
+    "track_rejection":    ("Rejected",     "#ef4444", "#fecaca"),
+    "track_interview":    ("Interview",    "#a855f7", "#f3e8ff"),
+    "track_follow_up":    ("Follow-Up",    "#f59e0b", "#fef3c7"),
+    "track_offer":        ("Offer",        "#14b8a6", "#ccfbf1"),
+    "track_ghosted":      ("Ghosted",      "#64748b", "#e2e8f0"),
+}
+
+# Archived categories go to the archive tab
+_ARCHIVED_CATEGORIES = {
+    "archived_ineligible", "archived_expired", "archived_platform", "archived_no_url",
+}
+
+# Blocked categories stay in active (retryable)
+_BLOCKED_CATEGORIES = {
+    "blocked_auth", "blocked_technical",
 }
 
 # Apply error human-readable descriptions
@@ -78,18 +95,44 @@ _APPLY_ERROR_LABELS = {
 def _classify_job(row) -> tuple[str, str]:
     """Classify a job into its pipeline stage and tab.
 
+    Uses apply_category when available for precise classification of
+    apply outcomes. Falls back to legacy error-based logic for rows
+    that haven't been backfilled yet.
+
     Returns:
-        (stage, tab) where tab is 'active', 'archive', or 'applied'.
+        (stage, tab) where tab is 'active', 'archive', 'applied', or 'tracking'.
     """
+    # Check apply_category first (set by mark_result / backfill_categories)
+    category = _safe_get(row, "apply_category")
+
+    if row["apply_status"] == "needs_human":
+        return "needs_human", "active"
     if row["applied_at"] and row["apply_status"] == "applied":
+        # Jobs with tracking status move to the tracking tab
+        try:
+            tracking_status = row["tracking_status"]
+        except (IndexError, KeyError):
+            tracking_status = None
+        if tracking_status:
+            stage = f"track_{tracking_status}"
+            if stage in STAGE_META:
+                return stage, "tracking"
+            return "applied", "tracking"
         return "applied", "applied"
-    if row["apply_error"]:
-        if row["apply_error"] in PERMANENT_FAILURES:
-            return "apply_failed", "archive"
-        return "apply_retry", "active"
-    if row["cover_letter_path"]:
+
+    # Use category-based classification for apply outcomes
+    if category:
+        if category in _ARCHIVED_CATEGORIES:
+            return category, "archive"
+        if category in _BLOCKED_CATEGORIES:
+            return category, "active"
+        if category == "manual_only":
+            return "manual_only", "archive"
+
+    # Pre-apply pipeline stages (no category set)
+    if row["cover_letter_path"] and not row["apply_error"]:
         return "cover_ready", "active"
-    if row["tailored_resume_path"]:
+    if row["tailored_resume_path"] and not row["apply_error"]:
         return "tailored", "active"
     if (row["tailor_attempts"] or 0) >= 5 and not row["tailored_resume_path"]:
         return "tailor_failed", "archive"
@@ -273,6 +316,12 @@ def _build_apply_summary(row) -> str:
         status = row["apply_status"]
         if status == "applied":
             parts.append('<span class="apply-stat success">Applied</span>')
+        elif status == "needs_human":
+            reason = _safe_get(row, "needs_human_reason", "")
+            parts.append(
+                f'<span class="apply-stat" style="background:#4c1d9533;color:#c4b5fd">'
+                f'Needs Human: {escape(reason)}</span>'
+            )
         elif status == "failed":
             err = row["apply_error"] or "unknown"
             err_label = _APPLY_ERROR_LABELS.get(err, err)
@@ -292,6 +341,56 @@ def _build_apply_summary(row) -> str:
     if not parts:
         return ""
     return '<div class="apply-summary">' + " ".join(parts) + "</div>"
+
+
+def _safe_get(row, key, default=None):
+    """Safely get a value from a sqlite3.Row or dict."""
+    try:
+        val = row[key]
+        return val if val is not None else default
+    except (IndexError, KeyError):
+        return default
+
+
+def _build_tracking_html(row) -> str:
+    """Build tracking info HTML for a job card (status, next action, contacts)."""
+    parts = []
+    tracking_status = _safe_get(row, "tracking_status")
+    if not tracking_status:
+        return ""
+
+    # Next action
+    next_action = _safe_get(row, "next_action")
+    if next_action:
+        due = _safe_get(row, "next_action_due", "")
+        due_html = f' <span class="tracking-due">(due: {escape(due)})</span>' if due else ""
+        parts.append(
+            f'<div class="tracking-action">'
+            f'<span class="tracking-action-label">Next:</span> {escape(next_action)}{due_html}'
+            f'</div>'
+        )
+
+    # Last email
+    last_email = _safe_get(row, "last_email_at")
+    if last_email:
+        parts.append(
+            f'<div class="tracking-detail">'
+            f'Last email: {_fmt_ts(last_email)}'
+            f'</div>'
+        )
+
+    # Link to tracking doc
+    doc_path = _safe_get(row, "tracking_doc_path")
+    if doc_path:
+        parts.append(
+            f'<div class="tracking-detail">'
+            f'<a href="file:///{escape(doc_path)}" class="tracking-doc-link" target="_blank">View Tracking Doc</a>'
+            f'</div>'
+        )
+
+    if not parts:
+        return ""
+    return '<div class="tracking-info">' + "".join(parts) + "</div>"
 
 
 def generate_dashboard(output_path: str | None = None) -> str:
@@ -317,13 +416,17 @@ def generate_dashboard(output_path: str | None = None) -> str:
                cover_letter_path, cover_letter_at,
                applied_at, apply_status, apply_error, apply_attempts,
                apply_duration_ms, agent_id, last_attempted_at,
-               discovered_at, detail_scraped_at, scored_at
+               discovered_at, detail_scraped_at, scored_at,
+               company, tracking_status, tracking_updated_at,
+               tracking_doc_path, last_email_at, next_action, next_action_due,
+               needs_human_reason, needs_human_url, needs_human_instructions,
+               apply_category
         FROM jobs
         ORDER BY fit_score DESC NULLS LAST, discovered_at DESC
     """).fetchall()
 
     # Classify each job
-    tab_counts = {"active": 0, "archive": 0, "applied": 0}
+    tab_counts = {"active": 0, "archive": 0, "applied": 0, "tracking": 0}
     stage_counts: dict[str, int] = {}
     classified: list[tuple] = []
     for row in jobs:
@@ -419,22 +522,29 @@ def generate_dashboard(output_path: str | None = None) -> str:
         footer_html = " ".join(links)
 
         # Border color
-        if stage in ("applied", "scored_high", "cover_ready"):
+        if stage == "needs_human":
+            border_color = "#7c3aed"
+        elif stage in ("applied", "scored_high", "cover_ready"):
             border_color = "#10b981"
         elif stage == "tailored":
             border_color = "#14b8a6"
         elif stage == "enriched":
             border_color = "#3b82f6"
-        elif stage in ("enrich_error", "apply_failed", "tailor_failed"):
+        elif stage in ("enrich_error", "apply_failed", "tailor_failed", "archived_platform"):
             border_color = "#ef4444"
+        elif stage in ("blocked_auth", "blocked_technical"):
+            border_color = "#f59e0b"
+        elif stage.startswith("archived_"):
+            border_color = "#6b7280"
         elif stage == "scored":
             border_color = "#f59e0b"
         else:
             border_color = "#334155"
 
-        # New features: timeline, artifacts
+        # New features: timeline, artifacts, tracking
         timeline_html = _build_timeline(row)
         artifacts_html = _build_artifacts_html(row)
+        tracking_html = _build_tracking_html(row)
 
         job_cards += f"""
         <div class="job-card" data-tab="{tab}" data-stage="{stage}" data-score="{score_val}" data-site="{escape(row['site'] or '')}" style="border-left-color:{border_color}">
@@ -447,6 +557,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
           {f'<div class="keywords-row">{escape(keywords)}</div>' if keywords else ''}
           {f'<div class="reasoning-row">{escape(reasoning)}</div>' if reasoning else ''}
           {timeline_html}
+          {tracking_html}
           {artifacts_html}
           {f'<p class="desc-preview">{desc_preview}...</p>' if desc_preview else ''}
           {_expand_desc(full_desc_html, desc_len) if row["full_description"] else ""}
@@ -454,7 +565,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
         </div>"""
 
     # Stage filter buttons
-    active_stages = ["enriched", "scored_high", "tailored", "cover_ready", "apply_retry"]
+    active_stages = ["needs_human", "blocked_auth", "blocked_technical", "enriched", "scored_high", "tailored", "cover_ready"]
     stage_btns_html = '<button class="filter-btn active" onclick="filterStage(\'all\')">All</button>\n'
     for s in active_stages:
         cnt = stage_counts.get(s, 0)
@@ -610,6 +721,15 @@ def _build_html(
   .apply-stat.failed {{ background: #7f1d1d; color: #fca5a5; }}
   .apply-detail {{ font-size: 0.7rem; color: #64748b; }}
 
+  /* Tracking info */
+  .tracking-info {{ padding: 0.5rem 0.6rem; background: #0f172a; border-radius: 6px; margin-bottom: 0.5rem; border-left: 2px solid #a855f7; }}
+  .tracking-action {{ font-size: 0.78rem; color: #e2e8f0; margin-bottom: 0.3rem; }}
+  .tracking-action-label {{ font-weight: 600; color: #a855f7; }}
+  .tracking-due {{ color: #f59e0b; font-size: 0.72rem; }}
+  .tracking-detail {{ font-size: 0.72rem; color: #94a3b8; margin-top: 0.2rem; }}
+  .tracking-doc-link {{ color: #60a5fa; text-decoration: none; }}
+  .tracking-doc-link:hover {{ text-decoration: underline; }}
+
   .hidden {{ display: none !important; }}
 
   @media (max-width: 768px) {{
@@ -641,6 +761,7 @@ def _build_html(
   <button class="tab-btn active" onclick="switchTab('active')">Active Pipeline<span class="tab-count">{tab_counts['active']}</span></button>
   <button class="tab-btn" onclick="switchTab('archive')">Archive<span class="tab-count">{tab_counts['archive']}</span></button>
   <button class="tab-btn" onclick="switchTab('applied')">Applied<span class="tab-count">{tab_counts['applied']}</span></button>
+  <button class="tab-btn" onclick="switchTab('tracking')">Tracking<span class="tab-count">{tab_counts['tracking']}</span></button>
 </div>
 
 <div class="filters">
