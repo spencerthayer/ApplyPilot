@@ -25,6 +25,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 - **`resume_facts` profile contract** - removed from runtime profile handling, setup flows, validation, tailoring, and documentation
 
+## [0.3.0] - 2026-03-09
+
+### Added
+- **Multi-provider LLM fallback** - cascading Gemini → OpenAI → Anthropic with automatic
+  429/quota recovery and 5-minute exhaustion cooldown per model
+- **Two-tier model strategy** - `get_client(quality=True)` for writing (Pro models),
+  `get_client(quality=False)` for scoring (Flash models)
+- **Hacker News discovery** - `Ask HN: Who is Hiring?` thread scraper with LLM-powered
+  extraction, location keyword pre-filtering, and email deobfuscation
+- **Company extraction** - automatic company name extraction from application URLs
+  (Workday, Greenhouse, Lever, iCIMS patterns)
+- **Company-aware apply prioritization** - `acquire_job()` spreads applications across
+  employers using `ROW_NUMBER() PARTITION BY company`
+- **HTML dashboard** - self-contained pipeline funnel visualization with inline viewers
+  for tailored resumes, cover letters, and agent logs
+- **Streaming pipeline** - `applypilot run --stream` for concurrent stage execution
+- **Credit exhaustion detection** - launcher detects "credit balance is too low" and
+  stops all workers immediately
+- **CLAUDE.md operating manual** - comprehensive pipeline documentation for Claude Code
+
+### Fixed
+- **Apply subprocess billing** - `ANTHROPIC_API_KEY` stripped from subprocess env to
+  prevent API billing when using Claude Code Max plan
+- **Docker MCP interference** - `--strict-mcp-config` flag prevents Docker MCP Toolkit's
+  Playwright tools from shadowing local npx Playwright (Docker tools can't access host files)
+- **Filename collisions** - tailor and cover letter files use `{site}_{title}_{url_hash[:8]}`
+  suffix for uniqueness
+- **HN URL sanitization** - only stores http(s) URLs, deobfuscates emails (`[at]`→`@`),
+  generates synthetic URLs for contact-only posts
+
+### Changed
+- **Scoring prompt is profile-driven** - candidate summary built dynamically from
+  `profile.json` instead of hardcoded in source
+- **Location keywords configurable** - HN discovery loads accept patterns from search
+  config instead of hardcoding cities
+- **Salary examples generalized** - prompt salary section uses profile-driven values
+  instead of hardcoded dollar amounts
+- **URL normalization at insert** - resolves relative URLs via `sites.yaml` base_urls
+- **Validator improvements** - fabrication detection cross-references profile's
+  `skills_boundary`, banned words are warnings not errors
+
 ## [0.2.0] - 2026-02-17
 
 ### Added

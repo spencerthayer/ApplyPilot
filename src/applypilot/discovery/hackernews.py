@@ -37,7 +37,6 @@ _HN_ITEM = "https://hacker-news.firebaseio.com/v0/item/{id}.json"
 # Location keywords to keep before sending to LLM (coarse pre-filter)
 _ACCEPT_KEYWORDS = [
     "remote", "anywhere", "distributed", "wfh", "work from home",
-    "seattle", "bellevue", "redmond", "kirkland",
 ]
 
 # LLM prompt for extracting structured data from a raw HN comment

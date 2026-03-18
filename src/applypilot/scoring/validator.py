@@ -77,7 +77,9 @@ FABRICATION_WATCHLIST: set[str] = {
     "c#", "c++", "golang", "rust", "ruby",
     "kotlin", "swift", "scala", "matlab",
     # Frameworks for wrong languages
-    "spring", "django", "rails", "angular", "vue", "svelte",
+    # NOTE: django, spring, angular, vue removed — may be in candidate's skills_boundary.
+    # The skip logic cross-references against profile, but keeping them out avoids edge cases.
+    "rails", "svelte",
     # Hard lies: certifications can't be stretched
     "certif", "certified", "pmp", "scrum master", "aws certified",
 }

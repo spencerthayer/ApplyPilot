@@ -1224,7 +1224,6 @@ def _score_telemetry_summary(
             ],
         )
 
-
 def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
     """Score unscored jobs that have full descriptions."""
 
