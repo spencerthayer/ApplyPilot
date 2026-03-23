@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from applypilot.config import COVER_LETTER_DIR, load_profile, load_resume_text
-from applypilot.database import get_connection
+# CHANGED: Import get_jobs_by_stage to use the shared query gateway (DRY).
+# Cover letter query was inline SQL duplicating logic from get_jobs_by_stage.
+from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 from applypilot.resume_json import (
     get_profile_project_names,
@@ -150,7 +152,8 @@ def generate_cover_letter(
 
     avoid_notes: list[str] = []
     letter = ""
-    client = get_client()
+    # CHANGED: Cover letters use quality model — personalized output matters.
+    client = get_client(quality=True)
     cl_prompt_base = _build_cover_letter_prompt(profile)
 
     for attempt in range(max_retries + 1):
@@ -167,7 +170,10 @@ def generate_cover_letter(
             },
         ]
 
+        log.debug("[cover] %s — prompt length: %d chars", job.get("title", "?")[:40], len(prompt))
         letter = client.chat(messages, max_output_tokens=10000)
+        log.debug("[cover] %s — generated: %d chars, preview: %s",
+                  job.get("title", "?")[:40], len(letter), letter[:150].replace("\n", " "))
         letter = sanitize_text(letter)  # auto-fix em dashes, smart quotes
         letter = _strip_preamble(letter)  # remove any "Here is the letter:" prefix
 

@@ -242,6 +242,8 @@ def run(
     workers: int = typer.Option(1, "--workers", "-w", help="Parallel threads for discovery/enrichment stages."),
     stream: bool = typer.Option(False, "--stream", help="Run stages concurrently (streaming mode)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview stages without executing."),
+    # ADDED: Debug flag to show detailed scoring output (keywords, reasoning)
+    debug: bool = typer.Option(False, "--debug", "-d", help="Show detailed scoring output (keywords, reasoning)."),
     validation: str = typer.Option(
         "normal",
         "--validation",
@@ -255,6 +257,12 @@ def run(
 ) -> None:
     """Run pipeline stages: discover, enrich, score, tailor, cover, pdf."""
     _bootstrap()
+
+    # CHANGED: -d sets ALL applypilot loggers to DEBUG, not just scoring.
+    # This enables diagnostic output across discovery, enrichment, scoring,
+    # tailoring, and cover letter stages.
+    if debug:
+        logging.getLogger("applypilot").setLevel(logging.DEBUG)
 
     from applypilot.pipeline import run_pipeline
 
@@ -332,6 +340,8 @@ def apply(
     ),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
+    # ADDED: --debug/-d flag for diagnostic output, consistent with `run -d`
+    debug: bool = typer.Option(False, "--debug", "-d", help="Show detailed diagnostic output."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
@@ -342,6 +352,10 @@ def apply(
 ) -> None:
     """Launch auto-apply to submit job applications."""
     _bootstrap()
+
+    # ADDED: -d sets all applypilot loggers to DEBUG, consistent with `run -d`
+    if debug:
+        logging.getLogger("applypilot").setLevel(logging.DEBUG)
 
     from applypilot.config import check_tier, load_profile
     from applypilot.database import get_connection
@@ -501,6 +515,48 @@ def tailor_cmd(
         f"{result.get('failed', 0)} failed, "
         f"{result.get('errors', 0)} errors."
     )
+
+
+# ADDED: Single-job pipeline — scoped enrich→score→tailor→cover for one URL.
+# Uses Pipeline.for_job() which sets ctx.job_url so all stages only touch
+# the target job. Avoids scoring/tailoring the entire DB.
+@app.command()
+def single(
+    url: str = typer.Argument(..., help="Job listing URL (public page with JD + apply button)."),
+    skip_apply: bool = typer.Option(False, "--skip-apply", help="Only add and enrich, don't score/tailor."),
+    # ADDED: --debug/-d flag for diagnostic output, consistent with `run -d`
+    debug: bool = typer.Option(False, "--debug", "-d", help="Show detailed diagnostic output."),
+) -> None:
+    """Scoped pipeline for one job: enrich, score, tailor, cover letter."""
+    _bootstrap()
+    if debug:
+        logging.getLogger("applypilot").setLevel(logging.DEBUG)
+    from datetime import datetime, timezone
+    from applypilot.database import get_connection, commit_with_retry
+    from applypilot.pipeline import Pipeline
+
+    conn = get_connection()
+    existing = conn.execute("SELECT url, title, fit_score FROM jobs WHERE url = ?", (url,)).fetchone()
+    if existing:
+        console.print(f"[yellow]Already in DB:[/yellow] {existing[1] or 'untitled'} (score={existing[2]})")
+        return
+
+    slug_title = url.rstrip("/").split("/")[-1].replace("-", " ").replace("_", " ")
+    conn.execute(
+        "INSERT INTO jobs (url, title, site, strategy, discovered_at) VALUES (?, ?, 'manual', 'manual', ?)",
+        (url, slug_title, datetime.now(timezone.utc).isoformat()),
+    )
+    commit_with_retry(conn)
+    console.print(f"[green]Added to DB:[/green] {slug_title}")
+
+    p = Pipeline.for_job(url).enrich().score().tailor()
+    if not skip_apply:
+        p.cover()
+    p.execute()
+
+    row = conn.execute("SELECT tailored_resume_path, cover_letter_path FROM jobs WHERE url = ?", (url,)).fetchone()
+    if row and row[0]:
+        console.print(f"\n[bold]Next:[/bold] applypilot apply --url \"{url}\"")
 
 
 @app.command()
@@ -674,6 +730,20 @@ def status() -> None:
         console.print(site_table)
 
     console.print()
+
+
+# ADDED: Wire human_review.py::serve() to CLI. The module existed but was
+# never connected. Manual ATS jobs now park as 'needs_human' (see launcher.py),
+# and this command presents them in a web UI for human-in-the-loop completion.
+@app.command(name="human-review")
+def human_review(
+    port: int = typer.Option(7373, "--port", help="TCP port for the review UI."),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Don't auto-open the browser."),
+) -> None:
+    """Launch the human-in-the-loop review UI for manual ATS jobs."""
+    _bootstrap()
+    from applypilot.apply.human_review import serve
+    serve(port=port, open_browser=not no_browser)
 
 
 @app.command()

@@ -751,6 +751,10 @@ def scrape_site_batch(
                     elapsed,
                     err_str,
                 )
+                log.debug("[enrich] %s — apply_url=%s desc_preview=%s",
+                          title[:40] if title else url[:40],
+                          result.get("application_url", "none")[:80],
+                          (result.get("full_description") or "")[:150].replace("\n", " "))
 
                 if status in ("ok", "partial"):
                     stats[status] += 1
@@ -798,6 +802,7 @@ def _run_detail_scraper(
     sites: list[str] | None = None,
     max_per_site: int | None = None,
     workers: int = 1,
+    job_url: str | None = None,
 ) -> dict:
     """Groups pending jobs by site and processes each batch.
 
@@ -808,15 +813,20 @@ def _run_detail_scraper(
     Returns aggregate stats dict.
     """
     placeholders = ",".join("?" * len(SKIP_DETAIL_SITES))
-    rows = conn.execute(
-        "SELECT url, title, site FROM jobs "
-        f"WHERE site NOT IN ({placeholders}) AND ("
+    where = (
+        f"site NOT IN ({placeholders}) AND ("
         "  detail_scraped_at IS NULL "
         "  OR (detail_error_category = 'retriable' "
         "      AND (detail_next_retry_at IS NULL OR detail_next_retry_at <= datetime('now')))"
-        ") "
-        "ORDER BY site, discovered_at DESC",
-        list(SKIP_DETAIL_SITES),
+        ")"
+    )
+    params: list = list(SKIP_DETAIL_SITES)
+    if job_url is not None:
+        where += " AND url = ?"
+        params.append(job_url)
+    rows = conn.execute(
+        f"SELECT url, title, site FROM jobs WHERE {where} ORDER BY site, discovered_at DESC",
+        params,
     ).fetchall()
 
     if not rows:
@@ -1006,7 +1016,7 @@ def stream_detail(
 # -- Public entry point ------------------------------------------------------
 
 
-def run_enrichment(limit: int = 100, workers: int = 1) -> dict:
+def run_enrichment(limit: int = 100, workers: int = 1, job_url: str | None = None) -> dict:
     """Main entry point for detail page enrichment.
 
     Fetches pending jobs from the database (those without full_description),
@@ -1040,6 +1050,6 @@ def run_enrichment(limit: int = 100, workers: int = 1) -> dict:
             log.info("WTTJ: %d URLs updated", updated)
 
     # Run the detail scraper
-    stats = _run_detail_scraper(conn, max_per_site=limit, workers=workers)
+    stats = _run_detail_scraper(conn, max_per_site=limit, workers=workers, job_url=job_url)
 
     return stats

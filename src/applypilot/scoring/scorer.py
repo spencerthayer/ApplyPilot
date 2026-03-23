@@ -241,6 +241,34 @@ EXCLUSION_RULES: list[dict] = [
 ]
 
 
+def _load_user_exclusion_rules() -> list[dict]:
+    """Load exclude_titles from searches.yaml and convert to exclusion rules.
+
+    ADDED: The hardcoded EXCLUSION_RULES only had 2 entries (intern, clearance).
+    The user's searches.yaml has a richer exclude_titles list (VP, director, etc.)
+    that was only applied during JobSpy discovery — not during scoring. This means
+    Greenhouse/Workday jobs with excluded titles still got scored by the LLM,
+    wasting ~$0.04/job on Opus. Now they're excluded deterministically.
+    """
+    try:
+        from applypilot.config import load_search_config
+        cfg = load_search_config()
+        titles = cfg.get("exclude_titles", [])
+        if not titles:
+            return []
+        return [{
+            "id": "r-user-exclude",
+            "type": "keyword",
+            "value": [t.strip().lower() for t in titles if t.strip()],
+            "match_scope": "title",
+            "match_type": "substring",
+            "reason_code": "excluded_title",
+            "description": "User exclude_titles from searches.yaml",
+        }]
+    except Exception:
+        return []
+
+
 def _tokenize(text: str) -> list[str]:
     """Tokenize text on non-alphanumeric boundaries, lowercased."""
 
@@ -918,6 +946,7 @@ def _exclusion_result(rule: dict, matched_value: str) -> dict:
     """Build a blocked scoring result for an excluded job."""
 
     reason_code = rule["reason_code"]
+    log.debug("[score] EXCLUDED: rule=%s reason=%s matched='%s'", rule["id"], reason_code, matched_value)
     return {
         "score": 0,
         "keywords": "",
@@ -938,7 +967,12 @@ def evaluate_exclusion(job: dict) -> dict | None:
     desc_tokens = _tokenize(description)
     combined_tokens = title_tokens + desc_tokens
 
-    for rule in EXCLUSION_RULES:
+    # CHANGED: Merge hardcoded rules with user's exclude_titles from searches.yaml.
+    # This ensures Greenhouse/Workday jobs with excluded titles (VP, director, etc.)
+    # are skipped before the LLM call, saving token costs.
+    all_rules = EXCLUSION_RULES + _load_user_exclusion_rules()
+
+    for rule in all_rules:
         values = rule["value"]
         if isinstance(values, str):
             values = [values]
@@ -971,6 +1005,16 @@ def evaluate_exclusion(job: dict) -> dict | None:
             elif match_type == "prefix":
                 if any(token.startswith(val_lower) for token in tokens):
                     return _exclusion_result(rule, val)
+            elif match_type == "substring":
+                # ADDED: Word-boundary substring match for multi-word phrases
+                # (e.g. "senior director", "vice president" from exclude_titles).
+                # Uses \b to avoid "intern" matching "international".
+                raw = title.lower() if match_scope == "title" else (
+                    description.lower() if match_scope == "description" else f"{title} {description}".lower()
+                )
+                pattern = r"\b" + re.escape(val_lower).replace(r"\ ", r"\s+") + r"\b"
+                if re.search(pattern, raw):
+                    return _exclusion_result(rule, val)
 
     return None
 
@@ -980,6 +1024,11 @@ def score_job(resume_text: str, job: dict, scoring_profile: dict) -> dict:
 
     baseline = _compute_deterministic_baseline(scoring_profile, job)
     focused_description = baseline.get("focused_description", "")
+
+    log.debug("[score] %s — baseline=%d title_sim=%.2f skill_overlap=%.2f matched=%s missing=%s",
+              job.get("title", "?")[:50], baseline["score"],
+              baseline["title_similarity"], baseline["skill_overlap"],
+              baseline["matched_skills"][:5], baseline["missing_requirements"][:5])
 
     job_text = (
         f"TITLE: {job.get('title', '')}\n"
@@ -1028,7 +1077,11 @@ def score_job(resume_text: str, job: dict, scoring_profile: dict) -> dict:
                 temperature=0,
                 response_format=SCORING_RESPONSE_FORMAT,
             )
+            log.debug("[score] %s — LLM response: %s", job.get("title", "?")[:40], raw_response[:300])
             parsed = _parse_score_response(raw_response)
+            log.debug("[score] %s — parsed: score=%s confidence=%s why=%s",
+                      job.get("title", "?")[:40], parsed.get("score"), parsed.get("confidence"),
+                      str(parsed.get("why_short", ""))[:80])
 
             llm_score = int(parsed["score"])
             llm_confidence = float(parsed["confidence"])
@@ -1224,7 +1277,7 @@ def _score_telemetry_summary(
             ],
         )
 
-def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
+def run_scoring(limit: int = 0, rescore: bool = False, job_url: str | None = None) -> dict:
     """Score unscored jobs that have full descriptions."""
 
     try:
@@ -1239,12 +1292,9 @@ def run_scoring(limit: int = 0, rescore: bool = False) -> dict:
         log.info("Auto-healed %d legacy scoring failure row(s).", auto_healed)
 
     if rescore:
-        if limit > 0:
-            jobs = conn.execute("SELECT * FROM jobs WHERE full_description IS NOT NULL LIMIT ?", (limit,)).fetchall()
-        else:
-            jobs = conn.execute("SELECT * FROM jobs WHERE full_description IS NOT NULL").fetchall()
+        jobs = get_jobs_by_stage(conn=conn, stage="enriched", limit=limit, job_url=job_url)
     else:
-        jobs = get_jobs_by_stage(conn=conn, stage="pending_score", limit=limit)
+        jobs = get_jobs_by_stage(conn=conn, stage="pending_score", limit=limit, job_url=job_url)
 
     if not jobs:
         log.info("No unscored jobs with descriptions found.")

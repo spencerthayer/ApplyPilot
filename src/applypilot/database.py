@@ -1167,7 +1167,8 @@ def delete_account(domain: str,
 def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
                       stage: str = "discovered",
                       min_score: int | None = None,
-                      limit: int = 100) -> list[dict]:
+                      limit: int = 100,
+                      job_url: str | None = None) -> list[dict]:
     """Fetch jobs filtered by pipeline stage.
 
     Args:
@@ -1175,6 +1176,7 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         stage: One of "discovered", "enriched", "scored", "tailored", "applied".
         min_score: Minimum fit_score filter (only relevant for scored+ stages).
         limit: Maximum number of rows to return.
+        job_url: If set, scope query to this single URL.
 
     Returns:
         List of job dicts.
@@ -1205,6 +1207,12 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
             "AND tailored_resume_path IS NULL AND COALESCE(tailor_attempts, 0) < 5"
         ),
         "tailored": "tailored_resume_path IS NOT NULL",
+        "pending_cover": (
+            "fit_score >= ? AND tailored_resume_path IS NOT NULL "
+            "AND full_description IS NOT NULL "
+            "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
+            "AND COALESCE(cover_attempts, 0) < 5"
+        ),
         "pending_apply": ("tailored_resume_path IS NOT NULL AND applied_at IS NULL AND application_url IS NOT NULL"),
         "applied": "applied_at IS NOT NULL",
     }
@@ -1220,6 +1228,10 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
     if min_score is not None and "fit_score" not in where and stage in ("scored", "tailored", "applied"):
         where += " AND fit_score >= ?"
         params.append(min_score)
+
+    if job_url is not None:
+        where += " AND url = ?"
+        params.append(job_url)
 
     query = f"""
         SELECT * FROM (

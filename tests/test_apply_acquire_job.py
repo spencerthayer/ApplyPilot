@@ -54,12 +54,14 @@ def test_acquire_job_skips_manual_ats_and_returns_next_actionable(monkeypatch, t
     assert job is not None
     assert job["url"] == actionable_url
 
+    # CHANGED: manual ATS jobs are now parked as 'needs_human' for HITL review
+    # instead of silently marked 'manual'. See launcher.py acquire_job().
     manual = conn.execute(
-        "SELECT apply_status, apply_error FROM jobs WHERE url = ?",
+        "SELECT apply_status, needs_human_reason FROM jobs WHERE url = ?",
         (manual_url,),
     ).fetchone()
-    assert manual["apply_status"] == "manual"
-    assert manual["apply_error"] == "manual ATS"
+    assert manual["apply_status"] == "needs_human"
+    assert "manual ATS" in manual["needs_human_reason"]
 
     acquired = conn.execute(
         "SELECT apply_status, agent_id FROM jobs WHERE url = ?",
