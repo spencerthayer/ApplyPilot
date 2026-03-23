@@ -113,7 +113,10 @@ _handback_events: dict[int, threading.Event] = {}
 
 # Register cleanup on exit
 atexit.register(cleanup_on_exit)
-if platform.system() != "Windows":
+# CHANGED: Guard signal registration to main thread only.
+# human_review.py imports launcher from a background thread, and
+# signal.signal() raises ValueError outside the main thread.
+if platform.system() != "Windows" and threading.current_thread() is threading.main_thread():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
 
@@ -372,17 +375,23 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 conn.rollback()
                 return None
 
-            # Skip manual ATS sites (unsolvable CAPTCHAs)
+            # CHANGED: Park manual ATS for human-in-the-loop review instead of
+            # silently marking as 'manual'. This lets `applypilot human-review`
+            # present these jobs so the user handles login/CAPTCHA, then the
+            # agent takes over. See: human_review.py::_run_agent_for_job().
             from applypilot.config import is_manual_ats
             apply_url = row["application_url"] or row["url"]
             if is_manual_ats(apply_url) and not target_url:
                 conn.execute(
-                    "UPDATE jobs SET apply_status = 'manual', apply_error = 'manual ATS' WHERE url = ?",
-                    (row["url"],),
+                    "UPDATE jobs SET apply_status = 'needs_human', "
+                    "needs_human_reason = 'manual ATS (login/CAPTCHA required)', "
+                    "needs_human_url = ?, "
+                    "needs_human_instructions = 'Log in or solve the CAPTCHA, then click Done so the agent can continue.' "
+                    "WHERE url = ?",
+                    (apply_url, row["url"]),
                 )
                 conn.commit()
-                logger.info("Skipping manual ATS: %s", row["url"][:80])
-                # In queue mode, continue scanning for the next actionable job.
+                logger.info("Parked for human review (manual ATS): %s", row["url"][:80])
                 continue
 
             now = datetime.now(timezone.utc).isoformat()

@@ -381,7 +381,8 @@ def _build_banner_js(hash_: str, title: str, company: str,
 """
 
 
-def _start_done_watcher(cdp_port: int, server_port: int, hash_: str) -> subprocess.Popen | None:
+def _start_done_watcher(cdp_port: int, server_port: int, hash_: str,
+                       banner_js: str = "") -> subprocess.Popen | None:
     """Start a background Node.js process that polls for the HITL done signal.
 
     The banner button sets window.__ap_hitl_done = hash_ (a JS assignment that
@@ -391,12 +392,14 @@ def _start_done_watcher(cdp_port: int, server_port: int, hash_: str) -> subproce
     Returns the subprocess handle (so the caller can kill it when HITL ends),
     or None if Node.js is unavailable.
     """
+    banner_js_escaped = banner_js.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${") if banner_js else ""
     watcher_script = f"""
 const {{ chromium }} = require('@playwright/test');
 (async () => {{
   try {{
     const b = await chromium.connectOverCDP('http://localhost:{cdp_port}');
     const ctx = b.contexts()[0];
+    const bannerJs = `{banner_js_escaped}`;
     let done = false;
 
     const watchdog = setTimeout(() => {{
@@ -408,6 +411,13 @@ const {{ chromium }} = require('@playwright/test');
       try {{
         const pages = ctx.pages();
         for (const page of pages) {{
+          // Re-inject banner if missing (survives page navigations)
+          if (bannerJs) {{
+            const hasBanner = await page.evaluate(() => !!document.getElementById('__ap_banner_root')).catch(() => false);
+            if (!hasBanner) {{
+              try {{ await page.evaluate(bannerJs); }} catch(e) {{}}
+            }}
+          }}
           const val = await page.evaluate(() => window.__ap_hitl_done || null).catch(() => null);
           if (val === '{hash_}') {{
             done = true;
@@ -701,6 +711,17 @@ def _start_hitl_chrome(job: dict) -> subprocess.Popen | None:
     # Inject the banner overlay
     _inject_banner(HITL_CDP_PORT, job)
 
+    # Start watcher that polls for Done signal and re-injects banner on navigation
+    h = _job_hash(job.get("url", ""))
+    banner_js = _build_banner_js(
+        h,
+        (job.get("title") or "Unknown").replace("\\", "\\\\").replace("'", "\\'"),
+        (job.get("site") or job.get("company") or "").replace("\\", "\\\\").replace("'", "\\'"),
+        job.get("fit_score", "?"),
+        (job.get("needs_human_instructions") or "Complete the required action.").replace("\\", "\\\\").replace("'", "\\'"),
+    )
+    _start_done_watcher(HITL_CDP_PORT, 7373, h, banner_js=banner_js)
+
     # Bring to foreground
     bring_to_foreground()
 
@@ -739,13 +760,14 @@ def _run_agent_for_job(h: str) -> None:
 
     logger.info("[HITL] Spawning agent for job: %s", job.get("title"))
 
-    result, duration_ms, _screening_qs = run_job(
+    from applypilot.apply.agent_backends import resolve_backend_name
+
+    result, duration_ms = run_job(
         job,
         port=HITL_CDP_PORT,
         worker_id=HITL_WORKER_ID,
-        model="haiku",
+        agent=resolve_backend_name(),
         dry_run=False,
-        extra_context=extra_ctx,
     )
 
     logger.info("[HITL] Agent result: %s", result)

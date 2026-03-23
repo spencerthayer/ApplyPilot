@@ -206,7 +206,12 @@ class AutoApplyBackend(abc.ABC):
             for part in (execution.final_output, execution.raw_output)
             if part and part.strip()
         )
-        result = extract_result_status(combined_output)
+        # CHANGED: Scan final_output first to avoid matching RESULT:APPLIED
+        # in the prompt template (raw_output contains the prompt which has
+        # example RESULT: codes). Only fall back to combined if final is empty.
+        result = extract_result_status(execution.final_output or "")
+        if not result:
+            result = extract_result_status(combined_output)
         if result:
             return result, execution.duration_ms
         return (
@@ -816,7 +821,11 @@ class OpenCodeAutoApplyBackend(AutoApplyBackend):
                 for part in (final_output, "".join(raw_parts))
                 if part and part.strip()
             )
-            result = extract_result_status(combined_output)
+            # CHANGED: Same fix — scan final_output first to avoid false
+            # positive from RESULT:APPLIED in prompt template.
+            result = extract_result_status(final_output)
+            if not result:
+                result = extract_result_status(combined_output)
             if result:
                 return result, duration_ms
             return f"failed:{_fallback_failure_reason(combined_output, returncode, self.key)}", duration_ms
