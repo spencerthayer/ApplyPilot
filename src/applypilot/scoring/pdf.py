@@ -145,11 +145,64 @@ def parse_entries(text: str) -> list[dict]:
     return entries
 
 
+# ── Skill Annotation Loader ─────────────────────────────────────────────
+
+
+def _load_skill_annotations(text_path: Path) -> dict:
+    """Load {text, skills} bullet annotations from _DATA.json sidecar.
+
+    The sidecar is saved by tailor.py alongside the .txt resume.
+    Returns a mapping of bullet_text_prefix → skills list for matching.
+    Falls back to empty dict if sidecar is missing (backward compat).
+    """
+    data_path = text_path.with_name(text_path.stem + "_DATA.json")
+    if not data_path.exists():
+        return {}
+    try:
+        import json
+        data = json.loads(data_path.read_text(encoding="utf-8"))
+        annotations: dict[str, list[str]] = {}
+        for section in ("experience", "projects"):
+            for entry in data.get(section, []):
+                for bullet in entry.get("bullets", []):
+                    if isinstance(bullet, dict):
+                        text = bullet.get("text", "")
+                        skills = bullet.get("skills", [])
+                        if text and skills:
+                            # Key by first 50 chars to match against parsed bullets
+                            annotations[text[:50].lower().strip()] = skills
+        return annotations
+    except Exception:
+        return {}
+
+
+def _apply_highlights(bullet_text: str, annotations: dict) -> str:
+    """Bold skill keywords in a bullet if annotations exist for it.
+
+    Matches bullet text against annotations by prefix (first 50 chars).
+    No-op when annotations are empty (backward compat with old resumes).
+    """
+    if not annotations:
+        return bullet_text
+    from applypilot.tailoring.skill_highlighter import highlight
+    key = bullet_text[:50].lower().strip()
+    skills = annotations.get(key, [])
+    if not skills:
+        return bullet_text
+    return highlight(bullet_text, skills)
+
+
 # ── HTML Template ────────────────────────────────────────────────────────
 
 
-def build_html(resume: dict) -> str:
+def build_html(resume: dict, skill_annotations: dict | None = None) -> str:
     """Build professional resume HTML from parsed data.
+
+    Args:
+        resume: Parsed resume dict from parse_resume().
+        skill_annotations: Optional mapping of bullet_prefix → skills list
+            from _DATA.json sidecar. When present, matched skills are bolded
+            in bullet text to prove they are real (used in context).
 
     Args:
         resume: Parsed resume dict from parse_resume().
@@ -170,11 +223,15 @@ def build_html(resume: dict) -> str:
 
     # Experience
     exp_html = ""
+    # Bold skill keywords in bullets when _DATA.json annotations are available.
+    # This proves skills are real (used in work context), not just listed.
+    annotations = skill_annotations or {}
+
     if "EXPERIENCE" in sections:
         entries = parse_entries(sections["EXPERIENCE"])
         items = ""
         for e in entries:
-            bullets = "".join(f"<li>{b}</li>" for b in e["bullets"])
+            bullets = "".join(f"<li>{_apply_highlights(b, annotations)}</li>" for b in e["bullets"])
             subtitle = f'<div class="entry-subtitle">{e["subtitle"]}</div>' if e["subtitle"] else ""
             items += f'<div class="entry"><div class="entry-title">{e["title"]}</div>{subtitle}<ul>{bullets}</ul></div>'
         exp_html = f'<div class="section"><div class="section-title">Experience</div>{items}</div>'
@@ -185,7 +242,7 @@ def build_html(resume: dict) -> str:
         entries = parse_entries(sections["PROJECTS"])
         items = ""
         for e in entries:
-            bullets = "".join(f"<li>{b}</li>" for b in e["bullets"])
+            bullets = "".join(f"<li>{_apply_highlights(b, annotations)}</li>" for b in e["bullets"])
             subtitle = f'<div class="entry-subtitle">{e["subtitle"]}</div>' if e["subtitle"] else ""
             items += f'<div class="entry"><div class="entry-title">{e["title"]}</div>{subtitle}<ul>{bullets}</ul></div>'
         proj_html = f'<div class="section"><div class="section-title">Projects</div>{items}</div>'
@@ -325,8 +382,8 @@ li {{
     <div class="contact">{contact_html}</div>
 </div>
 {summary_html}
-{skills_html}
 {exp_html}
+{skills_html}
 {proj_html}
 {edu_html}
 </body>
@@ -376,7 +433,12 @@ def convert_to_pdf(text_path: Path, output_path: Path | None = None, html_only: 
     text_path = Path(text_path)
     text = text_path.read_text(encoding="utf-8")
     resume = parse_resume(text)
-    html = build_html(resume)
+
+    # Load skill annotations from _DATA.json sidecar if available.
+    # The LLM returns bullets as {text, skills} — we use the skills list
+    # to bold keywords in the PDF, proving they are real (used in context).
+    skill_annotations = _load_skill_annotations(text_path)
+    html = build_html(resume, skill_annotations=skill_annotations)
 
     if html_only:
         out = output_path or text_path.with_suffix(".html")
