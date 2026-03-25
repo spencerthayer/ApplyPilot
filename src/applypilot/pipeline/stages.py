@@ -86,8 +86,13 @@ class CoverStage:
         t0 = time.time()
         try:
             from applypilot.scoring.cover_letter import run_cover_letters
-            run_cover_letters(min_score=ctx.min_score, limit=ctx.limit,
-                              validation_mode=ctx.validation_mode, job_url=ctx.job_url)
+            kwargs = {"min_score": ctx.min_score, "limit": ctx.limit,
+                      "validation_mode": ctx.validation_mode}
+            # job_url only supported in single-job mode — upstream hasn't added it yet
+            import inspect
+            if "job_url" in inspect.signature(run_cover_letters).parameters:
+                kwargs["job_url"] = ctx.job_url
+            run_cover_letters(**kwargs)
             return StageResult(stage=self.name, elapsed=time.time() - t0)
         except Exception as e:
             log.exception("Cover letter failed: %s", e)

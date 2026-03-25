@@ -599,17 +599,22 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
 
     stats["detail_errors"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE detail_error IS NOT NULL").fetchone()[0]
 
-    # Scoring stage
-    stats["scored"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL").fetchone()[0]
+    # Scoring stage — separate LLM-scored from deterministically excluded
+    stats["scored"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL AND exclusion_rule_id IS NULL"
+    ).fetchone()[0]
+    stats["excluded"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE exclusion_rule_id IS NOT NULL"
+    ).fetchone()[0]
 
     stats["unscored"] = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND fit_score IS NULL"
     ).fetchone()[0]
 
-    # Score distribution
+    # Score distribution — only LLM-scored jobs (excluded are always 0, not useful)
     dist_rows = conn.execute(
         "SELECT fit_score, COUNT(*) as cnt FROM jobs "
-        "WHERE fit_score IS NOT NULL "
+        "WHERE fit_score IS NOT NULL AND exclusion_rule_id IS NULL "
         "GROUP BY fit_score ORDER BY fit_score DESC"
     ).fetchall()
     stats["score_distribution"] = [(row[0], row[1]) for row in dist_rows]

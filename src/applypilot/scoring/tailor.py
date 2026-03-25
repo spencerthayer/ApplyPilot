@@ -757,6 +757,8 @@ def tailor_resume(
         # Layer 1: Validate JSON fields
         validation = validate_json_fields(data, profile, mode=validation_mode)
         report["validator"] = validation
+        # Preserve raw LLM JSON for _DATA.json sidecar (skill annotations for PDF bolding)
+        report["raw_json"] = data
 
         if not validation["passed"]:
             # Only retry if there are hard errors (warnings never block)
@@ -909,8 +911,9 @@ def run_tailoring(
             # Save raw LLM JSON with {text, skills} bullet annotations.
             # build_html() reads this sidecar to bold skill keywords in the PDF,
             # proving skills are real (used in context) not just listed.
-            data_path = TAILORED_DIR / f"{prefix}_DATA.json"
-            data_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            if "raw_json" in report:
+                data_path = TAILORED_DIR / f"{prefix}_DATA.json"
+                data_path.write_text(json.dumps(report["raw_json"], indent=2, ensure_ascii=False), encoding="utf-8")
 
             # Save job description for traceability
             job_path = TAILORED_DIR / f"{prefix}_JOB.txt"

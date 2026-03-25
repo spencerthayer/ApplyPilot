@@ -241,6 +241,8 @@ def run(
     limit: int = typer.Option(0, "--limit", "-l", help="Max jobs per tailor/cover batch (0 = all eligible)."),
     workers: int = typer.Option(1, "--workers", "-w", help="Parallel threads for discovery/enrichment stages."),
     stream: bool = typer.Option(False, "--stream", help="Run stages concurrently (streaming mode)."),
+    chunked: bool = typer.Option(True, "--chunked/--no-chunk", help="Chunked mode: overlap discover→enrich→score (default: on)."),
+    chunk_size: int = typer.Option(1000, "--chunk-size", help="Jobs per chunk in chunked mode."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview stages without executing."),
     # ADDED: Debug flag to show detailed scoring output (keywords, reasoning)
     debug: bool = typer.Option(False, "--debug", "-d", help="Show detailed scoring output (keywords, reasoning)."),
@@ -298,6 +300,8 @@ def run(
         limit=limit,
         dry_run=dry_run,
         stream=stream,
+        chunked=chunked,
+        chunk_size=chunk_size,
         workers=workers,
         validation_mode=validation,
     )
@@ -687,6 +691,7 @@ def status() -> None:
     summary.add_row("Pending enrichment", str(stats["pending_detail"]))
     summary.add_row("Enrichment errors", str(stats["detail_errors"]))
     summary.add_row("Scored by LLM", str(stats["scored"]))
+    summary.add_row("Excluded (pre-filter)", str(stats["excluded"]))
     summary.add_row("Pending scoring", str(stats["unscored"]))
     summary.add_row("Tailored resumes", str(stats["tailored"]))
     summary.add_row("Pending tailoring (7+)", str(stats["untailored_eligible"]))

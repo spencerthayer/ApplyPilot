@@ -68,7 +68,11 @@ class Pipeline:
 
     def execute(self) -> dict:
         """Run all composed stages sequentially (or chunked if enabled)."""
-        if self._chunked and not self._ctx.is_single:
+        # Chunked mode only makes sense when discover/enrich/score are in the stage list.
+        # If only tailor/cover/pdf are requested, skip chunked and run sequential.
+        chunked_stages = {"discover", "enrich", "score"}
+        has_chunked_stages = any(s.name in chunked_stages for s in self._stages)
+        if self._chunked and not self._ctx.is_single and has_chunked_stages:
             return self._execute_chunked()
         return self._execute_sequential()
 
