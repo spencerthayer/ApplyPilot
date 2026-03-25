@@ -451,6 +451,7 @@ class LLMClient:
             model_name = self._entry_model(entry)
             _respect_openrouter_cooldown(model_name)
             _apply_openrouter_pacing(model_name)
+            t0 = time.time()
             if self._use_streaming:
                 kwargs["stream"] = True
                 response = litellm.completion(**kwargs)
@@ -458,6 +459,16 @@ class LLMClient:
             else:
                 response = litellm.completion(**kwargs)
                 text = self._extract_text(response)
+            elapsed = time.time() - t0
+
+            # Log request metrics — helps debug latency, cost, and token usage
+            usage = getattr(response, "usage", None)
+            input_tokens = getattr(usage, "prompt_tokens", 0) if usage else 0
+            output_tokens = getattr(usage, "completion_tokens", 0) if usage else 0
+            log.debug(
+                "[llm] %s | %.1fs | in=%d out=%d tokens | model=%s",
+                entry.provider, elapsed, input_tokens, output_tokens, model_name,
+            )
         except Exception as exc:
             message = str(exc).lower()
             if any(token in message for token in ("429", "rate limit", "quota", "resource has been exhausted", "payment required", "throttlingexception")):

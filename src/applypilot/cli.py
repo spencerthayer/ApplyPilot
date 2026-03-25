@@ -265,6 +265,9 @@ def run(
     # tailoring, and cover letter stages.
     if debug:
         logging.getLogger("applypilot").setLevel(logging.DEBUG)
+        # Enable litellm request/response logging for full LLM diagnostics
+        import litellm
+        litellm.set_verbose = True
 
     from applypilot.pipeline import run_pipeline
 
