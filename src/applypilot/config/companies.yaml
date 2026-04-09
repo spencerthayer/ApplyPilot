@@ -1,0 +1,934 @@
+companies:
+  23andme:
+    name: 23andMe
+    runners:
+      workday: 23andme
+      greenhouse: 23andme
+  abnormalsecurity:
+    name: Abnormal Security
+    runners:
+      workday: abnormalsecurity
+      greenhouse: abnormalsecurity
+  ada:
+    name: Ada
+    runners:
+      workday: ada
+      greenhouse: ada
+  ada_health:
+    name: Ada Health
+    runners:
+      workday: ada_health
+      greenhouse: adahealth
+  adobe:
+    name: Adobe
+    runners:
+      workday: adobe
+  affirm:
+    name: Affirm
+    runners:
+      workday: affirm
+      greenhouse: affirm
+  aidoc:
+    name: Aidoc
+    runners:
+      workday: aidoc
+      greenhouse: aidoc
+  aimco:
+    name: AIMCo
+    runners:
+      workday: aimco
+  airtable:
+    name: Airtable
+    runners:
+      workday: airtable
+      greenhouse: airtable
+  alteryx:
+    name: Alteryx
+    runners:
+      workday: alteryx
+      greenhouse: alteryx
+  amazon:
+    name: Amazon
+    aliases:
+    - Amazon.com
+    - AWS
+    domain: amazon.com
+    career_url: https://amazon.jobs
+    ats: custom
+  amplitude:
+    name: Amplitude
+    runners:
+      workday: amplitude
+      greenhouse: amplitude
+  anduril:
+    name: Anduril
+    runners:
+      workday: anduril
+      greenhouse: anduril
+  anthropic:
+    name: Anthropic
+    runners:
+      workday: anthropic
+  anyscale:
+    name: Anyscale
+    runners:
+      workday: anyscale
+  apollo:
+    name: Apollo.io
+    runners:
+      workday: apollo
+      greenhouse: apolloio
+  apple:
+    name: Apple
+    aliases:
+    - Apple Inc
+    domain: apple.com
+    career_url: https://jobs.apple.com
+    ats: custom
+    runners:
+      smartextract: Apple Careers
+    ats: custom
+  applied_intuition:
+    name: Applied Intuition
+    runners:
+      workday: applied_intuition
+      greenhouse: appliedintuition
+  asana:
+    name: Asana
+    runners:
+      workday: asana
+      greenhouse: asana
+  astranis:
+    name: Astranis
+    runners:
+      workday: astranis
+      greenhouse: astranis
+  aurora:
+    name: Aurora Innovation
+    runners:
+      workday: aurora
+      greenhouse: aurora
+  auth0:
+    name: Auth0
+    runners:
+      greenhouse: auth0
+  automation_anywhere:
+    name: Automation Anywhere
+    runners:
+      workday: automation_anywhere
+      greenhouse: automationanywhere
+  aviva:
+    name: Aviva Canada
+    runners:
+      workday: aviva
+  babylon:
+    name: Babylon Health
+    runners:
+      workday: babylon
+      greenhouse: babylonhealth
+  bananaml:
+    name: Banana ML
+    runners:
+      workday: bananaml
+      greenhouse: bananaml
+  baseten:
+    name: Baseten
+    runners:
+      workday: baseten
+      greenhouse: baseten
+  bdo:
+    name: BDO
+    runners:
+      workday: bdo
+  benchling:
+    name: Benchling
+    runners:
+      workday: benchling
+      greenhouse: benchling
+  bigpanda:
+    name: BigPanda
+    runners:
+      workday: bigpanda
+      greenhouse: bigpanda
+  blackberry:
+    name: BlackBerry
+    runners:
+      workday: blackberry
+  block:
+    name: Block
+    runners:
+      workday: block
+  blue_prism:
+    name: Blue Prism
+    runners:
+      workday: blue_prism
+      greenhouse: blueprism
+  bmo:
+    name: BMO
+    runners:
+      workday: bmo
+  brex:
+    name: Brex
+    runners:
+      workday: brex
+      greenhouse: brex
+  brookfield:
+    name: Brookfield
+    runners:
+      workday: brookfield
+  buoy_health:
+    name: Buoy Health
+    runners:
+      workday: buoy_health
+      greenhouse: buoyhealth
+  cae:
+    name: CAE
+    runners:
+      workday: cae
+  canadian_solar:
+    name: Canadian Solar
+    runners:
+      workday: canadian_solar
+  canadian_tire:
+    name: Canadian Tire
+    runners:
+      workday: canadian_tire
+  canva:
+    name: Canva
+    runners:
+      workday: canva
+      greenhouse: canva
+  cdpq:
+    name: CDPQ
+    runners:
+      workday: cdpq
+  chainalysis:
+    name: Chainalysis
+    runners:
+      workday: chainalysis
+  chorus:
+    name: Chorus.ai
+    runners:
+      workday: chorus
+      greenhouse: chorusai
+  cibc:
+    name: CIBC
+    runners:
+      workday: cibc
+  ciena:
+    name: Ciena
+    runners:
+      workday: ciena
+  cisco:
+    name: Cisco
+    runners:
+      workday: cisco
+  clearbit:
+    name: Clearbit
+    runners:
+      workday: clearbit
+      greenhouse: clearbit
+  clearml:
+    name: ClearML
+    runners:
+      workday: clearml
+      greenhouse: clearml
+  clickup:
+    name: ClickUp
+    runners:
+      workday: clickup
+      greenhouse: clickup
+  cloudflare:
+    name: Cloudflare
+    runners:
+      workday: cloudflare
+      greenhouse: cloudflare
+  coalition:
+    name: Coalition
+    runners:
+      workday: coalition
+      greenhouse: coalition
+  cognigy:
+    name: Cognigy
+    runners:
+      workday: cognigy
+      greenhouse: cognigy
+  cohere:
+    name: Cohere
+    runners:
+      workday: cohere
+  coinbase:
+    name: Coinbase
+    runners:
+      workday: coinbase
+      greenhouse: coinbase
+  confluent:
+    name: Confluent
+    runners:
+      workday: confluent
+      greenhouse: confluent
+  copyai:
+    name: Copy.ai
+    runners:
+      workday: copyai
+      greenhouse: copyai
+  cppib:
+    name: CPP Investments
+    runners:
+      workday: cppib
+  cresta:
+    name: Cresta
+    runners:
+      workday: cresta
+      greenhouse: cresta
+  crunchbase:
+    name: Crunchbase
+    runners:
+      workday: crunchbase
+      greenhouse: crunchbase
+  darktrace:
+    name: Darktrace
+    runners:
+      workday: darktrace
+      greenhouse: darktrace
+  databricks:
+    name: Databricks
+    runners:
+      workday: databricks
+      greenhouse: databricks
+  datadog:
+    name: Datadog
+    runners:
+      workday: datadog
+      greenhouse: datadog
+  dataiku:
+    name: Dataiku
+    runners:
+      workday: dataiku
+      greenhouse: dataiku
+  deserve:
+    name: Deserve
+    runners:
+      greenhouse: deserve
+  desjardins:
+    name: Desjardins
+    runners:
+      workday: desjardins
+  determined:
+    name: Determined AI
+    runners:
+      workday: determined
+      greenhouse: determinedai
+  docusign:
+    name: DocuSign
+    runners:
+      workday: docusign
+      greenhouse: docusign
+  domino:
+    name: Domino Data Lab
+    runners:
+      workday: domino
+      greenhouse: domino
+  doordash:
+    name: DoorDash
+    runners:
+      greenhouse: doordash
+  enbridge:
+    name: Enbridge
+    runners:
+      workday: enbridge
+  figma:
+    name: Figma
+    runners:
+      workday: figma
+      greenhouse: figma
+  fis:
+    name: FIS Global
+    runners:
+      workday: fis
+  flatiron:
+    name: Flatiron Health
+    runners:
+      workday: flatiron
+      greenhouse: flatiron
+  flexport:
+    name: Flexport
+    runners:
+      workday: flexport
+      greenhouse: flexport
+  forethought:
+    name: Forethought
+    runners:
+      workday: forethought
+      greenhouse: forethought
+  foundation:
+    name: Foundation Medicine
+    runners:
+      workday: foundation
+      greenhouse: foundationmedicine
+  freenome:
+    name: Freenome
+    runners:
+      workday: freenome
+      greenhouse: freenome
+  ginkgo_bioworks:
+    name: Ginkgo Bioworks
+    runners:
+      workday: ginkgo_bioworks
+      greenhouse: ginkgo
+  gong:
+    name: Gong
+    runners:
+      workday: gong
+      greenhouse: gong
+  google:
+    name: Google
+    aliases:
+    - Google LLC
+    - Alphabet
+    domain: google.com
+    career_url: https://careers.google.com
+    ats: custom
+  grail:
+    name: GRAIL
+    runners:
+      workday: grail
+      greenhouse: grail
+  groww:
+    name: Groww
+    aliases:
+    - Groww Inc
+    domain: groww.in
+    career_url: https://groww.in/careers
+    ats: custom
+  guardant:
+    name: Guardant Health
+    runners:
+      workday: guardant
+      greenhouse: guardant
+  hashicorp:
+    name: HashiCorp
+    runners:
+      workday: hashicorp
+      greenhouse: hashicorp
+  hippo:
+    name: Hippo Insurance
+    runners:
+      workday: hippo
+      greenhouse: hippo
+  hoopp:
+    name: HOOPP
+    runners:
+      workday: hoopp
+  huggingface:
+    name: Hugging Face
+    runners:
+      workday: huggingface
+  human:
+    name: HUMAN
+    runners:
+      workday: human
+  hyperscience:
+    name: Hyperscience
+    runners:
+      workday: hyperscience
+      greenhouse: hyperscience
+  infermedica:
+    name: Infermedica
+    runners:
+      workday: infermedica
+      greenhouse: infermedica
+  insitro:
+    name: Insitro
+    runners:
+      workday: insitro
+      greenhouse: insitro
+  instabase:
+    name: Instabase
+    runners:
+      workday: instabase
+      greenhouse: instabase
+  instacart:
+    name: Instacart
+    runners:
+      greenhouse: instacart
+  intact:
+    name: Intact Financial
+    runners:
+      workday: intact
+  intel:
+    name: Intel
+    runners:
+      workday: intel
+  jasper:
+    name: Jasper
+    runners:
+      workday: jasper
+      greenhouse: jasper
+  k_health:
+    name: K Health
+    runners:
+      workday: k_health
+      greenhouse: khealth
+  klarna:
+    name: Klarna
+    runners:
+      workday: klarna
+      greenhouse: klarna
+  kore:
+    name: Kore.ai
+    runners:
+      workday: kore
+      greenhouse: koreai
+  kustomer:
+    name: Kustomer
+    runners:
+      workday: kustomer
+      greenhouse: kustomer
+  launchdarkly:
+    name: LaunchDarkly
+    runners:
+      workday: launchdarkly
+      greenhouse: launchdarkly
+  lemonade:
+    name: Lemonade
+    runners:
+      workday: lemonade
+      greenhouse: lemonade
+  loom:
+    name: Loom
+    runners:
+      workday: loom
+      greenhouse: loom
+  magna:
+    name: Magna International
+    runners:
+      workday: magna
+  make:
+    name: Make
+    runners:
+      workday: make
+      greenhouse: make
+  manulife:
+    name: Manulife
+    runners:
+      workday: manulife
+  mastercard:
+    name: Mastercard
+    runners:
+      workday: mastercard
+  mercury:
+    name: Mercury
+    runners:
+      workday: mercury
+      greenhouse: mercury
+  meta:
+    name: Meta
+    aliases:
+    - Meta Platforms
+    - Facebook
+    domain: meta.com
+    career_url: https://www.metacareers.com
+    ats: custom
+  metromile:
+    name: Metromile
+    runners:
+      workday: metromile
+      greenhouse: metromile
+  microsoft:
+    name: Microsoft
+    aliases:
+    - Microsoft Corporation
+    domain: microsoft.com
+    career_url: https://careers.microsoft.com
+    ats: custom
+  midjourney:
+    name: Midjourney
+    runners:
+      workday: midjourney
+  miro:
+    name: Miro
+    runners:
+      workday: miro
+      greenhouse: miro
+  mixpanel:
+    name: Mixpanel
+    runners:
+      workday: mixpanel
+      greenhouse: mixpanel
+  mlse:
+    name: MLSE
+    runners:
+      workday: mlse
+  moderna:
+    name: Moderna
+    runners:
+      workday: moderna
+  monday:
+    name: monday.com
+    runners:
+      workday: monday
+      greenhouse: monday
+  mongodb:
+    name: MongoDB
+    runners:
+      workday: mongodb
+      greenhouse: mongodb
+  motorola:
+    name: Motorola Solutions
+    runners:
+      workday: motorola
+  moveworks:
+    name: Moveworks
+    runners:
+      workday: moveworks
+      greenhouse: moveworks
+  n8n:
+    name: n8n
+    runners:
+      workday: n8n
+      greenhouse: n8n
+  natwest:
+    name: NatWest
+    aliases:
+    - NatWest Group
+    - Royal Bank of Scotland
+    domain: natwestgroup.com
+    career_url: https://jobs.natwestgroup.com
+    ats: custom
+  navi:
+    name: Navi
+    runners:
+      greenhouse: navi
+  neptune:
+    name: Neptune.ai
+    runners:
+      workday: neptune
+      greenhouse: neptuneai
+  netflix:
+    name: Netflix
+    runners:
+      workday: netflix
+  next_insurance:
+    name: Next Insurance
+    runners:
+      workday: next_insurance
+      greenhouse: nextinsurance
+  notion:
+    name: Notion
+    runners:
+      workday: notion
+      greenhouse: notionhq
+  nuro:
+    name: Nuro
+    runners:
+      workday: nuro
+      greenhouse: nuro
+  nvidia:
+    name: NVIDIA
+    runners:
+      workday: nvidia
+  observe:
+    name: Observe
+    runners:
+      workday: observe
+      greenhouse: observe
+  olg:
+    name: OLG
+    runners:
+      workday: olg
+  omers:
+    name: OMERS
+    runners:
+      workday: omers
+  openai:
+    name: OpenAI
+    runners:
+      workday: openai
+  oscar:
+    name: Oscar Health
+    runners:
+      workday: oscar
+      greenhouse: oscar
+  otpp:
+    name: Ontario Teachers
+    runners:
+      workday: otpp
+  outreach:
+    name: Outreach
+    runners:
+      workday: outreach
+      greenhouse: outreach
+  paige:
+    name: Paige
+    runners:
+      workday: paige
+      greenhouse: paige
+  palantir:
+    name: Palantir
+    runners:
+      workday: palantir
+      greenhouse: palantir
+  pathai:
+    name: PathAI
+    runners:
+      workday: pathai
+      greenhouse: pathai
+  paypal:
+    name: PayPal
+    runners:
+      workday: paypal
+  pc_financial:
+    name: PC Financial
+    runners:
+      workday: pc_financial
+  perimeterx:
+    name: PerimeterX
+    runners:
+      workday: perimeterx
+      greenhouse: perimeterx
+  plaid:
+    name: Plaid
+    runners:
+      workday: plaid
+      greenhouse: plaid
+  planet:
+    name: Planet Labs
+    runners:
+      workday: planet
+      greenhouse: planetlabs
+  psp:
+    name: PSP Investments
+    runners:
+      workday: psp
+  pwc:
+    name: PwC
+    runners:
+      workday: pwc
+  rbc:
+    name: RBC
+    runners:
+      workday: rbc
+  recursiv:
+    name: Recursion
+    runners:
+      workday: recursiv
+      greenhouse: recursiv
+  replicate:
+    name: Replicate
+    runners:
+      workday: replicate
+      greenhouse: replicate
+  retool:
+    name: Retool
+    runners:
+      workday: retool
+      greenhouse: retool
+  robinhood:
+    name: Robinhood
+    runners:
+      workday: robinhood
+      greenhouse: robinhood
+  root:
+    name: Root Insurance
+    runners:
+      workday: root
+      greenhouse: root
+  runway:
+    name: Runway
+    runners:
+      workday: runway
+      greenhouse: runway
+  salesforce:
+    name: Salesforce
+    runners:
+      workday: salesforce
+  salesloft:
+    name: SalesLoft
+    runners:
+      workday: salesloft
+      greenhouse: salesloft
+  samsara:
+    name: Samsara
+    runners:
+      workday: samsara
+      greenhouse: samsara
+  scale_ai:
+    name: Scale AI
+    runners:
+      workday: scale_ai
+      greenhouse: scaleai
+  sentry:
+    name: Sentry
+    runners:
+      greenhouse: sentry
+  servicenow:
+    name: ServiceNow
+    runners:
+      workday: servicenow
+  shield_ai:
+    name: Shield AI
+    runners:
+      workday: shield_ai
+      greenhouse: shieldai
+  sierra:
+    name: Sierra
+    runners:
+      workday: sierra
+      greenhouse: sierra
+  snowflake:
+    name: Snowflake
+    runners:
+      workday: snowflake
+      greenhouse: snowflake
+  square:
+    name: Square
+    runners:
+      workday: square
+  squarespace:
+    name: Squarespace
+    runners:
+      greenhouse: squarespace
+  stability:
+    name: Stability AI
+    runners:
+      workday: stability
+      greenhouse: stability
+  stripe:
+    name: Stripe
+    runners:
+      workday: stripe
+      greenhouse: stripe
+  sunlife:
+    name: Sun Life
+    runners:
+      workday: sunlife
+  synthesia:
+    name: Synthesia
+    runners:
+      workday: synthesia
+      greenhouse: synthesia
+  td:
+    name: TD Bank
+    runners:
+      workday: td
+  telus:
+    name: TELUS International
+    runners:
+      workday: telus
+  telus_health:
+    name: TELUS Health
+    runners:
+      workday: telus_health
+  tempus:
+    name: Tempus
+    runners:
+      workday: tempus
+      greenhouse: tempus
+  thomson_reuters:
+    name: Thomson Reuters
+    runners:
+      workday: thomson_reuters
+  tmx:
+    name: TMX Group
+    runners:
+      workday: tmx
+  uber:
+    name: Uber
+    runners:
+      workday: uber
+  uipath:
+    name: UiPath
+    runners:
+      workday: uipath
+      greenhouse: uipath
+  upstart:
+    name: Upstart
+    runners:
+      workday: upstart
+      greenhouse: upstart
+  vade:
+    name: Vade Secure
+    runners:
+      workday: vade
+      greenhouse: vadesecure
+  veracyte:
+    name: Veracyte
+    runners:
+      workday: veracyte
+      greenhouse: veracyte
+  vercel:
+    name: Vercel
+    runners:
+      greenhouse: vercel
+  veritone:
+    name: Veritone
+    runners:
+      workday: veritone
+      greenhouse: veritone
+  viz_ai:
+    name: Viz.ai
+    runners:
+      workday: viz_ai
+      greenhouse: vizai
+  walmart:
+    name: Walmart
+    aliases:
+    - Walmart Inc
+    - Walmart Global Tech
+    domain: walmart.com
+    career_url: https://careers.walmart.com
+    ats: custom
+  wayve:
+    name: Wayve
+    runners:
+      workday: wayve
+      greenhouse: wayve
+  weave:
+    name: Weave
+    runners:
+      workday: weave
+      greenhouse: weave
+  weights_biases:
+    name: Weights & Biases
+    runners:
+      workday: weights_biases
+  workato:
+    name: Workato
+    runners:
+      workday: workato
+      greenhouse: workato
+  workday:
+    name: Workday
+    runners:
+      workday: workday
+  workfusion:
+    name: WorkFusion
+    runners:
+      workday: workfusion
+      greenhouse: workfusion
+  writer:
+    name: Writer
+    runners:
+      workday: writer
+      greenhouse: writer
+  zapier:
+    name: Zapier
+    runners:
+      workday: zapier
+      greenhouse: zapier
+  zebra_medical:
+    name: Zebra Medical Vision
+    runners:
+      workday: zebra_medical
+      greenhouse: zebra
+  zoominfo:
+    name: ZoomInfo
+    runners:
+      workday: zoominfo
+      greenhouse: zoominfo
+  zoox:
+    name: Zoox
+    runners:
+      workday: zoox
+      greenhouse: zoox
