@@ -51,7 +51,7 @@ def classify_email(email: dict) -> dict:
     """
     from applypilot.llm import get_client
 
-    client = get_client(quality=False)
+    client = get_client(tier="cheap")
 
     # Build user prompt with email content
     body_preview = (email.get("body") or email.get("snippet") or "")[:4000]

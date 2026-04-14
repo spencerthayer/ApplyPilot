@@ -37,6 +37,12 @@ class _FakePlaywright:
 
 
 class _FakePlaywrightContext:
+    def start(self) -> _FakePlaywright:
+        return _FakePlaywright()
+
+    def stop(self) -> None:
+        return None
+
     def __enter__(self) -> _FakePlaywright:
         return _FakePlaywright()
 
@@ -52,6 +58,10 @@ def _install_fake_playwright(monkeypatch) -> None:
     playwright_module.sync_api = sync_api_module
     monkeypatch.setitem(sys.modules, "playwright", playwright_module)
     monkeypatch.setitem(sys.modules, "playwright.sync_api", sync_api_module)
+
+    # Clear any cached shared browser from previous tests
+    from applypilot.scoring.pdf import pdf_renderer
+    pdf_renderer.close_shared_browser()
 
 
 def _write_resume_txt(path: Path) -> None:

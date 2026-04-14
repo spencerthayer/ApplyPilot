@@ -18,7 +18,8 @@ log = logging.getLogger(__name__)
 
 # --- Priority 1: Always send to LLM (need dates/people/action extraction) ---
 LLM_REQUIRED_SUBJECT_PATTERNS = [
-    re.compile(p, re.IGNORECASE) for p in [
+    re.compile(p, re.IGNORECASE)
+    for p in [
         r"\binterview\b",
         r"\bschedul(?:e|ed|ing)\b",
         r"\bnext\s+steps?\b",
@@ -35,7 +36,8 @@ LLM_REQUIRED_SUBJECT_PATTERNS = [
 ]
 
 LLM_REQUIRED_SNIPPET_PATTERNS = [
-    re.compile(p, re.IGNORECASE) for p in [
+    re.compile(p, re.IGNORECASE)
+    for p in [
         r"\bschedule\s+(?:a|an|your)\s+interview\b",
         r"\binvit(?:e|ed|ing)\s+you\s+to\b",
         r"\bnext\s+steps?\b",
@@ -47,11 +49,12 @@ LLM_REQUIRED_SNIPPET_PATTERNS = [
 
 # --- Priority 2: Noise — skip entirely ---
 NOISE_SENDER_DOMAINS = {
-    "linkedin.com", "linotify.com",  # LinkedIn alerts
-    "indeed.com",        # Indeed alerts
-    "glassdoor.com",     # Glassdoor
+    "linkedin.com",
+    "linotify.com",  # LinkedIn alerts
+    "indeed.com",  # Indeed alerts
+    "glassdoor.com",  # Glassdoor
     "ziprecruiter.com",  # ZipRecruiter alerts
-    "dice.com",          # Dice alerts
+    "dice.com",  # Dice alerts
     "monster.com",
     "simplyapply.com",
     "careerbuilder.com",
@@ -61,7 +64,8 @@ NOISE_SENDER_DOMAINS = {
 }
 
 NOISE_SUBJECT_PATTERNS = [
-    re.compile(p, re.IGNORECASE) for p in [
+    re.compile(p, re.IGNORECASE)
+    for p in [
         r"\bjob\s+alert",
         r"\bnew\s+jobs?\s+(?:for|matching|near)\b",
         r"\bnewsletter\b",
@@ -81,16 +85,26 @@ NOISE_SUBJECT_PATTERNS = [
 # --- Priority 3: Auto-confirm patterns ---
 # Known ATS notification sender domains
 ATS_SENDER_DOMAINS = {
-    "greenhouse.io", "lever.co", "icims.com", "myworkdayjobs.com",
-    "jobvite.com", "smartrecruiters.com", "workable.com",
-    "ashbyhq.com", "breezy.hr", "recruitee.com", "jazz.co",
-    "applytojob.com", "hire.lever.co",
+    "greenhouse.io",
+    "lever.co",
+    "icims.com",
+    "myworkdayjobs.com",
+    "jobvite.com",
+    "smartrecruiters.com",
+    "workable.com",
+    "ashbyhq.com",
+    "breezy.hr",
+    "recruitee.com",
+    "jazz.co",
+    "applytojob.com",
+    "hire.lever.co",
 }
 
 ATS_SENDER_PREFIXES = {"noreply", "no-reply", "notifications", "careers", "jobs", "talent", "recruiting"}
 
 CONFIRM_PATTERNS = [
-    re.compile(p, re.IGNORECASE) for p in [
+    re.compile(p, re.IGNORECASE)
+    for p in [
         r"thank\s+you\s+for\s+(?:your\s+)?appl(?:ying|ication)",
         r"application\s+(?:received|submitted|confirmed)",
         r"we\s+(?:have\s+)?received\s+your\s+application",
@@ -103,7 +117,8 @@ CONFIRM_PATTERNS = [
 
 # --- Priority 4: Auto-reject patterns ---
 REJECT_PATTERNS = [
-    re.compile(p, re.IGNORECASE) for p in [
+    re.compile(p, re.IGNORECASE)
+    for p in [
         r"\bunfortunately\b",
         r"\bnot\s+(?:be\s+)?moving\s+forward\b",
         r"\bposition\s+(?:has\s+been\s+)?filled\b",
@@ -122,10 +137,11 @@ REJECT_PATTERNS = [
 @dataclass
 class TriageResult:
     """Result of pure-Python email triage."""
-    classification: str        # confirmation, rejection, noise, or "llm_needed"
+
+    classification: str  # confirmation, rejection, noise, or "llm_needed"
     confidence: float
     summary: str = ""
-    reason: str = ""           # Why this classification was chosen
+    reason: str = ""  # Why this classification was chosen
     people: list = field(default_factory=list)
     dates: list = field(default_factory=list)
     action_items: list = field(default_factory=list)
@@ -145,6 +161,7 @@ class TriageResult:
 @dataclass
 class TriageStats:
     """Aggregate triage statistics for logging."""
+
     total: int = 0
     auto_confirmed: int = 0
     auto_rejected: int = 0
@@ -180,10 +197,7 @@ def _is_ats_sender(sender: str) -> bool:
     """Check if sender is a known ATS notification address."""
     domain = _sender_domain(sender)
     local = sender.split("@")[0].lower() if "@" in sender else ""
-    return (
-        any(ats in domain for ats in ATS_SENDER_DOMAINS)
-        or local in ATS_SENDER_PREFIXES
-    )
+    return any(ats in domain for ats in ATS_SENDER_DOMAINS) or local in ATS_SENDER_PREFIXES
 
 
 def _matches_any(text: str, patterns: list[re.Pattern]) -> bool:

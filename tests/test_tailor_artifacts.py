@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
-from applypilot.scoring import tailor
+from applypilot.scoring.tailor import orchestrator as tailor
 
 
-class _FakeConnection:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple]] = []
-        self.committed = False
-
-    def execute(self, query: str, params: tuple = ()) -> "_FakeConnection":
-        self.calls.append((query, params))
-        return self
-
-    def commit(self) -> None:
-        self.committed = True
+def _mock_app(monkeypatch, jobs: list[dict] | None = None):
+    """Create a mock app with a fake job_repo."""
+    repo = MagicMock()
+    repo.get_jobs_by_stage_dict.return_value = jobs or []
+    repo.update_tailoring.return_value = None
+    repo.increment_attempts.return_value = None
+    repo.find_by_url_fuzzy.return_value = None
+    app = SimpleNamespace(container=SimpleNamespace(job_repo=repo), config=SimpleNamespace())
+    monkeypatch.setattr("applypilot.bootstrap.get_app", lambda: app)
+    return repo
 
 
 def _make_job(url: str = "https://example.com/job/1") -> dict:
@@ -53,14 +54,12 @@ def test_build_tailored_prefix_is_deterministic_and_unique_per_url() -> None:
 
 
 def test_run_tailoring_requires_pdf_for_submission(monkeypatch, tmp_path: Path) -> None:
-    conn = _FakeConnection()
     job = _make_job()
 
     monkeypatch.setattr(tailor, "TAILORED_DIR", tmp_path)
     monkeypatch.setattr(tailor, "load_profile", lambda: {"personal": {}})
     monkeypatch.setattr(tailor, "load_resume_text", lambda: "base resume")
-    monkeypatch.setattr(tailor, "get_connection", lambda: conn)
-    monkeypatch.setattr(tailor, "get_jobs_by_stage", lambda **_: [job])
+    repo = _mock_app(monkeypatch, jobs=[job])
     monkeypatch.setattr(tailor, "tailor_resume", lambda *args, **kwargs: ("tailored resume", _approved_report()))
 
     def _fake_convert_to_pdf(text_path: Path) -> Path:
@@ -78,19 +77,17 @@ def test_run_tailoring_requires_pdf_for_submission(monkeypatch, tmp_path: Path) 
     pdfs = list(tmp_path.glob("*.pdf"))
     assert any(not p.name.endswith("_JOB.txt") for p in txts)
     assert len(pdfs) == 1
-    assert any("tailored_resume_path" in query for query, _ in conn.calls)
-    assert conn.committed
+    repo.update_tailoring.assert_called_once()
+    repo.increment_attempts.assert_called()
 
 
 def test_run_tailoring_does_not_persist_when_pdf_generation_fails(monkeypatch, tmp_path: Path) -> None:
-    conn = _FakeConnection()
     job = _make_job()
 
     monkeypatch.setattr(tailor, "TAILORED_DIR", tmp_path)
     monkeypatch.setattr(tailor, "load_profile", lambda: {"personal": {}})
     monkeypatch.setattr(tailor, "load_resume_text", lambda: "base resume")
-    monkeypatch.setattr(tailor, "get_connection", lambda: conn)
-    monkeypatch.setattr(tailor, "get_jobs_by_stage", lambda **_: [job])
+    repo = _mock_app(monkeypatch, jobs=[job])
     monkeypatch.setattr(tailor, "tailor_resume", lambda *args, **kwargs: ("tailored resume", _approved_report()))
     monkeypatch.setattr("applypilot.scoring.pdf.convert_to_pdf", lambda _: (_ for _ in ()).throw(RuntimeError("boom")))
 
@@ -99,6 +96,6 @@ def test_run_tailoring_does_not_persist_when_pdf_generation_fails(monkeypatch, t
     assert result["approved"] == 0
     assert result["errors"] == 1
     assert any(not p.name.endswith("_JOB.txt") for p in tmp_path.glob("*.txt"))
-    assert not any("tailored_resume_path" in query for query, _ in conn.calls)
-    assert any("tailor_attempts=COALESCE(tailor_attempts,0)+1" in query for query, _ in conn.calls)
-    assert conn.committed
+    # Verify repo was called for attempts but NOT for tailoring path
+    repo.update_tailoring.assert_not_called()
+    repo.increment_attempts.assert_called()

@@ -20,9 +20,17 @@ log = logging.getLogger(__name__)
 
 # Known ATS notification sender patterns
 ATS_SENDER_PATTERNS = {
-    "greenhouse.io", "lever.co", "icims.com", "myworkdayjobs.com",
-    "jobvite.com", "smartrecruiters.com", "workable.com",
-    "ashbyhq.com", "breezy.hr", "recruitee.com", "jazz.co",
+    "greenhouse.io",
+    "lever.co",
+    "icims.com",
+    "myworkdayjobs.com",
+    "jobvite.com",
+    "smartrecruiters.com",
+    "workable.com",
+    "ashbyhq.com",
+    "breezy.hr",
+    "recruitee.com",
+    "jazz.co",
 }
 
 ATS_SENDER_PREFIXES = {"noreply", "no-reply", "notifications", "careers", "jobs", "talent", "recruiting"}
@@ -50,16 +58,50 @@ _COMPANY_SUBJECT_PATTERNS = [
 
 # Words too generic to be a company name
 _GENERIC_WORDS = {
-    "us", "the", "you", "your", "we", "our", "it", "a", "an",
-    "this", "that", "they", "their", "its",
+    "us",
+    "the",
+    "you",
+    "your",
+    "we",
+    "our",
+    "it",
+    "a",
+    "an",
+    "this",
+    "that",
+    "they",
+    "their",
+    "its",
 }
 
 # Words that indicate a job title was captured instead of a company name
 _JOB_TITLE_WORDS = {
-    "engineer", "developer", "manager", "director", "analyst", "scientist",
-    "architect", "designer", "consultant", "specialist", "coordinator",
-    "senior", "junior", "staff", "principal", "associate", "lead", "head",
-    "vp", "vice", "president", "officer", "cto", "ceo", "cfo", "coo",
+    "engineer",
+    "developer",
+    "manager",
+    "director",
+    "analyst",
+    "scientist",
+    "architect",
+    "designer",
+    "consultant",
+    "specialist",
+    "coordinator",
+    "senior",
+    "junior",
+    "staff",
+    "principal",
+    "associate",
+    "lead",
+    "head",
+    "vp",
+    "vice",
+    "president",
+    "officer",
+    "cto",
+    "ceo",
+    "cfo",
+    "coo",
 }
 
 # Legal suffixes to strip when normalizing
@@ -157,7 +199,8 @@ def _extract_company_from_url(url: str | None) -> str | None:
     """Extract company name from an application URL (simplified)."""
     if not url:
         return None
-    from applypilot.database import extract_company
+    from applypilot.tracking._compat import extract_company
+
     return extract_company(url)
 
 
@@ -166,7 +209,7 @@ def _title_keywords(title: str | None) -> set[str]:
     if not title:
         return set()
     stops = {"the", "a", "an", "and", "or", "at", "in", "for", "of", "to", "with", "is", "are", "we"}
-    words = re.findall(r'[a-z]+', title.lower())
+    words = re.findall(r"[a-z]+", title.lower())
     return {w for w in words if len(w) > 2 and w not in stops}
 
 
@@ -251,7 +294,7 @@ def match_email_to_job(email: dict, applied_jobs: list[dict]) -> dict | None:
         # --- Signal 3: Job title keyword overlap (20 pts) ---
         title_kw = _title_keywords(title)
         if title_kw:
-            subject_words = set(re.findall(r'[a-z]+', subject))
+            subject_words = set(re.findall(r"[a-z]+", subject))
             overlap = title_kw & subject_words
             if len(overlap) >= 2:
                 score += 20
@@ -261,10 +304,7 @@ def match_email_to_job(email: dict, applied_jobs: list[dict]) -> dict | None:
                 signals.append(f"title_partial:{','.join(overlap)}")
 
         # --- Signal 4: ATS sender pattern (10 pts) ---
-        is_ats = (
-            any(ats in sender_domain for ats in ATS_SENDER_PATTERNS)
-            or sender_local in ATS_SENDER_PREFIXES
-        )
+        is_ats = any(ats in sender_domain for ats in ATS_SENDER_PATTERNS) or sender_local in ATS_SENDER_PREFIXES
         if is_ats:
             score += 10
             signals.append("ats_sender")
@@ -272,9 +312,7 @@ def match_email_to_job(email: dict, applied_jobs: list[dict]) -> dict | None:
         # --- Signal 5: Temporal proximity (5 pts) ---
         if email_dt and job.get("applied_at"):
             try:
-                applied_dt = datetime.fromisoformat(
-                    job["applied_at"].replace("Z", "+00:00")
-                )
+                applied_dt = datetime.fromisoformat(job["applied_at"].replace("Z", "+00:00"))
                 delta_days = abs((email_dt - applied_dt).days)
                 if delta_days <= 30:
                     score += 5
@@ -294,8 +332,10 @@ def match_email_to_job(email: dict, applied_jobs: list[dict]) -> dict | None:
                 subject_company_norm == job_company_norm
                 or subject_company_norm in job_company_norm
                 or job_company_norm in subject_company_norm
-                or (subj_slug and job_slug and (subj_slug == job_slug
-                    or subj_slug in job_slug or job_slug in subj_slug))
+                or (
+                        subj_slug and job_slug and (
+                        subj_slug == job_slug or subj_slug in job_slug or job_slug in subj_slug)
+                )
             ):
                 score += 35
                 signals.append(f"subject_company:{subject_company_raw}")
@@ -310,7 +350,10 @@ def match_email_to_job(email: dict, applied_jobs: list[dict]) -> dict | None:
             }
 
     if best_match:
-        log.debug("Best match: %s (score: %d, signals: %s)",
-                  best_match["job_url"][:60], best_match["score"],
-                  ", ".join(best_match["signals"]))
+        log.debug(
+            "Best match: %s (score: %d, signals: %s)",
+            best_match["job_url"][:60],
+            best_match["score"],
+            ", ".join(best_match["signals"]),
+        )
     return best_match

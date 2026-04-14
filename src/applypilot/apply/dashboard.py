@@ -53,6 +53,7 @@ MAX_EVENTS = 8
 # State mutation helpers
 # ---------------------------------------------------------------------------
 
+
 def init_worker(worker_id: int = 0) -> None:
     """Register the worker in the dashboard state."""
     with _lock:
@@ -146,9 +147,7 @@ def start_health_checks() -> None:
     if _health_thread is not None and _health_thread.is_alive():
         return
     _health_stop.clear()
-    _health_thread = threading.Thread(
-        target=_health_check_loop, daemon=True, name="chrome-health"
-    )
+    _health_thread = threading.Thread(target=_health_check_loop, daemon=True, name="chrome-health")
     _health_thread.start()
 
 
@@ -237,8 +236,15 @@ def render_dashboard() -> Table:
     # Totals row
     table.add_section()
     table.add_row(
-        "", "", "", "", "", "TOTAL",
-        str(total_applied), str(total_failed), f"${total_cost:.3f}",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "TOTAL",
+        str(total_applied),
+        str(total_failed),
+        f"${total_cost:.3f}",
         style="bold",
     )
 
@@ -280,3 +286,111 @@ def get_totals() -> dict[str, int | float]:
         failed = sum(s.jobs_failed for s in _worker_states.values())
         cost = sum(s.total_cost for s in _worker_states.values())
     return {"applied": applied, "failed": failed, "cost": cost}
+
+
+# ---------------------------------------------------------------------------
+# Live dashboard lifecycle — owns the Rich Live instance + refresh thread
+# ---------------------------------------------------------------------------
+
+from rich.console import Console
+from rich.live import Live
+
+_live: Live | None = None
+_refresh_thread: threading.Thread | None = None
+_refresh_running = False
+_pause_event = threading.Event()  # set = paused
+_console = Console()
+
+
+def start() -> None:
+    """Start the live dashboard. Call once from main()."""
+    global _live, _refresh_thread, _refresh_running
+    if _live is not None:
+        return
+    _live = Live(render_full(), console=_console, refresh_per_second=2)
+    _live.start()
+    _refresh_running = True
+    _pause_event.clear()
+
+    def _refresh():
+        while _refresh_running:
+            if not _pause_event.is_set() and _live is not None:
+                try:
+                    _live.update(render_full())
+                except Exception:
+                    pass
+            time.sleep(0.5)
+
+    _refresh_thread = threading.Thread(target=_refresh, daemon=True, name="dashboard-refresh")
+    _refresh_thread.start()
+
+
+def stop() -> None:
+    """Stop the live dashboard and refresh thread."""
+    global _live, _refresh_running
+    _refresh_running = False
+    if _refresh_thread is not None:
+        _refresh_thread.join(timeout=2)
+    if _live is not None:
+        try:
+            _live.update(render_full())
+            _live.stop()
+        except Exception:
+            pass
+        _live = None
+
+
+def pause() -> None:
+    """Pause dashboard refresh (for interactive prompts)."""
+    _pause_event.set()
+    if _live is not None:
+        try:
+            _live.stop()
+        except Exception:
+            pass
+
+
+def resume() -> None:
+    """Resume dashboard refresh after interactive prompt."""
+    if _live is not None:
+        try:
+            _live.start()
+        except Exception:
+            pass
+    _pause_event.clear()
+
+
+def pause_for_input(msg: str, options: str = "Enter=continue") -> str:
+    """Pause dashboard, show prompt, get input, resume dashboard.
+
+    This is the single entry point for all interactive prompts during apply.
+    Ensures dashboard doesn't flicker over the prompt.
+    """
+    import sys
+    pause()
+    sys.stderr.write(f"\n{msg}\n    [{options}]: ")
+    sys.stderr.flush()
+    try:
+        result = input().strip().lower()
+    except EOFError:
+        result = ""
+    resume()
+    return result
+
+
+def log_info(msg: str) -> None:
+    """Print a message to the terminal. Use instead of console.print in business logic."""
+    _console.print(msg)
+
+
+def log_warning(msg: str) -> None:
+    """Print a warning to the terminal."""
+    pause()
+    _console.print(msg)
+    resume()
+
+
+def show_summary(applied: int, failed: int, cost: float, log_dir: str) -> None:
+    """Print the final summary after apply completes."""
+    _console.print(f"\n[bold]Done: {applied} applied, {failed} failed (${cost:.3f})[/bold]")
+    _console.print(f"Logs: {log_dir}")

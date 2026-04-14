@@ -12,7 +12,9 @@ def make_profile(target_title: str = "", companies: list[str] | None = None):
     return {
         "skills": [{"name": "Languages", "keywords": ["Python"]}],
         "work": work,
-        "education": [{"institution": "Acme University", "studyType": "B.S.", "area": "Computer Science", "endDate": "2020"}],
+        "education": [
+            {"institution": "Acme University", "studyType": "B.S.", "area": "Computer Science", "endDate": "2020"}
+        ],
         "job_context": {"title": target_title},
     }
 
@@ -61,7 +63,9 @@ def test_normal_mode_allows_missing_historical_companies_with_warning():
 
     res = validate_json_fields(data, profile, mode="normal")
     assert res["passed"], f"Expected pass in normal mode but got errors: {res['errors']}"
-    assert any("Old Company" in warning for warning in res["warnings"]), "Expected warning for missing historical company"
+    assert any("Old Company" in warning for warning in res["warnings"]), (
+        "Expected warning for missing historical company"
+    )
     assert not any("missing from experience" in error for error in res["errors"])
 
 
@@ -87,11 +91,13 @@ def test_normal_mode_accepts_company_in_subtitle():
         "title": "Senior Software Engineer",
         "summary": "Experienced engineer.",
         "skills": {"Languages": "Python"},
-        "experience": [{
-            "header": "Principal Developer",
-            "subtitle": "Watson Creative | 2022-09 - 2026-02",
-            "bullets": ["Did work"],
-        }],
+        "experience": [
+            {
+                "header": "Principal Developer",
+                "subtitle": "Watson Creative | 2022-09 - 2026-02",
+                "bullets": ["Did work"],
+            }
+        ],
         "projects": [{"header": "Project Alpha", "subtitle": "Python | 2023", "bullets": ["Built X"]}],
         "education": "Acme University | B.S. Computer Science",
     }

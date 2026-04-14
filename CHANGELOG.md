@@ -8,12 +8,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+- **Code-first apply engine** (`apply/code_filler.py`) — HTTP prefetch + programmatic form fill for Greenhouse/Lever/Ashby. 35s/job vs 180s with LLM loop. LLM called only for unknown screening questions (single batch call)
+- **Fair job scheduler** (`apply/scheduler.py`) — CFS-inspired hierarchical min-heap scheduler. Round-robin across boards and companies using virtual runtimes. O(log n) per pick
+- **Board-specific handlers** — Greenhouse/Lever/Ashby → code-first, Workday/LinkedIn → LLM agent, Unknown → code-first with LLM fallback
+- **Relevance gate** (`discovery/relevance_gate.py`) — LLM-generated role keywords + anti-keywords at init time. Filters irrelevant jobs at discovery insert before they enter the DB
+- **Location resolver** (`discovery/location_resolver.py`) — City/state → country resolution via `local-geocode` library. Enables location-based filtering (e.g., exclude US jobs)
+- **Job timeline** (`analytics/timeline.py`, `applypilot timeline <URL>`) — Full lifecycle view per job: discover → enrich → score → tailor → cover → apply with timestamps, errors, artifacts, stats
+- **Dashboard/orchestrator separation** — All Rich/UI code moved from `orchestrator.py` to `dashboard.py`. Orchestrator is now pure business logic with zero UI imports
+- **Dashboard pause/resume** — `dashboard.pause_for_input()` stops Live refresh during interactive prompts, preventing flickering
+- **Interactive needs_human prompt** — Enter=skip, r=retry agent, m=finish manually. Chrome stays open
+- **Pause file mechanism** — `touch ~/.applypilot/.pause` to intervene mid-agent-run
+- **Dry-run Chrome pause** — Chrome stays open for verification on both APPLIED and NEEDS_HUMAN results
+- **HTTP pre-fetch expired detection** — Detects expired jobs in 1-6s via HTTP without launching Chrome
+- **Shared Playwright browser pool** (`pdf_renderer.py`) — One Chromium instance reused across all PDFs in a batch. Eliminates ~2-4s startup per PDF
+- **76 new tests** (941 → 1015) across 4 new test files: code_filler, scheduler, location_resolver, relevance_gate
+
+### Fixed
+
+- **False expired detection** — `_CHECK_PAGE_JS` regex matched its own source code in tool output. Fixed with exact token matching
+- **False auth detection** — Removed hardcoded auth page text matching that triggered on nav bar "Sign in" links. LLM handles auth detection via prompt rules
+- **Auto cookie dismiss false clicks** — Removed mechanical cookie dismiss that clicked wrong elements on sites without banners. LLM handles via prompt rules
+- **Infinite retry on LLM errors** — `llm_error`, `job_expired`, `login_required`, `no_form_found` added to permanent failures
+- **Stale in_progress locks** — Jobs locked by interrupted runs now properly released
+- **Invalid CSS selector** — `button:has-text()` (Playwright syntax) replaced with safe text content check in `querySelector`
+- **JSON parse in DOM discovery** — Bracket depth matching instead of `rindex` which matched wrong bracket
+- **Ambiguous SQL column** — Round-robin query aliased subquery `site` as `_rsite`
+- **macOS display detection** — macOS always returns headful (doesn't use DISPLAY env var)
+- **Native agent used cheap model** — Changed default from `tier="cheap"` to `tier="premium"` for form filling
+
+### Changed
+
+- **Apply job acquisition** — Replaced `ORDER BY fit_score DESC` with CFS round-robin: `ROW_NUMBER() OVER (PARTITION BY site)` + virtual runtime ordering
+- **Max agent iterations** — 35 → 60 for forms with many screening questions
+- **Snapshot truncation** — 8K → 16K for large Greenhouse pages
+- **System prompt** — Added R11 (N/A for irrelevant location questions), R12 (neutral answers for unknown fields)
+- **`pyproject.toml`** — Added `local-geocode>=0.0.2` dependency
+- **`wizard.py`** — Generates relevance filter during init (Step 4b)
+
+- **v2 Architecture Implementation** — Full implementation of all v2 planning doc requirements. See
+  `docs/IMPLEMENTATION_ADDENDUM-2026-04-03.md` for details.
+- **`applypilot recover`** — Reset stale in-progress jobs and clean partial artifacts (APPLY-22)
+- **`applypilot cv render`** — Generate comprehensive CV from master profile, all sections, no page limit (INIT-20)
+- **`applypilot resume refresh`** — Detect stale tailored resumes after profile edits and clear for re-tailoring (
+  INIT-23)
+- **FTS5 full-text search** — `jobs_fts` virtual table for fast keyword search across job titles, companies,
+  descriptions (RUN-04)
+- **Geographic filtering modes** — `worldwide`, `include_only`, `exclude` modes in searches.yaml (RUN-09)
+- **Remote work mode filtering** — `classify_work_mode()` and `work_mode_ok()` for remote/hybrid/onsite filtering (
+  RUN-10)
+- **Market Intelligence** — Top skills demand, locations, seniority distribution from scored jobs (ANALYZE-03)
+- **Career Health Score** — 0-10 composite metric: skill coverage + experience depth + success rate + market demand (
+  ANALYZE-04)
+- **Career Roadmap** — Prioritized skill acquisition milestones with demand percentages (ANALYZE-05)
+- **Track/Segment Comparison** — Side-by-side metrics by job source (ANALYZE-07)
+- **AI-suggested flagging** — Enrichment-generated content tracked in `meta.applypilot.ai_suggested[]` (INIT-04)
+- **Multi-language input** — Non-English resume content auto-normalized to English via LLM (INIT-06)
+- **Per-section resume review** — Interactive accept/edit/remove per resume section during init (INIT-10)
+- **Tiered tailoring** — TL0-TL3 effort levels based on fit score (INIT-22)
+- **LLM cost persistence** — Costs saved to `analytics_events` DB, survives across sessions
+- **`pipeline.cost_tracking`** — Config flag to enable/disable cost persistence
+- **BulletBankRepository** — ABC + SQLite implementation for bullet bank persistence
+- **Per-file migration system** — `db/migrations/mNNN_*.py` auto-discovered by runner
+- **ComprehensiveStorage** — Storage adapter for comprehensive tailoring engine
+- **`resume/` subpackage** — Validation and extraction extracted from `resume_json.py`
+- **Company-aware priority queue** — `PARTITION BY COALESCE(company, site)` spreads applications across employers (
+  APPLY-19)
+- **139 new tests** (565 → 704), 9 new test files covering analytics, classifiers, scoring, threading, cost tracking
+
+### Fixed
+
+- **SQLite threading crash in analytics observer** — Observer now creates thread-local DB connection
+- **`init --resume-json` overwrites existing resume** — Now merges, preserving profiles/contact/meta
+- **GitHub URL missing from HTML render** — URLs from `meta.applypilot.personal` now synced to `basics.profiles[]`
+- **`applypilot llm costs` KeyError** — Factory and CLI now use consistent `CostTracker.summary()` keys
+- **LLM costs lost on exit** — Persisted to DB via `analytics_events`
+- **`CostTracker` never wired** — Now instantiated in `LLMClient.__init__` and recorded after each call
+- **113 F821 lint warnings** — All cross-module undefined name references resolved
+- **894 total lint errors** — All fixed (auto-fix + ruff format + manual splits)
+- **Dead code in orchestrator** — Removed legacy `run_job()` (90 lines of raw SQL)
+- **All SQL leaks** — Zero `sqlite3.connect()` calls remain in business logic
+
+### Changed
+
+- `tracking/stubs.py` — Rewritten to use `TrackingRepository` (5 new methods)
+- `tracking/pipeline.py` — Rewritten to use repos instead of raw SQL
+- `tailoring/bullet_bank/bank.py` — Now accepts `BulletBankRepository` via constructor
+- `tailoring/comprehensive_engine.py` — `import sqlite3` removed, uses `ComprehensiveStorage`
+- `tailoring/state_machine.py` — `_make_bullet_bank()` helper with DI fallback
+- `discovery/jobspy/filters.py` — `_location_ok()` accepts mode param, `_load_location_config()` returns 3-tuple
+- `analytics/observer.py` — Thread-local connection, all 7 aggregator models wired
+- `analytics/aggregators/processor.py` — Routes events to market, health, roadmap, tracks aggregators
+- `pyproject.toml` — Added `[tool.ruff.lint]` config suppressing structural rules
+
  **Greenhouse ATS support** - New discovery source for 129 AI/ML startups and tech companies using Greenhouse (Scale AI, Stripe, Figma, Notion, etc.). Uses official Greenhouse Job Board API (`boards-api.greenhouse.io`) for reliable, structured data.
  **New module**: `src/applypilot/discovery/greenhouse.py` - API-based fetcher with full job descriptions, parallel execution, location filtering, and query matching
  **New config**: `src/applypilot/config/greenhouse.yaml` - 129 verified Greenhouse employers organized by category (Core AI, Infrastructure, Fintech, Healthcare, etc.)
  **User config override** - Users can extend/modify employers via `~/.applypilot/greenhouse.yaml`
  **New CLI commands** - `applypilot greenhouse verify|discover|validate|list-employers|add-job` for managing Greenhouse employers
  **Pipeline integration** - Greenhouse fetcher runs automatically during `discover` stage alongside JobSpy, Workday, and SmartExtract
+ **`pending_cover` stage** in `get_jobs_by_stage()` — cover letter generation now uses the shared query gateway instead of inline SQL
+
+### Fixed
+ **`applypilot single` processed all jobs instead of one** — score, tailor, cover, and enrich stages ignored `PipelineContext.job_url` and queried the entire database. Added `job_url` parameter to `get_jobs_by_stage()`, `run_scoring()`, `run_tailoring()`, `run_cover_letters()`, `run_enrichment()`, and `_run_detail_scraper()`. All stages in `pipeline/stages.py` now pass `ctx.job_url` through. Existing batch callers are unaffected (parameter defaults to `None`).
 
 ### Changed
 - **Canonical resume contract** - Runtime personal info, work history, education, skills, projects, and verified metrics now come from `~/.applypilot/resume.json` instead of duplicated fields in `~/.applypilot/profile.json`

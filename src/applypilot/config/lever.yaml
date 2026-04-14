@@ -1,0 +1,40 @@
+# Lever employer registry — companies using Lever ATS
+# Format: slug (from jobs.lever.co/{slug})
+
+employers:
+  netflix:
+    name: Netflix
+    slug: netflix
+  twilio:
+    name: Twilio
+    slug: twilio
+  gong:
+    name: Gong
+    slug: gong
+  dialpad:
+    name: Dialpad
+    slug: dialpad
+  ada:
+    name: Ada
+    slug: ada-support
+  liveperson:
+    name: LivePerson
+    slug: liveperson
+  decagon:
+    name: Decagon
+    slug: decagon
+  cognigy:
+    name: Cognigy
+    slug: cognigy
+  speechmatics:
+    name: Speechmatics
+    slug: speechmatics
+  factorial:
+    name: Factorial
+    slug: factorial
+  n8n:
+    name: n8n
+    slug: n8n
+  zapier:
+    name: Zapier
+    slug: zapier

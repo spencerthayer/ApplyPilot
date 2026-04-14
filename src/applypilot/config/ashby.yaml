@@ -1,0 +1,43 @@
+# Ashby employer registry — companies using Ashby ATS
+# Format: slug (from jobs.ashbyhq.com/{slug})
+
+employers:
+  anthropic:
+    name: Anthropic
+    slug: anthropic
+  openai:
+    name: OpenAI
+    slug: openai
+  retool:
+    name: Retool
+    slug: retool
+  vercel:
+    name: Vercel
+    slug: vercel
+  temporal:
+    name: Temporal
+    slug: temporal
+  glean:
+    name: Glean
+    slug: glean
+  arize:
+    name: Arize AI
+    slug: arize
+  langchain:
+    name: LangChain
+    slug: langchain
+  pinecone:
+    name: Pinecone
+    slug: pinecone
+  hume:
+    name: Hume AI
+    slug: hume
+  vapi:
+    name: Vapi
+    slug: vapi
+  attio:
+    name: Attio
+    slug: attio
+  tinybird:
+    name: Tinybird
+    slug: tinybird

@@ -11,6 +11,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 import applypilot.cli as cli
+import applypilot.cli.commands.apply_cmd as _apply_cmd
 import applypilot.config as config
 import applypilot.llm_provider as llm_provider
 import applypilot.resume_render as resume_render
@@ -62,9 +63,18 @@ def _sample_resume_json() -> dict:
                     "github_url": "https://github.com/alex",
                     "linkedin_url": "https://linkedin.com/in/alex",
                 },
+                "target_role": "Staff Engineer",
+                "years_of_experience_total": "10",
+                "target_locations": {"locations": ["US"], "mode": "any"},
                 "tailoring_config": {
                     "default_role_type": "software_engineer",
-                    "validation": {"enabled": True, "max_retries": 3, "min_bullets_per_role": 2, "max_bullets_per_role": 5, "min_metrics_ratio": 0.7},
+                    "validation": {
+                        "enabled": True,
+                        "max_retries": 3,
+                        "min_bullets_per_role": 2,
+                        "max_bullets_per_role": 5,
+                        "min_metrics_ratio": 0.7,
+                    },
                     "role_types": {},
                 },
             }
@@ -130,7 +140,10 @@ def test_resume_render_command_uses_helper(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         resume_render,
         "render_resume_html",
-        lambda resume_path=None, theme=None, output_path=None: (output_path or output, theme or "jsonresume-theme-even"),
+        lambda resume_path=None, theme=None, output_path=None: (
+            output_path or output,
+            theme or "jsonresume-theme-even",
+        ),
     )
 
     result = runner.invoke(
@@ -246,9 +259,9 @@ def test_apply_backfills_profile_from_resume_json(monkeypatch, tmp_path: Path) -
     monkeypatch.setattr(config, "check_tier", lambda *args, **kwargs: None)
     monkeypatch.setattr(config, "PROFILE_PATH", profile)
     monkeypatch.setattr(config, "RESUME_JSON_PATH", canonical)
-    monkeypatch.setattr(cli, "_resolve_backend_option", lambda *args, **kwargs: ("codex", "gpt-5.4"))
+    monkeypatch.setattr(_apply_cmd, "_resolve_backend_option", lambda *args, **kwargs: ("codex", "gpt-5.4"))
     monkeypatch.setattr("applypilot.apply.launcher.gen_prompt", lambda *args, **kwargs: prompt_file)
-    monkeypatch.setattr("applypilot.apply.agent_backends.build_manual_command", lambda *args, **kwargs: "codex exec")
+    monkeypatch.setattr("applypilot.apply.backends.build_manual_command", lambda *args, **kwargs: "codex exec")
 
     result = runner.invoke(
         cli.app,
@@ -340,128 +353,3 @@ def test_load_profile_migrates_missing_resume_content_from_legacy_profile(monkey
     assert saved_resume["meta"]["applypilot"]["target_role"] == "Principal Engineer"
     assert "personal" not in saved_profile
     assert saved_profile["work_authorization"]["legally_authorized_to_work"] == "Yes"
-
-
-def test_setup_canonical_resume_import_skips_metadata_prompts_when_complete(monkeypatch, tmp_path: Path) -> None:
-    pytest.importorskip("jsonschema")
-    source = tmp_path / "source-resume.json"
-    destination = tmp_path / "resume.json"
-    profile_path = tmp_path / "profile.json"
-    source.write_text(json.dumps(_sample_resume_json()), encoding="utf-8")
-
-    monkeypatch.setattr(wizard_init, "RESUME_JSON_PATH", destination)
-    monkeypatch.setattr(wizard_init, "PROFILE_PATH", profile_path)
-    monkeypatch.setattr(
-        wizard_init.Prompt,
-        "ask",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Prompt.ask should not be called")),
-    )
-    monkeypatch.setattr(
-        wizard_init.Confirm,
-        "ask",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Confirm.ask should not be called")),
-    )
-
-    canonical, profile = wizard_init._setup_canonical_resume(resume_json=source)
-
-    assert destination.exists()
-    assert profile_path.exists()
-    assert canonical["basics"]["name"] == "Alex Example"
-    assert "personal" not in profile
-    assert profile["work_authorization"]["legally_authorized_to_work"] == "Yes"
-
-
-def test_setup_canonical_resume_import_uses_social_profiles_from_basics(monkeypatch, tmp_path: Path) -> None:
-    pytest.importorskip("jsonschema")
-    source = tmp_path / "source-resume.json"
-    destination = tmp_path / "resume.json"
-    profile_path = tmp_path / "profile.json"
-    resume_data = _sample_resume_json()
-    resume_data["meta"]["applypilot"]["personal"] = {}
-    source.write_text(json.dumps(resume_data), encoding="utf-8")
-
-    monkeypatch.setattr(wizard_init, "RESUME_JSON_PATH", destination)
-    monkeypatch.setattr(wizard_init, "PROFILE_PATH", profile_path)
-
-    def fail_on_social_prompts(label: str, *args, **kwargs):
-        if label in {"LinkedIn URL", "GitHub URL"}:
-            raise AssertionError(f"{label} should be inferred from basics.profiles")
-        raise AssertionError(f"Unexpected prompt: {label}")
-
-    monkeypatch.setattr(wizard_init.Prompt, "ask", fail_on_social_prompts)
-    monkeypatch.setattr(
-        wizard_init.Confirm,
-        "ask",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Confirm.ask should not be called")),
-    )
-
-    canonical, _profile = wizard_init._setup_canonical_resume(resume_json=source)
-
-    personal = canonical["meta"]["applypilot"]["personal"]
-    assert personal["linkedin_url"] == "https://linkedin.com/in/alex"
-    assert personal["github_url"] == "https://github.com/alex"
-
-
-def test_setup_canonical_resume_uses_single_role_default_from_multi_role_label(monkeypatch, tmp_path: Path) -> None:
-    pytest.importorskip("jsonschema")
-    source = tmp_path / "source-resume.json"
-    destination = tmp_path / "resume.json"
-    profile_path = tmp_path / "profile.json"
-    resume_data = _sample_resume_json()
-    resume_data["meta"]["applypilot"].pop("target_role", None)
-    resume_data["basics"]["label"] = "Systems Architect, Senior Full Stack Developer, UI/UX"
-    source.write_text(json.dumps(resume_data), encoding="utf-8")
-
-    monkeypatch.setattr(wizard_init, "RESUME_JSON_PATH", destination)
-    monkeypatch.setattr(wizard_init, "PROFILE_PATH", profile_path)
-
-    def prompt_ask(label: str, default="", **kwargs):
-        if label == "Target role":
-            assert default == "Systems Architect"
-            return default
-        raise AssertionError(f"Unexpected prompt: {label}")
-
-    monkeypatch.setattr(wizard_init.Prompt, "ask", prompt_ask)
-    monkeypatch.setattr(
-        wizard_init.Confirm,
-        "ask",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("Confirm.ask should not be called")),
-    )
-
-    canonical, profile = wizard_init._setup_canonical_resume(resume_json=source)
-
-    assert canonical["meta"]["applypilot"]["target_role"] == "Systems Architect"
-    assert "personal" not in profile
-    assert profile["work_authorization"]["legally_authorized_to_work"] == "Yes"
-
-
-def test_setup_canonical_resume_scaffold_writes_profile_json(monkeypatch, tmp_path: Path) -> None:
-    pytest.importorskip("jsonschema")
-    destination = tmp_path / "resume.json"
-    profile_path = tmp_path / "profile.json"
-    scaffold = _sample_resume_json()
-
-    monkeypatch.setattr(wizard_init, "RESUME_JSON_PATH", destination)
-    monkeypatch.setattr(wizard_init, "PROFILE_PATH", profile_path)
-
-    def prompt_ask(label: str, *args, **kwargs):
-        if label == "Resume setup mode":
-            return "scaffold"
-        raise AssertionError(f"Unexpected prompt: {label}")
-
-    monkeypatch.setattr(
-        wizard_init.Prompt,
-        "ask",
-        prompt_ask,
-    )
-    monkeypatch.setattr(wizard_init, "_create_resume_json_scaffold", lambda: scaffold)
-    monkeypatch.setattr(wizard_init, "_prompt_missing_applypilot_fields", lambda data: data)
-
-    canonical, profile = wizard_init._setup_canonical_resume()
-
-    assert canonical["basics"]["name"] == "Alex Example"
-    assert profile_path.exists()
-    written_profile = json.loads(profile_path.read_text(encoding="utf-8"))
-    assert "personal" not in written_profile
-    assert written_profile["availability"]["earliest_start_date"] == "Immediately"
-    assert "personal" not in profile

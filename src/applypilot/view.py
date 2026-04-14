@@ -21,7 +21,14 @@ from pathlib import Path
 from rich.console import Console
 
 from applypilot.config import APP_DIR, is_manual_ats
-from applypilot.database import get_connection
+
+
+def _get_repo():
+    """Get job repo via DI."""
+    from applypilot.bootstrap import get_app
+
+    return get_app().container.job_repo
+
 
 console = Console()
 
@@ -58,87 +65,35 @@ def generate_dashboard(output_path: str | None = None) -> str:
     """
     out = Path(output_path) if output_path else APP_DIR / "dashboard.html"
 
-    conn = get_connection()
-
-    # Stats
-    total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    ready = conn.execute(
-        "SELECT COUNT(*) FROM jobs "
-        "WHERE full_description IS NOT NULL AND application_url IS NOT NULL"
-    ).fetchone()[0]
-    scored = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL"
-    ).fetchone()[0]
-    high_fit = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE fit_score >= 7"
-    ).fetchone()[0]
-
-    # Score distribution
-    score_dist: dict[int, int] = {}
-    if scored:
-        rows = conn.execute(
-            "SELECT fit_score, COUNT(*) FROM jobs "
-            "WHERE fit_score IS NOT NULL "
-            "GROUP BY fit_score ORDER BY fit_score DESC"
-        ).fetchall()
-        for r in rows:
-            score_dist[r[0]] = r[1]
-
-    # Site stats
-    site_stats = conn.execute("""
-        SELECT site,
-               COUNT(*) as total,
-               SUM(CASE WHEN fit_score >= 7 THEN 1 ELSE 0 END) as high_fit,
-               SUM(CASE WHEN fit_score BETWEEN 5 AND 6 THEN 1 ELSE 0 END) as mid_fit,
-               SUM(CASE WHEN fit_score < 5 AND fit_score IS NOT NULL THEN 1 ELSE 0 END) as low_fit,
-               SUM(CASE WHEN fit_score IS NULL THEN 1 ELSE 0 END) as unscored,
-               ROUND(AVG(fit_score), 1) as avg_score
-        FROM jobs GROUP BY site ORDER BY high_fit DESC, total DESC
-    """).fetchall()
-
-    # All scored jobs (5+), ordered by score desc
-    jobs = conn.execute("""
-        SELECT url, title, salary, description, location, site, strategy,
-               full_description, application_url, detail_error,
-               tailored_resume_path,
-               fit_score, score_reasoning,
-               applied_at, apply_status, apply_error, last_attempted_at
-        FROM jobs
-        WHERE fit_score >= 5
-        ORDER BY fit_score DESC, site, title
-    """).fetchall()
-
-    # Successfully submitted applications
-    applied_jobs = conn.execute("""
-        SELECT url, title, site, location, fit_score,
-               applied_at, apply_duration_ms, application_url
-        FROM jobs
-        WHERE apply_status = 'applied' AND applied_at IS NOT NULL
-        ORDER BY applied_at DESC
-    """).fetchall()
-
-    # Failed applications (attempted but not successfully applied)
-    failed_jobs = conn.execute("""
-        SELECT url, title, site, location, fit_score,
-               apply_status, apply_error, apply_attempts, last_attempted_at,
-               application_url
-        FROM jobs
-        WHERE apply_status IS NOT NULL AND apply_status != 'applied'
-          AND apply_attempts > 0
-        ORDER BY last_attempted_at DESC
-    """).fetchall()
+    data = _get_repo().get_dashboard_data()
+    total = data["total"]
+    ready = data["ready"]
+    scored = data["scored"]
+    high_fit = data["high_fit"]
+    score_dist = data["score_dist"]
+    site_stats = data["site_stats"]
+    jobs = data["jobs"]
+    applied_jobs = data["applied"]
+    failed_jobs = data["failed"]
 
     applied_count = len(applied_jobs)
     failed_count = len(failed_jobs)
 
     # Color map per site
     colors = {
-        "RemoteOK": "#10b981", "WelcomeToTheJungle": "#f59e0b",
-        "Job Bank Canada": "#3b82f6", "CareerJet Canada": "#8b5cf6",
-        "Hacker News Jobs": "#ff6600", "BuiltIn Remote": "#ec4899",
-        "TD Bank": "#00a651", "CIBC": "#c41f3e", "RBC": "#003168",
-        "indeed": "#2164f3", "linkedin": "#0a66c2",
-        "Dice": "#eb1c26", "Glassdoor": "#0caa41",
+        "RemoteOK": "#10b981",
+        "WelcomeToTheJungle": "#f59e0b",
+        "Job Bank Canada": "#3b82f6",
+        "CareerJet Canada": "#8b5cf6",
+        "Hacker News Jobs": "#ff6600",
+        "BuiltIn Remote": "#ec4899",
+        "TD Bank": "#00a651",
+        "CIBC": "#c41f3e",
+        "RBC": "#003168",
+        "indeed": "#2164f3",
+        "linkedin": "#0a66c2",
+        "Dice": "#eb1c26",
+        "Glassdoor": "#0caa41",
     }
 
     # Score distribution bar chart
@@ -166,10 +121,10 @@ def generate_dashboard(output_path: str | None = None) -> str:
         site_rows += f"""
         <div class="site-row">
           <div class="site-name" style="color:{color}">{escape(site)}</div>
-          <div class="site-nums">{s['total']} jobs &middot; {s['high_fit']} strong fit &middot; avg score {avg}</div>
+          <div class="site-nums">{s["total"]} jobs &middot; {s["high_fit"]} strong fit &middot; avg score {avg}</div>
           <div class="bar-track">
-            <div class="bar-fill" style="width:{s['high_fit']/max(s['total'],1)*100}%;background:{color}"></div>
-            <div class="bar-fill" style="width:{s['mid_fit']/max(s['total'],1)*100}%;background:{color}66"></div>
+            <div class="bar-fill" style="width:{s["high_fit"] / max(s["total"], 1) * 100}%;background:{color}"></div>
+            <div class="bar-fill" style="width:{s["mid_fit"] / max(s["total"], 1) * 100}%;background:{color}66"></div>
           </div>
         </div>"""
 
@@ -184,8 +139,12 @@ def generate_dashboard(output_path: str | None = None) -> str:
                 job_sections += "</div>"
             score_color = "#10b981" if score >= 7 else "#f59e0b"
             score_label = {
-                10: "Perfect Match", 9: "Excellent Fit", 8: "Strong Fit",
-                7: "Good Fit", 6: "Moderate+", 5: "Moderate",
+                10: "Perfect Match",
+                9: "Excellent Fit",
+                8: "Strong Fit",
+                7: "Good Fit",
+                6: "Moderate+",
+                5: "Moderate",
             }.get(score, f"Score {score}")
             count_at_score = score_dist.get(score, 0)
             job_sections += f"""
@@ -209,6 +168,17 @@ def generate_dashboard(output_path: str | None = None) -> str:
         reasoning_lines = reasoning_raw.split("\n")
         keywords = reasoning_lines[0][:120] if reasoning_lines else ""
         reasoning = reasoning_lines[1][:200] if len(reasoning_lines) > 1 else ""
+
+        # Extract level_strategy from JSON reasoning (if present)
+        level_strategy = ""
+        try:
+            import json
+
+            if reasoning_raw.startswith("{"):
+                reasoning_data = json.loads(reasoning_raw)
+                level_strategy = reasoning_data.get("level_strategy", "")
+        except (json.JSONDecodeError, TypeError):
+            pass
 
         desc_preview = escape(j["full_description"] or "")[:300]
         full_desc_html = escape(j["full_description"] or "").replace("\n", "<br>")
@@ -242,6 +212,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
         if was_applied:
             try:
                 from datetime import datetime as _dt
+
                 applied_dt = _dt.fromisoformat(j["applied_at"].replace("Z", "+00:00"))
                 applied_date_str = applied_dt.strftime("%b %-d, %Y")
             except (ValueError, AttributeError):
@@ -266,23 +237,22 @@ def generate_dashboard(output_path: str | None = None) -> str:
             "cloudflare_blocked": "Cloudflare blocked",
             "failed": "Application failed",
         }
-        was_failed = (
-            j["apply_status"] and j["apply_status"] != "applied"
-            and j["last_attempted_at"]
-        )
+        was_failed = j["apply_status"] and j["apply_status"] != "applied" and j["last_attempted_at"]
         failed_banner = ""
         if was_failed:
             try:
                 from datetime import datetime as _dt
+
                 failed_dt = _dt.fromisoformat(j["last_attempted_at"].replace("Z", "+00:00"))
                 failed_date_str = failed_dt.strftime("%b %-d, %Y")
             except (ValueError, AttributeError):
                 failed_date_str = j["last_attempted_at"][:10]
-            short_reason = (
-                escape((j["apply_error"] or "")[:60]) or
-                _status_reasons.get(j["apply_status"], j["apply_status"].replace("_", " ").title())
+            short_reason = escape((j["apply_error"] or "")[:60]) or _status_reasons.get(
+                j["apply_status"], j["apply_status"].replace("_", " ").title()
             )
-            failed_banner = f'<div class="failed-banner">&#10007; Failed on {failed_date_str} &middot; {short_reason}</div>'
+            failed_banner = (
+                f'<div class="failed-banner">&#10007; Failed on {failed_date_str} &middot; {short_reason}</div>'
+            )
 
         card_extra_class = ""
         if was_applied:
@@ -308,17 +278,18 @@ def generate_dashboard(output_path: str | None = None) -> str:
             )
 
         job_sections += f"""
-        <div class="job-card{card_extra_class}" data-score="{score}" data-site="{escape(j['site'] or '')}" data-location="{data_location}"{applied_attr}>
+        <div class="job-card{card_extra_class}" data-score="{score}" data-site="{escape(j["site"] or "")}" data-location="{data_location}"{applied_attr}>
           {applied_banner}{failed_banner}
           <div class="card-header">
-            <span class="score-pill" style="background:{'#10b981' if score >= 7 else '#f59e0b'}">{score}</span>
+            <span class="score-pill" style="background:{"#10b981" if score >= 7 else "#f59e0b"}">{score}</span>
             <a href="{url}" class="job-title" target="_blank">{title}</a>
           </div>
           <div class="meta-row">{meta_html}</div>
-          {f'<div class="keywords-row">{escape(keywords)}</div>' if keywords else ''}
-          {f'<div class="reasoning-row">{escape(reasoning)}</div>' if reasoning else ''}
+          {f'<div class="keywords-row">{escape(keywords)}</div>' if keywords else ""}
+          {f'<div class="reasoning-row">{escape(reasoning)}</div>' if reasoning else ""}
+          {f'<span class="level-badge level-{level_strategy}">{level_strategy.replace("_", " ")}</span>' if level_strategy else ""}
           <p class="desc-preview">{desc_preview}...</p>
-          {"<details class='full-desc-details'><summary class='expand-btn'>Full Description (" + f'{desc_len:,}' + " chars)</summary><div class='full-desc'>" + full_desc_html + "</div></details>" if j["full_description"] else ""}
+          {"<details class='full-desc-details'><summary class='expand-btn'>Full Description (" + f"{desc_len:,}" + " chars)</summary><div class='full-desc'>" + full_desc_html + "</div></details>" if j["full_description"] else ""}
           <div class="card-footer">
             {apply_html}
             {action_html}
@@ -355,9 +326,11 @@ def generate_dashboard(output_path: str | None = None) -> str:
     def _status_chip(status: str | None) -> str:
         if not status:
             return "—"
-        css = f"status-{status}" if status in (
-            "applied", "expired", "captcha", "login_issue", "failed"
-        ) else "status-default"
+        css = (
+            f"status-{status}"
+            if status in ("applied", "expired", "captcha", "login_issue", "failed")
+            else "status-default"
+        )
         return f'<span class="status-chip {css}">{escape(status.replace("_", " "))}</span>'
 
     if applied_jobs:
@@ -370,12 +343,12 @@ def generate_dashboard(output_path: str | None = None) -> str:
             location = escape(j["location"] or "—")
             applied_rows += f"""
             <tr>
-              <td>{_fmt_date(j['applied_at'])}</td>
+              <td>{_fmt_date(j["applied_at"])}</td>
               <td><a href="{url}" class="job-link" target="_blank">{title}</a></td>
-              <td>{_score_chip(j['fit_score'])}</td>
+              <td>{_score_chip(j["fit_score"])}</td>
               <td>{site}</td>
               <td>{location}</td>
-              <td>{_fmt_duration(j['apply_duration_ms'])}</td>
+              <td>{_fmt_duration(j["apply_duration_ms"])}</td>
               <td>{"<a href='" + app_url + "' class='apply-btn' target='_blank'>View</a>" if app_url else "—"}</td>
             </tr>"""
         applied_table_html = f"""
@@ -403,10 +376,10 @@ def generate_dashboard(output_path: str | None = None) -> str:
             attempts = j["apply_attempts"] or 0
             failed_rows += f"""
             <tr>
-              <td>{_fmt_date(j['last_attempted_at'])}</td>
+              <td>{_fmt_date(j["last_attempted_at"])}</td>
               <td><a href="{url}" class="job-link" target="_blank">{title}</a></td>
-              <td>{_score_chip(j['fit_score'])}</td>
-              <td>{_status_chip(j['apply_status'])}</td>
+              <td>{_score_chip(j["fit_score"])}</td>
+              <td>{_status_chip(j["apply_status"])}</td>
               <td class="fail-reason">{reason or "—"}</td>
               <td style="text-align:center">{attempts}</td>
               <td>{site}</td>
@@ -505,6 +478,11 @@ def generate_dashboard(output_path: str | None = None) -> str:
 
   .keywords-row {{ font-size: 0.75rem; color: #10b981; margin-bottom: 0.3rem; line-height: 1.4; }}
   .reasoning-row {{ font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.5rem; font-style: italic; line-height: 1.4; }}
+  .level-badge {{ display: inline-block; font-size: 0.7rem; padding: 2px 8px; border-radius: 9999px; margin-bottom: 0.5rem; font-weight: 600; text-transform: capitalize; }}
+  .level-stretch {{ background: #fef3c7; color: #92400e; }}
+  .level-natural_next {{ background: #cffafe; color: #155e75; }}
+  .level-level_match {{ background: #d1fae5; color: #065f46; }}
+  .level-overqualified {{ background: #fee2e2; color: #991b1b; }}
 
   .desc-preview {{ font-size: 0.8rem; color: #64748b; line-height: 1.5; margin-bottom: 0.75rem; max-height: 3.6em; overflow: hidden; }}
 

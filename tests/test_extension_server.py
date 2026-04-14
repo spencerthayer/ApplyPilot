@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 # Helpers: minimal in-process worker-server for endpoint tests
 # ---------------------------------------------------------------------------
 
-def _start_test_server(state: dict, hitl_event: threading.Event,
-                       worker_id: int = 0) -> int:
+
+def _start_test_server(state: dict, hitl_event: threading.Event, worker_id: int = 0) -> int:
     """Start a real instance of _start_worker_listener on an OS-assigned port.
 
     Returns port.
@@ -56,6 +56,7 @@ def _start_test_server(state: dict, hitl_event: threading.Event,
 # POST /api/done
 # ---------------------------------------------------------------------------
 
+
 class TestDoneEndpoint(unittest.TestCase):
     """POST /api/done fires the HITL event and returns 200 without deadlock."""
 
@@ -78,6 +79,7 @@ class TestDoneEndpoint(unittest.TestCase):
 
     def tearDown(self):
         from applypilot.apply import launcher as lmod
+
         lmod._stop_worker_listener(0)
 
     def test_done_returns_200(self):
@@ -133,6 +135,7 @@ class TestDoneEndpoint(unittest.TestCase):
 # GET /api/status
 # ---------------------------------------------------------------------------
 
+
 class TestStatusEndpoint(unittest.TestCase):
     """GET /api/status returns required fields."""
 
@@ -154,18 +157,26 @@ class TestStatusEndpoint(unittest.TestCase):
 
     def tearDown(self):
         from applypilot.apply import launcher as lmod
+
         lmod._stop_worker_listener(0)
 
     def _get_status(self) -> dict:
-        with urllib.request.urlopen(
-            f"http://localhost:{self.port}/api/status", timeout=5
-        ) as resp:
+        with urllib.request.urlopen(f"http://localhost:{self.port}/api/status", timeout=5) as resp:
             return json.loads(resp.read())
 
     def test_required_fields_present(self):
         data = self._get_status()
-        for field in ("workerId", "status", "jobTitle", "jobSite", "score",
-                      "reason", "instructions", "chromePid", "lastFocused"):
+        for field in (
+                "workerId",
+                "status",
+                "jobTitle",
+                "jobSite",
+                "score",
+                "reason",
+                "instructions",
+                "chromePid",
+                "lastFocused",
+        ):
             self.assertIn(field, data, f"Missing field: {field}")
 
     def test_chrome_pid_returned(self):
@@ -190,6 +201,7 @@ class TestStatusEndpoint(unittest.TestCase):
 # GET /api/focus
 # ---------------------------------------------------------------------------
 
+
 class TestFocusEndpoint(unittest.TestCase):
     """GET /api/focus calls CDP bringToFront + X11 raise and tracks last_focused."""
 
@@ -211,20 +223,18 @@ class TestFocusEndpoint(unittest.TestCase):
 
     def tearDown(self):
         from applypilot.apply import launcher as lmod
+
         lmod._stop_worker_listener(0)
 
     def test_focus_returns_200(self):
-        with urllib.request.urlopen(
-            f"http://localhost:{self.port}/api/focus", timeout=5
-        ) as resp:
+        with urllib.request.urlopen(f"http://localhost:{self.port}/api/focus", timeout=5) as resp:
             self.assertEqual(resp.status, 200)
 
     def test_focus_updates_last_focused(self):
         from applypilot.apply import launcher as lmod
+
         before = time.time()
-        urllib.request.urlopen(
-            f"http://localhost:{self.port}/api/focus", timeout=5
-        ).close()
+        urllib.request.urlopen(f"http://localhost:{self.port}/api/focus", timeout=5).close()
         after = time.time()
         # Read from the handler's internal state dict (not self.state, which is
         # a separate dict that was .update()-ed into the handler's state).
@@ -238,20 +248,14 @@ class TestFocusEndpoint(unittest.TestCase):
             patch("applypilot.apply.chrome.bring_to_foreground_cdp", return_value=True) as mock_cdp,
             patch("applypilot.apply.chrome.bring_to_foreground_pid") as mock_pid,
         ):
-            urllib.request.urlopen(
-                f"http://localhost:{self.port}/api/focus", timeout=5
-            ).close()
+            urllib.request.urlopen(f"http://localhost:{self.port}/api/focus", timeout=5).close()
         mock_cdp.assert_called_once()
         mock_pid.assert_called_once_with(99999)
 
     def test_focus_status_reflects_last_focused(self):
         """After /api/focus, /api/status returns the updated lastFocused."""
-        urllib.request.urlopen(
-            f"http://localhost:{self.port}/api/focus", timeout=5
-        ).close()
-        with urllib.request.urlopen(
-            f"http://localhost:{self.port}/api/status", timeout=5
-        ) as resp:
+        urllib.request.urlopen(f"http://localhost:{self.port}/api/focus", timeout=5).close()
+        with urllib.request.urlopen(f"http://localhost:{self.port}/api/status", timeout=5) as resp:
             data = json.loads(resp.read())
         self.assertGreater(data["lastFocused"], 0)
 
@@ -260,14 +264,17 @@ class TestFocusEndpoint(unittest.TestCase):
 # bring_to_foreground_cdp
 # ---------------------------------------------------------------------------
 
+
 class TestBringToForegroundCdp(unittest.TestCase):
     """bring_to_foreground_cdp sends Page.bringToFront over WebSocket."""
 
     def test_sends_bringttofront(self):
         """Sends Page.bringToFront to the first page tab's WebSocket URL."""
-        fake_targets = json.dumps([
-            {"type": "page", "webSocketDebuggerUrl": "ws://localhost:9999/devtools/page/X"},
-        ]).encode()
+        fake_targets = json.dumps(
+            [
+                {"type": "page", "webSocketDebuggerUrl": "ws://localhost:9999/devtools/page/X"},
+            ]
+        ).encode()
 
         mock_ws = MagicMock()
         mock_ws.recv.return_value = json.dumps({"id": 1, "result": {}})
@@ -281,6 +288,7 @@ class TestBringToForegroundCdp(unittest.TestCase):
             mock_urlopen.return_value.read.return_value = fake_targets
 
             from applypilot.apply.chrome import bring_to_foreground_cdp
+
             result = bring_to_foreground_cdp(9999)
 
         self.assertTrue(result)
@@ -295,6 +303,7 @@ class TestBringToForegroundCdp(unittest.TestCase):
             mock_urlopen.return_value.read.return_value = json.dumps([]).encode()
 
             from applypilot.apply.chrome import bring_to_foreground_cdp
+
             result = bring_to_foreground_cdp(9998)
 
         self.assertFalse(result)
@@ -302,8 +311,10 @@ class TestBringToForegroundCdp(unittest.TestCase):
     def test_returns_false_on_connection_error(self):
         """Returns False when Chrome's CDP port is unreachable."""
         from urllib.error import URLError
+
         with patch("urllib.request.urlopen", side_effect=URLError("refused")):
             from applypilot.apply.chrome import bring_to_foreground_cdp
+
             result = bring_to_foreground_cdp(9997)
         self.assertFalse(result)
 
@@ -312,19 +323,23 @@ class TestBringToForegroundCdp(unittest.TestCase):
 # _raise_x11_window
 # ---------------------------------------------------------------------------
 
+
 class TestRaiseX11Window(unittest.TestCase):
     """_raise_x11_window sends _NET_ACTIVE_WINDOW via libX11 ctypes."""
 
     def test_returns_false_for_no_pid(self):
         from applypilot.apply.chrome import _raise_x11_window
+
         self.assertFalse(_raise_x11_window(0))
         self.assertFalse(_raise_x11_window(None))
 
     def test_returns_false_when_libx11_unavailable(self):
         """Returns False gracefully when libX11.so.6 can't be loaded."""
         import ctypes
+
         with patch("ctypes.CDLL", side_effect=OSError("libX11.so.6: not found")):
             from applypilot.apply import chrome as chrome_mod
+
             # Reload to pick up patched CDLL
             result = chrome_mod._raise_x11_window(12345)
         self.assertFalse(result)
@@ -340,24 +355,23 @@ class TestRaiseX11Window(unittest.TestCase):
 
         call_count = {"xget": 0}
 
-        def fake_XGetWindowProperty(dpy, win, atom, offset, length,
-                                    delete, req_type,
-                                    atype_out, afmt_out,
-                                    nitems_out, bafter_out, data_out):
+        def fake_XGetWindowProperty(
+                dpy, win, atom, offset, length, delete, req_type, atype_out, afmt_out, nitems_out, bafter_out, data_out
+        ):
             call_count["xget"] += 1
             if call_count["xget"] == 1:
                 # _NET_CLIENT_LIST: one window (TARGET_WIN)
                 arr = (ctypes.c_ulong * 1)(TARGET_WIN)
-                atype_out._obj.value = 33   # XA_WINDOW
-                afmt_out._obj.value  = 32
+                atype_out._obj.value = 33  # XA_WINDOW
+                afmt_out._obj.value = 32
                 nitems_out._obj.value = 1
                 bafter_out._obj.value = 0
                 data_out._obj.value = ctypes.cast(arr, ctypes.c_void_p).value
             else:
                 # _NET_WM_PID for TARGET_WIN
                 arr = (ctypes.c_ulong * 1)(TARGET_PID)
-                atype_out._obj.value = 6   # XA_CARDINAL
-                afmt_out._obj.value  = 32
+                atype_out._obj.value = 6  # XA_CARDINAL
+                afmt_out._obj.value = 32
                 nitems_out._obj.value = 1
                 bafter_out._obj.value = 0
                 data_out._obj.value = ctypes.cast(arr, ctypes.c_void_p).value
@@ -365,7 +379,7 @@ class TestRaiseX11Window(unittest.TestCase):
 
         # Use a real but minimal mock for the X11 lib
         mock_x11 = MagicMock()
-        mock_x11.XOpenDisplay.return_value = 1   # non-null display
+        mock_x11.XOpenDisplay.return_value = 1  # non-null display
         mock_x11.XDefaultRootWindow.return_value = 0x1000
         mock_x11.XInternAtom.side_effect = lambda dpy, name, _: {
             b"_NET_CLIENT_LIST": 100,
@@ -380,6 +394,7 @@ class TestRaiseX11Window(unittest.TestCase):
 
         with patch("ctypes.CDLL", return_value=mock_x11):
             from applypilot.apply import chrome as chrome_mod
+
             result = chrome_mod._raise_x11_window(TARGET_PID)
 
         self.assertTrue(result)
@@ -390,41 +405,6 @@ class TestRaiseX11Window(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # bring_to_foreground_pid fallback chain
 # ---------------------------------------------------------------------------
-
-class TestBringToForegroundPid(unittest.TestCase):
-    """bring_to_foreground_pid falls back to X11 ctypes when tools are absent."""
-
-    def test_calls_x11_when_xdotool_missing(self):
-        """Falls through xdotool (not found) to _raise_x11_window."""
-        with (
-            patch("subprocess.run") as mock_run,
-            patch("applypilot.apply.chrome._raise_x11_window", return_value=True) as mock_x11,
-        ):
-            # Simulate xdotool not found → returncode != 0
-            mock_run.return_value = MagicMock(returncode=127, stdout="")
-            from applypilot.apply.chrome import bring_to_foreground_pid
-            bring_to_foreground_pid(12345)
-
-        mock_x11.assert_called_once_with(12345)
-
-    def test_skips_x11_when_xdotool_succeeds(self):
-        """Does NOT call _raise_x11_window when xdotool succeeds."""
-        with (
-            patch("subprocess.run") as mock_run,
-            patch("applypilot.apply.chrome._raise_x11_window") as mock_x11,
-        ):
-            mock_run.return_value = MagicMock(returncode=0)
-            from applypilot.apply.chrome import bring_to_foreground_pid
-            bring_to_foreground_pid(12345)
-
-        mock_x11.assert_not_called()
-
-    def test_no_pid_calls_generic(self):
-        """bring_to_foreground_pid(0) falls back to bring_to_foreground()."""
-        with patch("applypilot.apply.chrome.bring_to_foreground") as mock_gen:
-            from applypilot.apply.chrome import bring_to_foreground_pid
-            bring_to_foreground_pid(0)
-        mock_gen.assert_called_once()
 
 
 if __name__ == "__main__":

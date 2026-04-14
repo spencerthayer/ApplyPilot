@@ -30,8 +30,16 @@ def tmp_db(tmp_path):
 
 @pytest.fixture
 def bullet_bank(tmp_db):
-    """Return a fresh BulletBank instance."""
-    return BulletBank(tmp_db)
+    """Return a fresh BulletBank instance backed by a repo."""
+    import sqlite3
+    from applypilot.db.schema import init_db
+    from applypilot.db.sqlite.bullet_bank_repo import SqliteBulletBankRepository
+
+    conn = sqlite3.connect(tmp_db)
+    conn.row_factory = sqlite3.Row
+    init_db(conn)
+    repo = SqliteBulletBankRepository(conn)
+    return BulletBank(repo)
 
 
 @pytest.fixture

@@ -17,14 +17,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 def _make_db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
-    conn.execute(
-        "CREATE TABLE jobs ("
-        "  url TEXT PRIMARY KEY, title TEXT, salary TEXT, description TEXT,"
-        "  location TEXT, site TEXT, strategy TEXT, discovered_at TEXT,"
-        "  full_description TEXT, detail_scraped_at TEXT"
-        ")"
-    )
-    conn.commit()
+    conn.row_factory = sqlite3.Row
+    from applypilot.db.schema import init_db
+
+    init_db(conn)
     return conn
 
 
@@ -33,6 +29,7 @@ class TestDeobfuscateEmail(unittest.TestCase):
 
     def _run(self, text: str) -> str:
         from applypilot.discovery.hackernews import _deobfuscate_email
+
         return _deobfuscate_email(text)
 
     def test_bracket_at(self):
@@ -61,6 +58,7 @@ class TestIsEmail(unittest.TestCase):
 
     def _run(self, text: str) -> bool:
         from applypilot.discovery.hackernews import _is_email
+
         return _is_email(text)
 
     def test_plain_email(self):
@@ -84,15 +82,17 @@ class TestStoreHnJob(unittest.TestCase):
 
     def setUp(self):
         self.conn = _make_db()
+        from applypilot.db.sqlite.job_repo import SqliteJobRepository
+
+        self.repo = SqliteJobRepository(self.conn)
 
     def _store(self, job: dict) -> bool:
         from applypilot.discovery.hackernews import _store_hn_job
-        return _store_hn_job(self.conn, job, "Who is Hiring? (March 2026)")
+
+        return _store_hn_job(self.repo, job, "Who is Hiring? (March 2026)")
 
     def _get_url(self, title: str) -> str | None:
-        row = self.conn.execute(
-            "SELECT url FROM jobs WHERE title = ?", (title,)
-        ).fetchone()
+        row = self.conn.execute("SELECT url FROM jobs WHERE title = ?", (title,)).fetchone()
         return row[0] if row else None
 
     def test_http_url_stored_directly(self):
@@ -123,12 +123,12 @@ class TestStoreHnJob(unittest.TestCase):
 
     def test_no_url_gets_synthetic_hn_url(self):
         """Contact-only posts without any URL get a stable synthetic HN URL."""
-        self._store({"url": None, "title": "Data Eng", "company": "Acme",
-                     "contact": "hiring@acme.com"})
+        self._store({"url": None, "title": "Data Eng", "company": "Acme", "contact": "hiring@acme.com"})
         url = self._get_url("Data Eng")
         self.assertIsNotNone(url)
-        self.assertTrue(url.startswith("https://news.ycombinator.com/item?id="),
-                        f"Expected synthetic HN URL, got: {url}")
+        self.assertTrue(
+            url.startswith("https://news.ycombinator.com/item?id="), f"Expected synthetic HN URL, got: {url}"
+        )
 
     def test_duplicate_url_returns_false(self):
         job = {"url": "https://company.com/job/42", "title": "PM", "company": "Acme"}
@@ -139,16 +139,16 @@ class TestStoreHnJob(unittest.TestCase):
 
     def test_contact_email_appended_to_description(self):
         """The deobfuscated contact email is stored in the description for the apply agent."""
-        self._store({
-            "url": "https://company.com/jobs/infra",
-            "title": "Infra Eng",
-            "company": "Acme",
-            "contact": "infra [at] company.com",
-            "description": "Great role.",
-        })
-        row = self.conn.execute(
-            "SELECT description FROM jobs WHERE title = ?", ("Infra Eng",)
-        ).fetchone()
+        self._store(
+            {
+                "url": "https://company.com/jobs/infra",
+                "title": "Infra Eng",
+                "company": "Acme",
+                "contact": "infra [at] company.com",
+                "description": "Great role.",
+            }
+        )
+        row = self.conn.execute("SELECT description FROM jobs WHERE title = ?", ("Infra Eng",)).fetchone()
         self.assertIn("infra@company.com", row[0])
 
     def test_non_http_non_domain_url_gets_synthetic(self):

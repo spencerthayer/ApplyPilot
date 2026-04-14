@@ -1,10 +1,7 @@
 // ApplyPilot Control Panel — popup controller
 // Reads worker state from chrome.storage.local (populated by background.js every 3s).
-// Each worker server lives at http://localhost:(7380 + workerId).
+// Constants from config.js (loaded first via popup.html).
 
-const BASE_PORT = 7380;
-const MAX_WORKERS = 5;
-// Seconds before "recently focused" highlight fades
 const FOCUS_HIGHLIGHT_TTL = 30;
 
 let workers = [];
@@ -25,7 +22,7 @@ const savedOutputs   = {};           // workerId → { text, visible }
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function workerUrl(wid, path) {
-  return `http://localhost:${BASE_PORT + wid}${path}`;
+    return `http://localhost:${APPLYPILOT.BASE_PORT + wid}${path}`;
 }
 
 async function apiCall(wid, path, opts = {}) {
@@ -44,8 +41,8 @@ let _lastWorkersJson = '';
 // interrupted by DOM rebuilds every 2s.
 async function refreshFromServers() {
   const results = await Promise.allSettled(
-    Array.from({ length: MAX_WORKERS }, (_, i) =>
-      fetch(`http://localhost:${BASE_PORT + i}/api/status`, {
+      Array.from({length: APPLYPILOT.MAX_WORKERS}, (_, i) =>
+          fetch(`http://localhost:${APPLYPILOT.BASE_PORT + i}/api/status`, {
         signal: AbortSignal.timeout(1500),
       })
         .then(r => r.ok ? r.json() : null)

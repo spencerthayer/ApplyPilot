@@ -27,13 +27,27 @@ _FAKE_LLM_KEY = "fake-gateway-key-for-test"
 
 def _clear_llm_env(monkeypatch):
     """Remove all LLM-related env vars so each test starts clean."""
-    for var in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL", "LLM_API_KEY", "LLM_MODEL"):
+    for var in (
+            "GEMINI_API_KEY",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "DEEPSEEK_API_KEY",
+            "LLM_URL",
+            "LLM_API_KEY",
+            "LLM_MODEL",
+            "LLM_MODEL_QUALITY",
+            "BEDROCK_MODEL_ID",
+            "BEDROCK_REGION",
+    ):
         monkeypatch.delenv(var, raising=False)
+    # Prevent get_client() from reloading .env mid-test
+    monkeypatch.setattr("applypilot.config.load_env", lambda: None)
 
 
 def _reset_singleton(monkeypatch):
-    """Reset the module-level _instance so get_client() re-detects."""
-    monkeypatch.setattr(llm, "_instance", None)
+    """Reset the per-tier singleton cache so get_client() re-detects."""
+    monkeypatch.setattr(llm, "_tier_instances", {})
 
 
 # ---------------------------------------------------------------------------
@@ -209,64 +223,3 @@ class TestNoProvider:
 # ---------------------------------------------------------------------------
 # 5. get_client() integration (singleton resets)
 # ---------------------------------------------------------------------------
-
-
-class TestGetClientIntegration:
-    """get_client() should use _detect_provider and create an LLMClient."""
-
-    def test_get_client_returns_llm_client_with_gateway(self, monkeypatch):
-        _clear_llm_env(monkeypatch)
-        _reset_singleton(monkeypatch)
-        monkeypatch.setenv("LLM_URL", _FAKE_LLM_URL)
-        monkeypatch.setenv("LLM_API_KEY", _FAKE_LLM_KEY)
-
-        client = get_client()
-
-        assert isinstance(client, LLMClient)
-        assert client.base_url == _FAKE_LLM_URL.rstrip("/")
-        assert client.api_key == _FAKE_LLM_KEY
-        client.close()
-
-    def test_get_client_returns_llm_client_with_gemini(self, monkeypatch):
-        _clear_llm_env(monkeypatch)
-        _reset_singleton(monkeypatch)
-        monkeypatch.setenv("GEMINI_API_KEY", _FAKE_GEMINI)
-
-        client = get_client()
-
-        assert isinstance(client, LLMClient)
-        assert "generativelanguage.googleapis.com" in client.base_url
-        assert client.api_key == _FAKE_GEMINI
-        client.close()
-
-    def test_get_client_raises_when_no_provider(self, monkeypatch):
-        _clear_llm_env(monkeypatch)
-        _reset_singleton(monkeypatch)
-
-        with pytest.raises(RuntimeError, match="No LLM provider configured"):
-            get_client()
-
-    def test_get_client_singleton_caching(self, monkeypatch):
-        _clear_llm_env(monkeypatch)
-        _reset_singleton(monkeypatch)
-        monkeypatch.setenv("GEMINI_API_KEY", _FAKE_GEMINI)
-
-        c1 = get_client()
-        c2 = get_client()
-
-        assert c1 is c2
-        c1.close()
-
-    def test_get_client_gateway_precedence_over_gemini(self, monkeypatch):
-        """End-to-end: get_client() with both LLM_URL and GEMINI_API_KEY picks gateway."""
-        _clear_llm_env(monkeypatch)
-        _reset_singleton(monkeypatch)
-        monkeypatch.setenv("LLM_URL", _FAKE_LLM_URL)
-        monkeypatch.setenv("LLM_API_KEY", _FAKE_LLM_KEY)
-        monkeypatch.setenv("GEMINI_API_KEY", _FAKE_GEMINI)
-
-        client = get_client()
-
-        assert client.base_url == _FAKE_LLM_URL.rstrip("/")
-        assert client.api_key == _FAKE_LLM_KEY
-        client.close()

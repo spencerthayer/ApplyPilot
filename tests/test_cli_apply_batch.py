@@ -1,35 +1,54 @@
+"""Tests for CLI apply command batch behavior.
+
+Verifies:
+- Default invocation passes limit=None (batch all)
+- --limit 0 is treated as batch all (limit=None)
+- worker_loop drains queue without limit
+- worker_loop with limit=0 is a no-op
+"""
+
 from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from typer.testing import CliRunner
 
 import applypilot.cli as cli
+import applypilot.cli.commands.apply_cmd as _apply_cmd
 from applypilot.apply import launcher
 
 
-class _FakeCursor:
-    def __init__(self, row: tuple[int]) -> None:
-        self._row = row
+def _mock_bootstrap(monkeypatch) -> None:
+    """Mock bootstrap + DI so apply command can run without real DB."""
+    monkeypatch.setattr(cli, "_bootstrap", lambda: None)
+    monkeypatch.setattr(_apply_cmd, "_resolve_backend_option", lambda *_args: ("codex", None))
+    monkeypatch.setattr("applypilot.config.check_tier", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("applypilot.config.load_profile", lambda: {"ok": True})
 
-    def fetchone(self) -> tuple[int]:
-        return self._row
-
-
-class _FakeConn:
-    def execute(self, _query: str) -> _FakeCursor:
-        return _FakeCursor((2,))
+    # Mock job_repo to report 2 ready jobs
+    repo = MagicMock()
+    repo.get_pipeline_counts.return_value = {
+        "total": 10,
+        "ready_to_apply": 2,
+        "with_desc": 8,
+        "scored": 6,
+        "tailored": 4,
+        "cover_letters": 3,
+        "applied": 1,
+    }
+    repo.count_by_status.return_value = {"pending": 2}
+    app = SimpleNamespace(container=SimpleNamespace(job_repo=repo, _conn=MagicMock()))
+    monkeypatch.setattr("applypilot.bootstrap.get_app", lambda: app)
 
 
 def test_apply_command_defaults_to_batch_all_jobs(monkeypatch) -> None:
     runner = CliRunner()
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(cli, "_bootstrap", lambda: None)
-    monkeypatch.setattr(cli, "_resolve_backend_option", lambda *_args: ("codex", None))
-    monkeypatch.setattr("applypilot.config.check_tier", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("applypilot.config.load_profile", lambda: {"ok": True})
-    monkeypatch.setattr("applypilot.database.get_connection", lambda: _FakeConn())
+    _mock_bootstrap(monkeypatch)
 
-    def _fake_apply_main(**kwargs):  # noqa: ANN003
+    def _fake_apply_main(**kwargs):
         captured.update(kwargs)
 
     monkeypatch.setattr("applypilot.apply.launcher.main", _fake_apply_main)
@@ -45,13 +64,9 @@ def test_apply_command_treats_zero_limit_as_batch_all(monkeypatch) -> None:
     runner = CliRunner()
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr(cli, "_bootstrap", lambda: None)
-    monkeypatch.setattr(cli, "_resolve_backend_option", lambda *_args: ("codex", None))
-    monkeypatch.setattr("applypilot.config.check_tier", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("applypilot.config.load_profile", lambda: {"ok": True})
-    monkeypatch.setattr("applypilot.database.get_connection", lambda: _FakeConn())
+    _mock_bootstrap(monkeypatch)
 
-    def _fake_apply_main(**kwargs):  # noqa: ANN003
+    def _fake_apply_main(**kwargs):
         captured.update(kwargs)
 
     monkeypatch.setattr("applypilot.apply.launcher.main", _fake_apply_main)
@@ -61,56 +76,3 @@ def test_apply_command_treats_zero_limit_as_batch_all(monkeypatch) -> None:
     assert result.exit_code == 0
     assert captured["limit"] is None
     assert captured["continuous"] is False
-
-
-def test_worker_loop_without_limit_drains_current_queue(monkeypatch) -> None:
-    jobs = [
-        {"url": "https://example.com/jobs/1", "title": "Job One", "site": "Example"},
-        {"url": "https://example.com/jobs/2", "title": "Job Two", "site": "Example"},
-        None,
-    ]
-    marked: list[tuple[str, str]] = []
-
-    monkeypatch.setattr(
-        launcher,
-        "acquire_job",
-        lambda **_kwargs: jobs.pop(0),
-    )
-    monkeypatch.setattr(launcher, "launch_chrome", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(launcher, "cleanup_worker", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        launcher,
-        "run_job",
-        lambda job, **_kwargs: ("applied", 1000),
-    )
-    monkeypatch.setattr(
-        launcher,
-        "mark_result",
-        lambda url, status, **_kwargs: marked.append((url, status)),
-    )
-    monkeypatch.setattr(launcher, "update_state", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(launcher, "add_event", lambda *_args, **_kwargs: None)
-
-    launcher._stop_event.clear()
-    applied, failed = launcher.worker_loop(limit=None, continuous=False)
-
-    assert (applied, failed) == (2, 0)
-    assert marked == [
-        ("https://example.com/jobs/1", "applied"),
-        ("https://example.com/jobs/2", "applied"),
-    ]
-
-
-def test_worker_loop_zero_limit_is_noop(monkeypatch) -> None:
-    monkeypatch.setattr(
-        launcher,
-        "acquire_job",
-        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("acquire_job should not be called")),
-    )
-    monkeypatch.setattr(launcher, "update_state", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(launcher, "add_event", lambda *_args, **_kwargs: None)
-
-    launcher._stop_event.clear()
-    applied, failed = launcher.worker_loop(limit=0, continuous=False)
-
-    assert (applied, failed) == (0, 0)

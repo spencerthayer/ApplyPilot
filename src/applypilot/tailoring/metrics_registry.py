@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from typing import List, Set
 
 from applypilot.config import load_profile
-from applypilot.resume_json import get_profile_verified_metrics, normalize_profile_data
+from applypilot.resume.extraction import get_profile_verified_metrics
+from applypilot.resume_json import normalize_profile_data
 
 
 @dataclass

@@ -17,9 +17,7 @@ LOCAL_RESUMED = PROJECT_ROOT / "node_modules" / ".bin" / "resumed"
 def _resumed_command() -> list[str]:
     if LOCAL_RESUMED.exists():
         return [str(LOCAL_RESUMED)]
-    raise FileNotFoundError(
-        "Local 'resumed' CLI not found. Run `npm install` in the ApplyPilot project root first."
-    )
+    raise FileNotFoundError("Local 'resumed' CLI not found. Run `npm install` in the ApplyPilot project root first.")
 
 
 def render_resume_html(
@@ -76,3 +74,55 @@ def render_resume_pdf(
         render_pdf(html, str(destination))
 
     return destination, resolved_theme
+
+
+def render_resume_from_db(
+        output_path: Path | None = None,
+        track_id: str | None = None,
+        job_url: str | None = None,
+        fmt: str = "html",
+) -> str:
+    """Render resume from DB pieces instead of resume.json file.
+
+    Args:
+        fmt: "html", "pdf", or "txt".
+
+    Falls back to file-based render if no pieces in DB.
+    """
+    try:
+        from applypilot.bootstrap import get_app
+        from applypilot.resume_builder import from_pieces
+
+        app = get_app()
+        c = app.container
+        builder = from_pieces(c.piece_repo, c.overlay_repo, track_id=track_id, job_url=job_url)
+
+        # Auto-decompose if no pieces exist yet
+        if not builder.header_lines and not builder.sections:
+            resume = app.profile.load_resume_json()
+            if not resume:
+                raise ValueError("No resume.json and no pieces in DB")
+            app.resume_svc.decompose(resume)
+            builder = from_pieces(c.piece_repo, c.overlay_repo, track_id=track_id, job_url=job_url)
+            if not builder.header_lines and not builder.sections:
+                raise ValueError("Decompose produced no pieces")
+
+        if fmt == "txt":
+            dest = output_path or Path(RESUME_JSON_PATH).with_suffix(".db_render.txt")
+            dest.write_text(builder.render_text(), encoding="utf-8")
+            return str(dest)
+
+        html = builder.render_html()
+        if fmt == "pdf":
+            dest = output_path or Path(RESUME_JSON_PATH).with_suffix(".db_render.pdf")
+            render_pdf(html, str(dest))
+            return str(dest)
+
+        # html
+        dest = output_path or Path(RESUME_JSON_PATH).with_suffix(".db_render.html")
+        dest.write_text(html, encoding="utf-8")
+        return str(dest)
+    except Exception:
+        # Fallback to file-based
+        html_path, _ = render_resume_html(output_path=output_path)
+        return str(html_path)

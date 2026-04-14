@@ -189,9 +189,7 @@ def validate_applypilot_meta(data: dict) -> None:
             extension = entry.get("x-applypilot")
             if extension is None:
                 continue
-            errors.extend(
-                _collect_schema_errors(extension, _WORK_EXTENSION_SCHEMA, ["work", index, "x-applypilot"])
-            )
+            errors.extend(_collect_schema_errors(extension, _WORK_EXTENSION_SCHEMA, ["work", index, "x-applypilot"]))
             errors.extend(_find_forbidden_keys(extension, ["work", index, "x-applypilot"]))
 
     if errors:
@@ -546,7 +544,9 @@ def normalize_profile_from_resume_json(data: dict, settings: dict | None = None)
     projects = _normalize_projects(projects_entries)
     current_work = _select_current_role(work)
 
-    experience_total = _coerce_str(applypilot.get("years_of_experience_total")) or _compute_years_experience(work_entries)
+    experience_total = _coerce_str(applypilot.get("years_of_experience_total")) or _compute_years_experience(
+        work_entries
+    )
     target_role = (
         _coerce_str(applypilot.get("target_role"))
         or _primary_role_from_label(_coerce_str(basics.get("label")))
@@ -833,158 +833,13 @@ def get_profile_verified_metrics(profile: dict) -> list[str]:
 
 
 def build_resume_text_from_json(data: dict) -> str:
-    """Render a deterministic plain-text resume for LLM-facing consumers."""
+    """Render a deterministic plain-text resume for LLM-facing consumers.
 
-    basics = data.get("basics", {}) if isinstance(data.get("basics"), dict) else {}
-    location = basics.get("location", {}) if isinstance(basics.get("location"), dict) else {}
-    profiles = basics.get("profiles", []) if isinstance(basics.get("profiles"), list) else []
-    skills = data.get("skills", []) if isinstance(data.get("skills"), list) else []
-    work = data.get("work", []) if isinstance(data.get("work"), list) else []
-    education = data.get("education", []) if isinstance(data.get("education"), list) else []
-    projects = data.get("projects", []) if isinstance(data.get("projects"), list) else []
-    certificates = data.get("certificates", []) if isinstance(data.get("certificates"), list) else []
-    publications = data.get("publications", []) if isinstance(data.get("publications"), list) else []
+    Delegates to ResumeBuilder (builder pattern) for consistent rendering.
+    """
+    from applypilot.resume_builder import from_json_resume
 
-    lines: list[str] = []
-    lines.append(_coerce_str(basics.get("name")))
-    lines.append(_coerce_str(basics.get("label")))
-
-    location_parts = [
-        _coerce_str(location.get("city")),
-        _coerce_str(location.get("region")),
-        _coerce_str(location.get("countryCode")),
-    ]
-    location_line = ", ".join(part for part in location_parts if part)
-    if location_line:
-        lines.append(location_line)
-
-    contact_parts = []
-    if basics.get("email"):
-        contact_parts.append(_coerce_str(basics.get("email")))
-    if basics.get("phone"):
-        contact_parts.append(_coerce_str(basics.get("phone")))
-    if basics.get("url"):
-        contact_parts.append(_coerce_str(basics.get("url")))
-    for profile in profiles:
-        if isinstance(profile, dict) and _coerce_str(profile.get("url")):
-            contact_parts.append(_coerce_str(profile.get("url")))
-    if contact_parts:
-        lines.append(" | ".join(dict.fromkeys(contact_parts)))
-    lines.append("")
-
-    lines.extend(["SUMMARY", _coerce_str(basics.get("summary")) or "N/A", ""])
-
-    lines.append("TECHNICAL SKILLS")
-    if skills:
-        for entry in skills:
-            if not isinstance(entry, dict):
-                continue
-            label = _coerce_str(entry.get("name")) or "Skills"
-            keywords = ", ".join(_coerce_list(entry.get("keywords", []))) or _coerce_str(entry.get("level")) or "N/A"
-            lines.append(f"{label}: {keywords}")
-    else:
-        lines.append("N/A")
-    lines.append("")
-
-    lines.append("EXPERIENCE")
-    if work:
-        for entry in work:
-            if not isinstance(entry, dict):
-                continue
-            date_parts = [_coerce_str(entry.get("startDate")), _coerce_str(entry.get("endDate")) or "Present"]
-            date_range = " - ".join(part for part in date_parts if part)
-            header_parts = [
-                _coerce_str(entry.get("position")),
-                _coerce_str(entry.get("name")),
-                date_range,
-            ]
-            header = " | ".join(part for part in header_parts if part)
-            lines.append(header or "Untitled role")
-            subtitle_parts = [_coerce_str(entry.get("location")), _coerce_str(entry.get("url"))]
-            subtitle = " | ".join(part for part in subtitle_parts if part)
-            if subtitle:
-                lines.append(subtitle)
-            bullets = []
-            if _coerce_str(entry.get("summary")):
-                bullets.append(_coerce_str(entry.get("summary")))
-            bullets.extend(_coerce_list(entry.get("highlights", [])))
-            if not bullets:
-                bullets.append("N/A")
-            for bullet in bullets:
-                lines.append(f"- {bullet}")
-            lines.append("")
-    else:
-        lines.extend(["N/A", ""])
-
-    lines.append("PROJECTS")
-    if projects:
-        for entry in projects:
-            if not isinstance(entry, dict):
-                continue
-            lines.append(_coerce_str(entry.get("name")) or "Untitled project")
-            subtitle_parts = []
-            date_parts = [_coerce_str(entry.get("startDate")), _coerce_str(entry.get("endDate"))]
-            if any(date_parts):
-                subtitle_parts.append(" - ".join(part for part in date_parts if part))
-            if _coerce_str(entry.get("url")):
-                subtitle_parts.append(_coerce_str(entry.get("url")))
-            if subtitle_parts:
-                lines.append(" | ".join(subtitle_parts))
-            bullets = []
-            if _coerce_str(entry.get("description")):
-                bullets.append(_coerce_str(entry.get("description")))
-            bullets.extend(_coerce_list(entry.get("highlights", [])))
-            if not bullets:
-                bullets.append("N/A")
-            for bullet in bullets:
-                lines.append(f"- {bullet}")
-            lines.append("")
-    else:
-        lines.extend(["N/A", ""])
-
-    lines.append("EDUCATION")
-    if education:
-        for entry in education:
-            if not isinstance(entry, dict):
-                continue
-            parts = [
-                _coerce_str(entry.get("institution")),
-                _coerce_str(entry.get("studyType")),
-                _coerce_str(entry.get("area")),
-                _coerce_str(entry.get("endDate")),
-            ]
-            lines.append(" | ".join(part for part in parts if part) or "N/A")
-    else:
-        lines.append("N/A")
-
-    if certificates:
-        lines.extend(["", "CERTIFICATES"])
-        for entry in certificates:
-            if not isinstance(entry, dict):
-                continue
-            parts = [
-                _coerce_str(entry.get("name")),
-                _coerce_str(entry.get("issuer")),
-                _coerce_str(entry.get("date")),
-            ]
-            lines.append(" | ".join(part for part in parts if part) or "N/A")
-
-    if publications:
-        lines.extend(["", "PUBLICATIONS"])
-        for entry in publications:
-            if not isinstance(entry, dict):
-                continue
-            parts = [
-                _coerce_str(entry.get("name")),
-                _coerce_str(entry.get("publisher")),
-                _coerce_str(entry.get("releaseDate")),
-            ]
-            lines.append(" | ".join(part for part in parts if part) or "N/A")
-            summary = _coerce_str(entry.get("summary"))
-            if summary:
-                lines.append(f"- {summary}")
-
-    return "\n".join(lines).strip() + "\n"
+    return from_json_resume(data).render_text() + "\n"
 
 
 def resolve_render_theme(data: dict, explicit_theme: str | None = None) -> str:

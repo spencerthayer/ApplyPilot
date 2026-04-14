@@ -251,9 +251,7 @@ class TestFlagMissingMetrics:
 class TestEdgeCases:
     def test_profile_without_work_entries(self, tmp_path):
         """Test handling of profile without work section."""
-        profile_data = {
-            "work": []
-        }
+        profile_data = {"work": []}
         profile_path = tmp_path / "profile.json"
         profile_path.write_text(json.dumps(profile_data))
 

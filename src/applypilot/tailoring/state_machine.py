@@ -52,7 +52,7 @@ class SmartTailoringEngine:
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         self.client = get_client()
-        self.bullet_bank = BulletBank(config.get("bullet_bank_path", "/tmp/bullet_bank.db"))
+        self.bullet_bank = self._make_bullet_bank(config)
         self.quality_gates: List[Any] = [MetricsGate(), RelevanceGate()]
 
         self.machine = Machine(
@@ -77,6 +77,22 @@ class SmartTailoringEngine:
     # -- Step-based state handlers --------------------------------------------
     # Each handler performs work for its state and fires the appropriate trigger
     # to advance the machine. The run() loop calls step() once per iteration.
+
+    @staticmethod
+    def _make_bullet_bank(config: Dict[str, Any]) -> BulletBank:
+        """Create BulletBank from DI container or fallback to path-based repo."""
+        repo = config.get("bullet_bank_repo")
+        if repo is not None:
+            return BulletBank(repo)
+        # Fallback: create a repo from a db path
+        from applypilot.db.sqlite.connection import get_connection
+        from applypilot.db.sqlite.bullet_bank_repo import SqliteBulletBankRepository
+        from applypilot.db.schema import init_db
+
+        path = config.get("bullet_bank_path", "")
+        conn = get_connection(path) if path else get_connection()
+        init_db(conn)
+        return BulletBank(SqliteBulletBankRepository(conn))
 
     def step(self) -> None:
         """Execute the current state's logic and transition to the next state."""

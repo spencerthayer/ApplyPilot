@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from applypilot.database import extract_company
-from applypilot.url_safety import host_matches, is_algolia_queries_url, parse_hostname
+from applypilot.url_safety import extract_company, host_matches, is_algolia_queries_url, parse_hostname
 
 
 def test_host_matches_accepts_exact_hosts_and_true_subdomains() -> None:

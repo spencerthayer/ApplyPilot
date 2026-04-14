@@ -63,11 +63,17 @@ LLM_PROVIDER_SPECS: dict[str, LLMProviderSpec] = {
         env_key="LLM_URL",
         default_model="local-model",
     ),
+    "bedrock": LLMProviderSpec(
+        key="bedrock",
+        label="AWS Bedrock",
+        env_key="BEDROCK_MODEL_ID",
+        default_model="anthropic.claude-3-haiku-20240307-v1:0",
+    ),
 }
 
 REMOTE_PROVIDER_ORDER = ("gemini", "openrouter", "openai", "anthropic")
-PROVIDER_DETECTION_ORDER = ("local", *REMOTE_PROVIDER_ORDER)
-WIZARD_PROVIDER_ORDER = ("gemini", "openrouter", "openai", "anthropic", "local")
+PROVIDER_DETECTION_ORDER = ("local", *REMOTE_PROVIDER_ORDER, "bedrock")
+WIZARD_PROVIDER_ORDER = ("gemini", "openrouter", "openai", "anthropic", "bedrock", "local")
 
 
 def _env(environ: Mapping[str, str] | None) -> Mapping[str, str]:
@@ -101,6 +107,17 @@ def detect_llm_provider(environ: Mapping[str, str] | None = None) -> LLMProvider
                 api_key=api_key,
             )
 
+    # Bedrock: no API key — uses boto3 credential chain (ada credentials update)
+    bedrock_model = env.get("BEDROCK_MODEL_ID", "").strip()
+    if bedrock_model:
+        spec = LLM_PROVIDER_SPECS["bedrock"]
+        return LLMProviderSelection(
+            spec=spec,
+            base_url="",
+            model=model_override or bedrock_model,
+            api_key="",
+        )
+
     return None
 
 
@@ -120,6 +137,10 @@ def format_llm_provider_status(environ: Mapping[str, str] | None = None) -> str 
     if selection.spec.key == "local":
         return f"Local: {selection.base_url}"
 
+    if selection.spec.key == "bedrock":
+        region = (_env(environ)).get("BEDROCK_REGION", "us-east-1").strip()
+        return f"AWS Bedrock ({selection.model}) in {region}"
+
     return f"{selection.spec.label} ({selection.model})"
 
 
@@ -128,5 +149,5 @@ def llm_config_hint() -> str:
 
     return (
         "Set GEMINI_API_KEY, OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, "
-        "or LLM_URL in ~/.applypilot/.env (run 'applypilot init')"
+        "BEDROCK_MODEL_ID, or LLM_URL in ~/.applypilot/.env (run 'applypilot init')"
     )

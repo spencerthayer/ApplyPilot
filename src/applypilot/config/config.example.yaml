@@ -1,0 +1,26 @@
+# ApplyPilot Runtime Configuration
+# Place this file at ~/.applypilot/config.yaml
+# All values are optional — defaults shown below.
+
+scoring:
+  min_score: 7                    # Minimum fit score for tailoring/apply
+  max_attempts_per_job: 3         # Max LLM scoring retries per job
+  attempt_backoff_seconds: 1.0    # Backoff between scoring retries
+
+tailoring:
+  max_attempts: 5                 # Max tailoring retries per job
+  validation_mode: normal         # strict | normal | lenient
+  retention_threshold: 0.40       # Statistical guardrail: min token retention
+  variant_retention_threshold: 0.70
+  cover_letter_fabrication_threshold: 0.15  # Semantic guardrail: max fabrication rate
+
+apply:
+  max_attempts: 10                # Max apply retries per job
+  timeout_seconds: 300            # Per-job apply timeout
+  poll_interval_seconds: 30       # Continuous mode poll interval
+  rate_limit_per_hour: 5          # Max applications per portal per hour
+  viewport: "1280x900"            # Browser viewport size
+
+pipeline:
+  chunk_size: 1000                # Jobs per chunk in chunked mode
+  enrichment_limit_per_site: 100  # Max jobs to enrich per site per run

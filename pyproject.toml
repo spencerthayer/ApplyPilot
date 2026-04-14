@@ -1,6 +1,6 @@
 [project]
 name = "applypilot"
-version = "0.2.0"
+version = "1.0.0-alpha"
 description = "AI-powered end-to-end job application pipeline"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -21,7 +21,7 @@ dependencies = [
     "typer>=0.9.0",
     "rich>=13.0",
     "jsonschema>=4.0",
-    "litellm~=1.63.0",
+    "litellm>=1.63.0",
     "httpx>=0.24",
     "tenacity>=8.2",
     "beautifulsoup4>=4.12",
@@ -34,10 +34,12 @@ dependencies = [
     "markdownify>=0.14.1",
     "websocket-client>=1.0",
     "transitions>=0.9",
+    "local-geocode>=0.0.2",
     ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "ruff>=0.1"]
+dev = ["pytest>=7.0", "ruff>=0.1", "pytest-cov>=4.0"]
+bedrock = ["boto3>=1.28"]
 
 [project.scripts]
 applypilot = "applypilot.cli:app"
@@ -57,6 +59,17 @@ packages = ["src/applypilot"]
 [tool.hatch.build]
 artifacts = ["src/applypilot/config/*.yaml"]
 
+[tool.pytest.ini_options]
+addopts = "--cov=src/applypilot --cov-report=term-missing -m 'not live'"
+testpaths = ["tests"]
+markers = [
+    "live: real API calls — run with: pytest -m live",
+    "smoke: lightweight smoke tests",
+]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 120
+
+[tool.ruff.lint]
+ignore = ["E402", "F405", "E741"]

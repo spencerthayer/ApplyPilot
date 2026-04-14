@@ -118,6 +118,47 @@ def test_build_resume_text_from_json_is_deterministic() -> None:
     assert "Spencer Thayer" in first
 
 
+def test_build_resume_reverse_chronological() -> None:
+    """Work entries must be sorted present → past (reverse chronological)."""
+    data = sample_resume_json()
+    data["work"] = [
+        {
+            "name": "OldCo",
+            "position": "Junior",
+            "startDate": "2018-01-01",
+            "endDate": "2020-01-01",
+            "highlights": ["Old work"],
+        },
+        {"name": "NewCo", "position": "Senior", "startDate": "2023-01-01", "highlights": ["New work"]},
+    ]
+    text = build_resume_text_from_json(data)
+    assert text.index("NewCo") < text.index("OldCo")
+
+
+def test_build_resume_omits_empty_projects() -> None:
+    """PROJECTS header must not appear when there are no project entries."""
+    data = sample_resume_json()
+    data["projects"] = []
+    text = build_resume_text_from_json(data)
+    assert "PROJECTS" not in text
+
+
+def test_build_resume_omits_empty_skills() -> None:
+    """TECHNICAL SKILLS header must not appear when skills are empty."""
+    data = sample_resume_json()
+    data["skills"] = []
+    text = build_resume_text_from_json(data)
+    assert "TECHNICAL SKILLS" not in text
+
+
+def test_build_resume_no_na() -> None:
+    """N/A must never appear in rendered resume."""
+    data = sample_resume_json()
+    data["projects"] = []
+    text = build_resume_text_from_json(data)
+    assert "N/A" not in text
+
+
 def test_resolve_render_theme_prefers_applypilot_then_meta() -> None:
     data = sample_resume_json()
     assert resolve_render_theme(data) == "jsonresume-theme-even"

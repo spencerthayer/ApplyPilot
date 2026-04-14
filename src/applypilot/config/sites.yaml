@@ -84,6 +84,9 @@ base_urls:
   "DynamiteJobs": "https://dynamitejobs.com"
   "4DayWeek": "https://4dayweek.io"
 
+  # Indian Job Sites
+  "Naukri": "https://www.naukri.com"
+
 sites:
   # ── Searchable sites (URL includes query + location params) ──────────
   # Canada-specific
@@ -210,4 +213,20 @@ sites:
 
   - name: "Otta"
     url: "https://otta.com/jobs/all?title=software+engineer&remote=true"
+    type: static
+
+  # India job boards
+  - name: "Naukri"
+    url: "https://www.naukri.com/{query_encoded}-jobs?k={query_encoded}&l={location_encoded}&experience=3"
     type: search
+    force_headful: true  # Next.js SPA — server HTML is empty shell, needs browser rendering
+
+  # Japan tech job boards
+  - name: "TokyoDev"
+    url: "https://www.tokyodev.com/jobs"
+    type: static
+    force_headful: true  # Blocks scrapers, needs browser
+
+  - name: "JapanDev"
+    url: "https://japan-dev.com/jobs"
+    type: static

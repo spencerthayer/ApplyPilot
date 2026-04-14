@@ -15,6 +15,14 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def _clean_backend_env(monkeypatch):
+    """Prevent test pollution from stale env vars."""
+    for key in ("APPLY_BACKEND", "AUTO_APPLY_AGENT", "AUTO_APPLY_AGENT_PRIORITY"):
+        monkeypatch.delenv(key, raising=False)
+
+
 from applypilot.apply.backends import (
     AgentBackendError,
     ClaudeBackend,
@@ -63,7 +71,7 @@ class TestBackendDetection:
         print(f"\nPreferred backend: {preferred}")
 
         if preferred:
-            assert preferred in ["opencode", "claude"]
+            assert preferred in ["opencode", "claude", "codex"]
 
     def test_backends_detected_if_installed(self):
         """Should detect opencode if installed."""

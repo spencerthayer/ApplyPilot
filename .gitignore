@@ -67,3 +67,11 @@ CLAUDE.md
 resume.json
 
 .applypilot
+tests/_prompt_comparison*
+.coverage
+.kiro/
+applypilot_session_context.md
+applypilot.md
+sujeet_resume.json
+debug/
+src/applypilot/config/skill_adjacency.yaml

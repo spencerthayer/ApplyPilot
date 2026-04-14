@@ -27,6 +27,13 @@ from applypilot.apply.backends import (
 
 # ---------------------------------------------------------------------------
 # 1. Default backend when APPLY_BACKEND env var is unset
+@pytest.fixture(autouse=True)
+def _clean_backend_env(monkeypatch):
+    """Ensure no stale env vars affect backend selection."""
+    monkeypatch.delenv("APPLY_BACKEND", raising=False)
+    monkeypatch.delenv("AUTO_APPLY_AGENT", raising=False)
+
+
 # ---------------------------------------------------------------------------
 
 

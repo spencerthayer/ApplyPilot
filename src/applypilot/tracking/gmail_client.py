@@ -43,10 +43,7 @@ def check_gmail_setup() -> tuple[bool, str]:
             "  5. Run: python3 scripts/gmail_oauth.py"
         )
     if not creds_path.exists():
-        return False, (
-            f"OAuth token not found at {creds_path}\n"
-            "Run: python3 scripts/gmail_oauth.py"
-        )
+        return False, (f"OAuth token not found at {creds_path}\nRun: python3 scripts/gmail_oauth.py")
     return True, "Gmail MCP credentials found."
 
 
@@ -126,7 +123,7 @@ def _parse_search_results(text: str) -> list[dict]:
 
     emails = []
     # Split on blank lines followed by "ID:"
-    blocks = re.split(r'\n\n(?=ID:\s)', text.strip())
+    blocks = re.split(r"\n\n(?=ID:\s)", text.strip())
 
     for block in blocks:
         block = block.strip()
@@ -242,7 +239,7 @@ async def search_application_emails(days: int = 14, limit: int = 100) -> list[di
         # Known ATS platforms
         f"{base} {{from:greenhouse.io OR from:lever.co OR from:icims.com OR from:myworkdayjobs.com OR from:jobvite.com OR from:smartrecruiters.com}}",
         # Subject-line keywords
-        f"{base} {{subject:application OR subject:interview OR subject:candidate OR subject:\"next steps\" OR subject:\"your application\"}}",
+        f'{base} {{subject:application OR subject:interview OR subject:candidate OR subject:"next steps" OR subject:"your application"}}',
         # Spam folder — job emails sometimes land here
         f"in:spam {base} {{subject:application OR subject:interview OR subject:offer OR subject:candidate}}",
     ]
@@ -257,7 +254,8 @@ async def search_application_emails(days: int = 14, limit: int = 100) -> list[di
                 for query in search_queries:
                     try:
                         raw_text = await _call_tool_raw(
-                            session, "search_emails",
+                            session,
+                            "search_emails",
                             {"query": query, "maxResults": limit},
                         )
                     except asyncio.TimeoutError:
@@ -314,7 +312,8 @@ async def read_email_bodies(email_ids: list[str]) -> dict[str, dict]:
                 for msg_id in email_ids:
                     try:
                         full_text = await _call_tool_raw(
-                            session, "read_email",
+                            session,
+                            "read_email",
                             {"messageId": msg_id},
                         )
                         full = _parse_read_result(full_text, msg_id)
@@ -381,11 +380,15 @@ async def apply_label_to_emails(email_ids: list[str], label: str = "ap-track") -
                 CHUNK = 50
                 total_labeled = 0
                 for i in range(0, len(email_ids), CHUNK):
-                    chunk = email_ids[i:i + CHUNK]
-                    raw = await _call_tool_raw(session, "batch_modify_emails", {
-                        "messageIds": chunk,
-                        "addLabelIds": [label_id],
-                    })
+                    chunk = email_ids[i: i + CHUNK]
+                    raw = await _call_tool_raw(
+                        session,
+                        "batch_modify_emails",
+                        {
+                            "messageIds": chunk,
+                            "addLabelIds": [label_id],
+                        },
+                    )
                     if raw.startswith("Error:"):
                         log.warning("batch_modify_emails failed (chunk %d): %s", i // CHUNK, raw[:100])
                         continue

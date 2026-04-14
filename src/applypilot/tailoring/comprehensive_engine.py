@@ -8,7 +8,6 @@ This implements the full workflow from the design spec:
 
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -17,7 +16,7 @@ from transitions import Machine
 
 from applypilot.llm import get_client
 from applypilot.intelligence.jd_parser import JobDescriptionParser
-from applypilot.resume_json import get_profile_skill_sections, get_profile_verified_metrics
+from applypilot.resume.extraction import get_profile_skill_sections, get_profile_verified_metrics
 from applypilot.tailoring.models import Resume
 from applypilot.tailoring.quality_gates import MetricsGate, RelevanceGate
 from applypilot.tailoring.metrics_registry import MetricsRegistry
@@ -164,9 +163,15 @@ class ComprehensiveTailoringEngine:
         self.config = config
         self.client = get_client()
 
+        # Use ComprehensiveStorage instead of direct sqlite3
+        from applypilot.tailoring.comprehensive_storage import ComprehensiveStorage
+
+        self.storage = ComprehensiveStorage(
+            conn=config.get("storage_conn"),
+            db_path=config.get("bullet_bank_path", "/tmp/bullet_bank.db"),
+        )
         self.bullet_bank_path = config.get("bullet_bank_path", "/tmp/bullet_bank.db")
         self.evidence_path = config.get("evidence_path", "/tmp/evidence.db")
-        self._init_databases()
         self.machine = Machine(
             model=self,
             states=[s.value for s in ProcessingState],
@@ -192,68 +197,8 @@ class ComprehensiveTailoringEngine:
         self.improvement_threshold = config.get("improvement_threshold", 0.1)
 
     def _init_databases(self):
-        """Initialize SQLite databases for bullets and evidence."""
-        with sqlite3.connect(self.bullet_bank_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS bullets (
-                    id TEXT PRIMARY KEY,
-                    text TEXT,
-                    variants TEXT,
-                    tags TEXT,
-                    skills TEXT,
-                    domains TEXT,
-                    role_families TEXT,
-                    evidence_links TEXT,
-                    metrics TEXT,
-                    vague_claim BOOLEAN,
-                    implied_scale BOOLEAN,
-                    tech_mismatch BOOLEAN,
-                    keyword_mismatch BOOLEAN,
-                    ownership_level INTEGER,
-                    recency_score REAL,
-                    has_proof BOOLEAN,
-                    has_metric BOOLEAN,
-                    use_count INTEGER DEFAULT 0,
-                    success_count INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS bullet_feedback (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    bullet_id TEXT,
-                    job_title TEXT,
-                    outcome TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (bullet_id) REFERENCES bullets(id)
-                )
-            """)
-
-        with sqlite3.connect(self.evidence_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS evidence (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    claim TEXT,
-                    bullet_id TEXT,
-                    proof_links TEXT,
-                    interview_script TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
-
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS metrics_registry (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    metric_key TEXT UNIQUE,
-                    value TEXT,
-                    timeframe TEXT,
-                    definition TEXT,
-                    source TEXT,
-                    allowed_phrases TEXT,
-                    verified BOOLEAN DEFAULT FALSE
-                )
-            """)
+        """Databases initialized by ComprehensiveStorage."""
+        pass  # Handled by self.storage
 
     # ========================================================================
     # PHASE 1: PREPROCESS LIBRARY
@@ -352,9 +297,7 @@ class ComprehensiveTailoringEngine:
         # Select top bullets to generate variants for
         # Prioritize bullets with metrics as they're most valuable
         sorted_achievements = sorted(
-            self._raw_achievements,
-            key=lambda a: any(c.isdigit() for c in a["text"]),
-            reverse=True
+            self._raw_achievements, key=lambda a: any(c.isdigit() for c in a["text"]), reverse=True
         )
 
         # Initialize MetricsRegistry for validation
@@ -415,6 +358,7 @@ class ComprehensiveTailoringEngine:
                 variants_generated += 1
             # Detect metrics
             import re
+
             metrics = re.findall(r"\d+%|\$[\d,]+|\d+x|\d+\s+(?:million|thousand)", original_text, re.IGNORECASE)
             # Risk assessment
             vague = self._is_vague(original_text)
@@ -438,7 +382,9 @@ class ComprehensiveTailoringEngine:
 
         logger.info(
             "Generated %d variants for %d bullets using %d LLM calls",
-            variants_generated, len([b for b in self.bullet_bank.values() if b.variants]), llm_calls_made
+            variants_generated,
+            len([b for b in self.bullet_bank.values() if b.variants]),
+            llm_calls_made,
         )
 
     def _generate_car_variant(self, text: str) -> str:
@@ -492,35 +438,11 @@ class ComprehensiveTailoringEngine:
                 bullet.role_families.append("ai_engineer")
 
     def _do_publish_bullet_bank(self):
-        """Save to SQLite."""
+        """Save to SQLite via storage adapter."""
         logger.info("Preprocessing: PUBLISH_BULLET_BANK")
 
-        with sqlite3.connect(self.bullet_bank_path) as conn:
-            for bullet in self.bullet_bank.values():
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO bullets 
-                    (id, text, variants, tags, skills, domains, role_families,
-                     evidence_links, metrics, vague_claim, implied_scale,
-                     has_proof, has_metric)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        bullet.id,
-                        bullet.text,
-                        json.dumps(bullet.variants),
-                        json.dumps(bullet.tags),
-                        json.dumps(bullet.skills),
-                        json.dumps(bullet.domains),
-                        json.dumps(bullet.role_families),
-                        json.dumps(bullet.evidence_links),
-                        json.dumps(bullet.metrics),
-                        bullet.vague_claim,
-                        bullet.implied_scale,
-                        bullet.has_proof,
-                        bullet.has_metric,
-                    ),
-                )
+        for bullet in self.bullet_bank.values():
+            self.storage.save_bullet(bullet)
 
     # ========================================================================
     # PHASE 2: TAILOR FOR JOB
@@ -627,48 +549,42 @@ class ComprehensiveTailoringEngine:
         logger.info("Built target profile for role: %s", best_role_key)
 
     def _do_retrieve_candidates(self):
-        """Retrieve matching bullets from bank."""
+        """Retrieve matching bullets from bank via storage adapter."""
         logger.info("TAILOR: RETRIEVE_CANDIDATES")
-        with sqlite3.connect(self.bullet_bank_path) as conn:
-            cursor = conn.execute("SELECT * FROM bullets WHERE has_metric = 1")
-            rows = cursor.fetchall()
-            self.candidate_bullets = []
-            for row in rows:
-                try:
-                    # Map row columns to HardenedBullet fields
-                    bullet = HardenedBullet(
-                        id=row[0],
-                        text=row[1],
-                        variants=json.loads(row[2]) if row[2] else {},
-                        tags=json.loads(row[3]) if row[3] else [],
-                        skills=json.loads(row[4]) if row[4] else [],
-                        domains=json.loads(row[5]) if row[5] else [],
-                        role_families=json.loads(row[6]) if row[6] else [],
-                        evidence_links=json.loads(row[7]) if row[7] else [],
-                        metrics=json.loads(row[8]) if row[8] else [],
-                        vague_claim=bool(row[9]),
-                        implied_scale=bool(row[10]),
-                        tech_mismatch=bool(row[11]),
-                        keyword_mismatch=bool(row[12]),
-                        ownership_level=row[13] if row[13] else 0,
-                        recency_score=row[14] if row[14] else 0.0,
-                        has_proof=bool(row[15]),
-                        has_metric=bool(row[16]),
-                        use_count=row[17] if row[17] else 0,
-                        success_count=row[18] if row[18] else 0,
-                        created_at=row[19] if row[19] else "",
-                    )
-                    self.candidate_bullets.append(bullet)
-                except (json.JSONDecodeError, IndexError, TypeError) as e:
-                    logger.warning(f"Skipping malformed bullet row: {e}")
-                    continue
+        rows = self.storage.get_metric_bullets()
+        self.candidate_bullets = []
+        for row in rows:
+            try:
+                bullet = HardenedBullet(
+                    id=row["id"],
+                    text=row["text"],
+                    variants=json.loads(row["variants"]) if row["variants"] else {},
+                    tags=json.loads(row["tags"]) if row["tags"] else [],
+                    skills=json.loads(row["skills"]) if row["skills"] else [],
+                    domains=json.loads(row["domains"]) if row["domains"] else [],
+                    role_families=json.loads(row["role_families"]) if row["role_families"] else [],
+                    evidence_links=json.loads(row["evidence_links"]) if row["evidence_links"] else [],
+                    metrics=json.loads(row["metrics"]) if row["metrics"] else [],
+                    vague_claim=bool(row["vague_claim"]),
+                    implied_scale=bool(row["implied_scale"]),
+                    tech_mismatch=bool(row["tech_mismatch"]),
+                    keyword_mismatch=bool(row["keyword_mismatch"]),
+                    ownership_level=row["ownership_level"] or 0,
+                    recency_score=row["recency_score"] or 0.0,
+                    has_proof=bool(row["has_proof"]),
+                    has_metric=bool(row["has_metric"]),
+                    use_count=row["use_count"] or 0,
+                    success_count=row["success_count"] or 0,
+                    created_at=row["created_at"] or "",
+                )
+                self.candidate_bullets.append(bullet)
+            except (json.JSONDecodeError, IndexError, TypeError, KeyError) as e:
+                logger.warning(f"Skipping malformed bullet row: {e}")
+                continue
 
         # Filter/sort by relevance if target role is available
         if self.current_target_role and self.candidate_bullets:
-            self.candidate_bullets = self._filter_by_relevance(
-                self.candidate_bullets, self.current_target_role
-            )
-
+            self.candidate_bullets = self._filter_by_relevance(self.candidate_bullets, self.current_target_role)
 
     def _filter_by_relevance(
         self, bullets: List[HardenedBullet], target_role: TargetRoleProfile
@@ -700,6 +616,7 @@ class ComprehensiveTailoringEngine:
 
         # Return sorted bullets (filter out zero scores optionally)
         return [bullet for bullet, score in scored_bullets if score > 0]
+
     def _do_risk_filter(self):
         """Filter out high-risk bullets."""
         logger.info("TAILOR: RISK_FILTER")
@@ -723,11 +640,11 @@ class ComprehensiveTailoringEngine:
             if bullet.has_metric:
                 score += 0.3
             # (d) Ownership level (0-5, scaled to 0-0.3)
-            if hasattr(bullet, 'ownership_level') and bullet.ownership_level:
+            if hasattr(bullet, "ownership_level") and bullet.ownership_level:
                 score += min(bullet.ownership_level / 5.0 * 0.3, 0.3)
 
             # (c) Recency score (use existing or default)
-            base_recency = getattr(bullet, 'recency_score', 0.0) or 0.0
+            base_recency = getattr(bullet, "recency_score", 0.0) or 0.0
             if base_recency > 0:
                 score += base_recency * 0.2  # Scale recency contribution
 
@@ -754,6 +671,7 @@ class ComprehensiveTailoringEngine:
 
             # Normalize score to 0-1 range
             bullet.recency_score = min(score, 1.0)
+
     def _do_select_proof_set(self):
         """Select top-scoring bullets with diversity constraints.
 
@@ -768,7 +686,7 @@ class ComprehensiveTailoringEngine:
         # Sort candidates by score descending
         sorted_candidates = sorted(
             self.candidate_bullets,
-            key=lambda b: getattr(b, 'recency_score', 0.0) or 0.0,
+            key=lambda b: getattr(b, "recency_score", 0.0) or 0.0,
             reverse=True,
         )
 
@@ -801,7 +719,7 @@ class ComprehensiveTailoringEngine:
             if tag in bullet.skills or tag in bullet.domains:
                 continue
             # If tag looks like a company name (contains underscore or is lowercase identifier)
-            if '_' in tag or (tag.islower() and len(tag) > 2):
+            if "_" in tag or (tag.islower() and len(tag) > 2):
                 return tag
         return "unknown"
 
@@ -874,7 +792,7 @@ class ComprehensiveTailoringEngine:
         """Build professional summary with key metrics."""
         # Get years of experience
         years_exp = self.profile.get("experience", {}).get("years_of_experience_total", "14")
-        
+
         # Get key achievements/metrics from profile
         key_achievements = self.profile.get("key_achievements", [])
         top_metrics = []
@@ -882,12 +800,12 @@ class ComprehensiveTailoringEngine:
             metric = achievement.get("metric", "")
             if metric:
                 top_metrics.append(metric)
-        
+
         # Build summary emphasizing technical achievements
         summary_parts = [
             f"AI Engineer with {years_exp} years building production ML systems, including 8 years architecting AI-powered content pipelines and recommendation engines."
         ]
-        
+
         # Add education mention
         education = self.profile.get("education", [])
         if education:
@@ -896,13 +814,13 @@ class ComprehensiveTailoringEngine:
             degree = top_edu.get("studyType", "")
             if "Georgia Tech" in school or "Georgia Institute" in school:
                 summary_parts.append(f"Georgia Tech {degree} in {top_edu.get('area', 'Systems Engineering')}.")
-        
+
         # Add key metrics
         if len(top_metrics) >= 2:
             summary_parts.append(
                 "Reduced platform costs while scaling revenue through automated content generation and personalized user experiences."
             )
-        
+
         return " ".join(summary_parts)
 
     def _build_skills_section(self) -> List[str]:
@@ -913,7 +831,7 @@ class ComprehensiveTailoringEngine:
             for label, keywords in get_profile_skill_sections(self.profile):
                 lines.append(f"{label}: {', '.join(keywords[:6])}")
             return lines
-        
+
         # Languages
         languages = comprehensive.get("languages", [])
         if languages:
@@ -924,7 +842,7 @@ class ComprehensiveTailoringEngine:
             ]
             if filtered_langs:
                 lines.append(f"Languages: {', '.join(filtered_langs[:5])}")
-        
+
         # Frameworks
         frameworks = comprehensive.get("frameworks", [])
         if frameworks:
@@ -932,14 +850,16 @@ class ComprehensiveTailoringEngine:
             filtered_fw = [f for f in frameworks if any(mf in f for mf in main_fw)]
             if filtered_fw:
                 lines.append(f"Frameworks: {', '.join(filtered_fw[:4])}")
-        
+
         # ML/AI
         ai_ml = comprehensive.get("ai_ml", [])
         if ai_ml:
             lines.append(f"ML/AI: {', '.join(ai_ml[:6])}")
         else:
-            lines.append("ML/AI: LLMs, RAG architectures, vector embeddings, recommendation systems, content automation")
-        
+            lines.append(
+                "ML/AI: LLMs, RAG architectures, vector embeddings, recommendation systems, content automation"
+            )
+
         # DevOps & Infra
         platforms = comprehensive.get("platforms", [])
         if platforms:
@@ -949,28 +869,28 @@ class ComprehensiveTailoringEngine:
                 lines.append(f"DevOps & Infra: {', '.join(filtered_plat[:4])}")
         else:
             lines.append("DevOps & Infra: AWS, Docker, CI/CD, Lambda")
-        
+
         # Databases
         databases = comprehensive.get("databases", [])
         if databases:
             lines.append(f"Databases: {', '.join(databases[:6])}")
         else:
             lines.append("Databases: PostgreSQL, Supabase, Typesense, vector databases, Amazon Redshift")
-        
+
         # Tools
         tools = comprehensive.get("tools", [])
         if tools:
             lines.append(f"Tools: {', '.join(tools[:6])}")
         else:
             lines.append("Tools: Git, Jira, Confluence, Figma, Tableau")
-        
+
         return lines
 
     def _build_experience_section(self) -> List[str]:
         """Build experience section from work history and selected bullets."""
         lines = []
         work_history = self.profile.get("work", [])
-        
+
         # Map bullets to companies by tag
         bullets_by_company: Dict[str, List[HardenedBullet]] = {}
         for bullet in self.selected_bullets:
@@ -978,20 +898,20 @@ class ComprehensiveTailoringEngine:
             if company not in bullets_by_company:
                 bullets_by_company[company] = []
             bullets_by_company[company].append(bullet)
-        
+
         # Build experience entries
         for job in work_history:
             company = job.get("company", "")
             position = job.get("position", "")
-            
+
             # Format dates
             start_date = job.get("start_date", "")
             end_date = job.get("end_date", "present")
             date_range = self._format_date_range(start_date, end_date)
-            
+
             # Add company/position header
             lines.append(f"{position} at {company}")
-            
+
             # Add technologies line
             technologies = job.get("technologies", [])
             if technologies:
@@ -999,7 +919,7 @@ class ComprehensiveTailoringEngine:
                 lines.append(f"{tech_str} | {date_range}")
             else:
                 lines.append(date_range)
-            
+
             # Add bullets for this company
             company_bullets = bullets_by_company.get(company, [])
             if company_bullets:
@@ -1022,21 +942,21 @@ class ComprehensiveTailoringEngine:
                         lines.append(f"- {action} {metric.lower()} through {highlight[:60].lower()}...")
                     else:
                         lines.append(f"- Achieved {metric.lower()}")
-            
+
             lines.append("")
-        
+
         return lines
 
     def _build_projects_section(self) -> List[str]:
         """Build projects section from project highlights."""
         lines = []
         projects = self.profile.get("projects", [])
-        
+
         for project in projects[:3]:  # Max 3 projects
             name = project.get("name", "")
             description = project.get("description", "")
             technologies = project.get("technologies", [])
-            
+
             # Format project header with technologies
             if technologies:
                 tech_str = ", ".join(technologies[:5])
@@ -1044,7 +964,7 @@ class ComprehensiveTailoringEngine:
                 lines.append(f"{tech_str}")
             else:
                 lines.append(f"{name} - {description}")
-            
+
             # Try to find matching bullets or use highlights
             project_bullets = self._find_bullets_for_project(name)
             if project_bullets:
@@ -1054,32 +974,32 @@ class ComprehensiveTailoringEngine:
             else:
                 # Add a generic bullet based on description
                 lines.append(f"- Built {description.lower()}")
-            
+
             lines.append("")
-        
+
         return lines
 
     def _build_education_section(self) -> List[str]:
         """Build education section."""
         lines = []
         education = self.profile.get("education", [])
-        
+
         for edu in education:
             institution = edu.get("institution", "")
             study_type = edu.get("studyType", "")
             area = edu.get("area", "")
             end_date = edu.get("endDate", "")
-            
+
             # Extract year from end_date
             year = ""
             if end_date:
                 year = end_date.split("-")[0] if "-" in end_date else end_date[:4]
-            
+
             edu_line = f"{institution} | {study_type} | {area}"
             if year:
                 edu_line += f" | {year}"
             lines.append(edu_line)
-        
+
         return lines
 
     def _format_date_range(self, start_date: str, end_date: str) -> str:
@@ -1087,7 +1007,7 @@ class ComprehensiveTailoringEngine:
         # Extract years
         start_year = ""
         end_year = "Present"
-        
+
         if start_date:
             parts = start_date.split("-")
             if parts:
@@ -1096,7 +1016,7 @@ class ComprehensiveTailoringEngine:
             parts = end_date.split("-")
             if parts:
                 end_year = parts[0]
-        
+
         if start_year and end_year:
             return f"{start_year} - {end_year}"
         elif end_year:
@@ -1128,34 +1048,43 @@ class ComprehensiveTailoringEngine:
         """Remove banned phrases and ensure required patterns."""
         if not self.target_profile:
             return bullet_text
-        
+
         # Check for banned phrases
         for phrase in self.target_profile.banned_phrases:
             bullet_text = bullet_text.replace(phrase, "")
-        
+
         # Ensure required action verbs are present
-        has_required = any(
-            pattern in bullet_text.lower()
-            for pattern in self.target_profile.required_patterns
-        )
+        has_required = any(pattern in bullet_text.lower() for pattern in self.target_profile.required_patterns)
         if not has_required and self.target_profile.required_patterns:
             # Prepend a required action verb
-            bullet_text = f"{self.target_profile.required_patterns[0].capitalize()} {bullet_text[0].lower()}{bullet_text[1:]}"
-        
+            bullet_text = (
+                f"{self.target_profile.required_patterns[0].capitalize()} {bullet_text[0].lower()}{bullet_text[1:]}"
+            )
+
         return bullet_text.strip()
 
     def _extract_action_from_highlight(self, highlight: str) -> str:
         """Extract action verb from highlight text."""
         # Common action verbs
         action_verbs = [
-            "Architected", "Built", "Designed", "Developed", "Led", "Implemented",
-            "Created", "Managed", "Delivered", "Reduced", "Increased", "Achieved"
+            "Architected",
+            "Built",
+            "Designed",
+            "Developed",
+            "Led",
+            "Implemented",
+            "Created",
+            "Managed",
+            "Delivered",
+            "Reduced",
+            "Increased",
+            "Achieved",
         ]
-        
+
         words = highlight.split()
         if words and words[0].rstrip(",.;") in action_verbs:
             return words[0]
-        
+
         # Default to "Built" if no action verb found
         return "Built"
 
@@ -1168,18 +1097,16 @@ class ComprehensiveTailoringEngine:
             return False
 
         # Create Resume object from current draft
-        resume = Resume(
-            text=self.current_draft,
-            sections={"EXPERIENCE": {"bullets": self.current_draft.split("\n")}}
-        )
+        resume = Resume(text=self.current_draft, sections={"EXPERIENCE": {"bullets": self.current_draft.split("\n")}})
 
         # Build job intelligence context from current job
         job_intel = None
         if self.current_job:
-            job_intel = type('JobIntel', (), {
-                'title': self.current_job.get('title', ''),
-                'company': self.current_job.get('company', '')
-            })()
+            job_intel = type(
+                "JobIntel",
+                (),
+                {"title": self.current_job.get("title", ""), "company": self.current_job.get("company", "")},
+            )()
 
         context = {"job_intelligence": job_intel}
 
@@ -1196,13 +1123,19 @@ class ComprehensiveTailoringEngine:
         self._last_validation_result = registry.validate_text(self.current_draft)
 
         # Log results
-        logger.info("MetricsGate: passed=%s, score=%.2f",
-                   self._last_metrics_result.passed, self._last_metrics_result.score)
-        logger.info("RelevanceGate: passed=%s, score=%.2f",
-                   self._last_relevance_result.passed, self._last_relevance_result.score)
-        logger.info("MetricsRegistry: valid=%d, invalid=%d",
-                   len(self._last_validation_result.valid_metrics),
-                   len(self._last_validation_result.invalid_metrics))
+        logger.info(
+            "MetricsGate: passed=%s, score=%.2f", self._last_metrics_result.passed, self._last_metrics_result.score
+        )
+        logger.info(
+            "RelevanceGate: passed=%s, score=%.2f",
+            self._last_relevance_result.passed,
+            self._last_relevance_result.score,
+        )
+        logger.info(
+            "MetricsRegistry: valid=%d, invalid=%d",
+            len(self._last_validation_result.valid_metrics),
+            len(self._last_validation_result.invalid_metrics),
+        )
 
         # All gates must pass
         return self._last_metrics_result.passed and self._last_relevance_result.passed
@@ -1220,10 +1153,10 @@ class ComprehensiveTailoringEngine:
         metrics_score = 0.0
         relevance_score = 0.0
 
-        if hasattr(self, '_last_metrics_result') and self._last_metrics_result:
+        if hasattr(self, "_last_metrics_result") and self._last_metrics_result:
             metrics_score = self._last_metrics_result.score * 5.0
 
-        if hasattr(self, '_last_relevance_result') and self._last_relevance_result:
+        if hasattr(self, "_last_relevance_result") and self._last_relevance_result:
             relevance_score = self._last_relevance_result.score * 5.0
 
         # Calculate weighted overall score
@@ -1238,9 +1171,9 @@ class ComprehensiveTailoringEngine:
 
         # Determine routing recommendation based on scores and validation
         has_invalid_metrics = (
-            hasattr(self, '_last_validation_result') and
-            self._last_validation_result and
-            len(self._last_validation_result.invalid_metrics) > 0
+                hasattr(self, "_last_validation_result")
+                and self._last_validation_result
+                and len(self._last_validation_result.invalid_metrics) > 0
         )
 
         if has_invalid_metrics:
@@ -1256,10 +1189,10 @@ class ComprehensiveTailoringEngine:
 
         # Collect weak lines from gate feedback
         weak_lines = []
-        if hasattr(self, '_last_metrics_result') and self._last_metrics_result:
+        if hasattr(self, "_last_metrics_result") and self._last_metrics_result:
             if not self._last_metrics_result.passed:
                 weak_lines.append(self._last_metrics_result.feedback)
-        if hasattr(self, '_last_relevance_result') and self._last_relevance_result:
+        if hasattr(self, "_last_relevance_result") and self._last_relevance_result:
             if not self._last_relevance_result.passed:
                 weak_lines.append(self._last_relevance_result.feedback)
 
@@ -1279,26 +1212,27 @@ class ComprehensiveTailoringEngine:
 
         # Check for hallucinated metrics (invalid metrics not in registry)
         has_hallucinated_metrics = (
-            hasattr(self, '_last_validation_result') and
-            self._last_validation_result and
-            len(self._last_validation_result.invalid_metrics) > 0
+                hasattr(self, "_last_validation_result")
+                and self._last_validation_result
+                and len(self._last_validation_result.invalid_metrics) > 0
         )
 
         if has_hallucinated_metrics:
             logger.warning(
-                "Decision gate REJECTED due to %d unverified metrics",
-                len(self._last_validation_result.invalid_metrics)
+                "Decision gate REJECTED due to %d unverified metrics", len(self._last_validation_result.invalid_metrics)
             )
             return False
 
         # Accept if score high enough and improvement small
         if scorecard.overall_score >= 4.0 and scorecard.iteration_delta < self.improvement_threshold:
-            logger.info("Decision gate ACCEPTED (score=%.2f, delta=%.2f)",
-                       scorecard.overall_score, scorecard.iteration_delta)
+            logger.info(
+                "Decision gate ACCEPTED (score=%.2f, delta=%.2f)", scorecard.overall_score, scorecard.iteration_delta
+            )
             return True
 
-        logger.info("Decision gate REJECTED (score=%.2f, delta=%.2f)",
-                   scorecard.overall_score, scorecard.iteration_delta)
+        logger.info(
+            "Decision gate REJECTED (score=%.2f, delta=%.2f)", scorecard.overall_score, scorecard.iteration_delta
+        )
         return False
 
     def _do_route_fixes(self):
@@ -1331,9 +1265,7 @@ class ComprehensiveTailoringEngine:
             return
 
         # Find must-have requirements
-        must_have_reqs = [
-            r for r in self.job_intelligence.requirements if r.type == "must_have"
-        ]
+        must_have_reqs = [r for r in self.job_intelligence.requirements if r.type == "must_have"]
         if not must_have_reqs:
             logger.info("No must-have requirements to cover")
             return
@@ -1350,10 +1282,7 @@ class ComprehensiveTailoringEngine:
         for req in must_have_reqs:
             req_text = req.text.lower()
             # Check if any covered skill/tag/domain covers this requirement
-            is_covered = any(
-                req_text in skill or skill in req_text
-                for skill in covered_skills
-            )
+            is_covered = any(req_text in skill or skill in req_text for skill in covered_skills)
             if not is_covered:
                 uncovered_reqs.append(req)
 
@@ -1425,23 +1354,16 @@ class ComprehensiveTailoringEngine:
 
                 # Simple heuristic: check if any skill/tag appears in metric
                 has_overlap = any(
-                    skill in metric_lower or metric_lower in skill
-                    for skill in bullet_skills | bullet_tags
+                    skill in metric_lower or metric_lower in skill for skill in bullet_skills | bullet_tags
                 )
 
                 if has_overlap:
-                    logger.info(
-                        "Bullet %s could be enhanced with metric: %s",
-                        bullet.id, metric
-                    )
+                    logger.info("Bullet %s could be enhanced with metric: %s", bullet.id, metric)
                     improved_count += 1
                     break
 
         if improved_count > 0:
-            logger.info(
-                "Identified %d bullets that could use verified metrics",
-                improved_count
-            )
+            logger.info("Identified %d bullets that could use verified metrics", improved_count)
             # Reassemble draft (triggers warning about vague claims)
             self._do_assemble_draft()
         else:
@@ -1479,19 +1401,15 @@ class ComprehensiveTailoringEngine:
         self._do_update_gap_list()
 
     def _do_update_evidence(self, job_result: Dict):
-        """Add new evidence links."""
+        """Add new evidence links via storage adapter."""
         logger.info("MAINTAIN: UPDATE_EVIDENCE")
 
-        # Record which bullets were used and outcome
-        with sqlite3.connect(self.bullet_bank_path) as conn:
-            for bullet_id in job_result.get("selected_bullets", []):
-                conn.execute(
-                    """
-                    INSERT INTO bullet_feedback (bullet_id, job_title, outcome)
-                    VALUES (?, ?, ?)
-                """,
-                    (bullet_id, job_result.get("job_title", ""), job_result.get("outcome", "")),
-                )
+        for bullet_id in job_result.get("selected_bullets", []):
+            self.storage.record_feedback(
+                bullet_id,
+                job_result.get("job_title", ""),
+                job_result.get("outcome", ""),
+            )
 
     def _do_update_metrics(self):
         """Add newly verified metrics."""

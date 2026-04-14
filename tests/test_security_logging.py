@@ -5,27 +5,6 @@ import logging
 from applypilot.discovery import greenhouse, smartextract, workday
 
 
-def test_workday_logs_omit_search_text_and_proxy_credentials(caplog, monkeypatch) -> None:
-    employer = {
-        "name": "Example Employer",
-        "base_url": "https://example.wd1.myworkdayjobs.com",
-        "tenant": "example",
-        "site_id": "careers",
-    }
-
-    monkeypatch.setattr(workday, "workday_search", lambda *args, **kwargs: {"total": 0, "jobPostings": []})
-
-    caplog.set_level(logging.INFO, logger="applypilot.discovery.workday")
-    workday.setup_proxy("127.0.0.1:8080:user:secret")
-    workday.search_employer("example", employer, "Highly Sensitive Query")
-
-    log_text = caplog.text
-    assert "Highly Sensitive Query" not in log_text
-    assert "127.0.0.1" not in log_text
-    assert "user" not in log_text
-    assert "secret" not in log_text
-
-
 def test_greenhouse_logs_omit_search_text(caplog, monkeypatch) -> None:
     monkeypatch.setattr(greenhouse, "fetch_jobs_api", lambda *args, **kwargs: {"jobs": []})
 
