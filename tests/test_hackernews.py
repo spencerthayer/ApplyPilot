@@ -17,11 +17,24 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 def _make_db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
     conn.execute(
         "CREATE TABLE jobs ("
         "  url TEXT PRIMARY KEY, title TEXT, salary TEXT, description TEXT,"
         "  location TEXT, site TEXT, strategy TEXT, discovered_at TEXT,"
-        "  full_description TEXT, detail_scraped_at TEXT"
+        "  posted_at TEXT, full_description TEXT, detail_scraped_at TEXT,"
+        "  state TEXT DEFAULT 'discovered'"
+        ")"
+    )
+    conn.execute(
+        "CREATE TABLE job_state_transitions ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  job_url TEXT NOT NULL REFERENCES jobs(url) ON DELETE CASCADE,"
+        "  from_state TEXT,"
+        "  to_state TEXT NOT NULL,"
+        "  at TEXT NOT NULL,"
+        "  reason TEXT,"
+        "  metadata TEXT"
         ")"
     )
     conn.commit()
@@ -150,6 +163,28 @@ class TestStoreHnJob(unittest.TestCase):
             "SELECT description FROM jobs WHERE title = ?", ("Infra Eng",)
         ).fetchone()
         self.assertIn("infra@company.com", row[0])
+
+    def test_posted_at_stored_when_provided(self):
+        """The HN comment creation time is stored in the posted_at column."""
+        from applypilot.discovery.hackernews import _store_hn_job
+        _store_hn_job(
+            self.conn,
+            {"url": "https://company.com/jobs/sre", "title": "SRE", "company": "Acme"},
+            "Who is Hiring? (March 2026)",
+            posted_at="2026-03-02T17:30:00+00:00",
+        )
+        row = self.conn.execute(
+            "SELECT posted_at FROM jobs WHERE title = ?", ("SRE",)
+        ).fetchone()
+        self.assertEqual(row[0], "2026-03-02T17:30:00+00:00")
+
+    def test_posted_at_null_when_omitted(self):
+        """Backwards-compat: callers that don't pass posted_at leave it NULL."""
+        self._store({"url": "https://company.com/jobs/em", "title": "EM", "company": "Acme"})
+        row = self.conn.execute(
+            "SELECT posted_at FROM jobs WHERE title = ?", ("EM",)
+        ).fetchone()
+        self.assertIsNone(row[0])
 
     def test_non_http_non_domain_url_gets_synthetic(self):
         """Strings that aren't http and aren't bare domains fall back to synthetic URL."""

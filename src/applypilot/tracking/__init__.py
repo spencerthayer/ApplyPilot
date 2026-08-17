@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.table import Table
 
 from applypilot.database import (
+    commit_with_retry,
     get_applied_jobs,
     get_connection,
     get_action_items,
@@ -253,7 +254,7 @@ def remap_stubs(conn=None) -> dict:
                 affected_job_urls.add(new_url)
                 remapped += 1
 
-        conn.commit()
+        commit_with_retry(conn)
 
     # Re-compute tracking_status for all affected jobs
     for job_url in affected_job_urls:
@@ -277,7 +278,7 @@ def remap_stubs(conn=None) -> dict:
         conn.execute("DELETE FROM jobs WHERE url = ?", (orphan["url"],))
         deleted_stubs += 1
     if deleted_stubs:
-        conn.commit()
+        commit_with_retry(conn)
 
     console.print(f"  Remapped {remapped} emails to correct jobs/stubs")
     console.print(f"  Created {new_stubs} new per-company stubs")

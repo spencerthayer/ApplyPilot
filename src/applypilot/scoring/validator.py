@@ -54,6 +54,18 @@ BANNED_WORDS: list[str] = [
     "furthermore", "additionally", "moreover",
 ]
 
+# Cover-letter hard-reject patterns (ERROR tier — triggers a regeneration
+# retry, unlike BANNED_WORDS which only warns). Stem-based regexes so suffix
+# variants ("aligns with", "These experiences demonstrate", "resonates") can't
+# slip past plain-substring matching the way they did in ~28% of generated
+# letters before this existed.
+CL_BANNED_PATTERNS: list[tuple[str, str]] = [
+    ("align with", r"\balign(s|ed|ing)?\s+with\b"),
+    ("demonstrate", r"\bdemonstrat\w*\b"),
+    ("happy to walk through", r"\bhappy to walk (you\s+)?through\b"),
+    ("resonate", r"\bresonat\w*\b"),
+]
+
 LLM_LEAK_PHRASES: list[str] = [
     "i am sorry", "i apologize", "i will try", "let me try",
     "i am at a loss", "i am truly sorry", "apologies for",
@@ -107,6 +119,19 @@ def _build_skills_set(profile: dict) -> set[str]:
     """Build the set of allowed skills from the normalized profile skills."""
 
     return {skill.lower().strip() for skill in get_profile_skill_keywords(profile)}
+
+
+def _missing_schools(preserved_school: str, haystack: str) -> list[str]:
+    """Return preserved schools that are absent from ``haystack``.
+
+    ``preserved_school`` may list several schools separated by ``;`` (e.g.
+    "Riverside Community College; Lakewood College; Central High School").
+    Education now renders as structured per-school entries, so the exact joined
+    string no longer appears verbatim — check each school individually instead.
+    """
+    haystack_lower = haystack.lower()
+    schools = [s.strip() for s in preserved_school.split(";") if s.strip()]
+    return [s for s in schools if s.lower() not in haystack_lower]
 
 
 def sanitize_text(text: str) -> str:
@@ -278,9 +303,14 @@ def validate_json_fields(
             for bullet in entry.get("bullets", []):
                 all_text_parts.append(sanitize_text(str(bullet)))
 
-    schools = get_profile_school_names(profile)
-    if schools and schools[0].lower() not in sanitized_education.lower():
-        errors.append(f"Education '{schools[0]}' missing")
+    # Education: each preserved school must be present (education may be a
+    # structured list of per-school entries or a legacy single string).
+    preserved_school = resume_facts.get("preserved_school", "")
+    if preserved_school:
+        edu = str(data.get("education", ""))
+        missing = _missing_schools(preserved_school, edu)
+        if missing:
+            errors.append(f"Education missing school(s): {', '.join(missing)}")
 
     all_text = " ".join(all_text_parts).lower()
 
@@ -378,10 +408,13 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
         if project.lower() not in text_lower:
             warnings.append(f"Project '{project}' not found -- may have been renamed")
 
-    # 5. Check school preserved
-    schools = get_profile_school_names(profile)
-    if schools and schools[0].lower() not in text_lower:
-        errors.append(f"Education '{schools[0]}' missing")
+    # 5. Check school preserved (each school checked individually so structured
+    # multi-school education sections validate)
+    preserved_school = resume_facts.get("preserved_school", "")
+    if preserved_school:
+        missing = _missing_schools(preserved_school, text)
+        if missing:
+            errors.append(f"Education missing school(s): {', '.join(missing)}")
 
     # 6. Check contact info preserved (warn, don't error -- we can inject)
     email = personal.get("email", "")
@@ -473,13 +506,22 @@ def validate_cover_letter(text: str, mode: str = "normal") -> dict:
             else:  # normal
                 warnings.append(msg)
 
-    # 3. Word count
+    # 2b. Hard-reject phrase patterns (error tier — these force a retry).
+    hits = [label for label, pat in CL_BANNED_PATTERNS if re.search(pat, text_lower)]
+    if hits:
+        errors.append(f"Banned phrase(s): {', '.join(hits)}")
+
+    # 3. Word count — Jobscan's 250-400 target is the ideal; the prompt aims
+    # at 300-400. In practice the LLM averages 220-270 with other constraints,
+    # and the user characterizes that as "close enough". Hard floor only
+    # catches genuinely truncated output (<180 words = LLM bailed).
     words = len(text.split())
-    if mode == "strict" and words > 250:
-        errors.append(f"Too long ({words} words). Max 250.")
-    elif mode == "normal" and words > 275:
-        warnings.append(f"Long ({words} words). Target 250.")
-    # lenient: no word count check
+    if words > 500:
+        errors.append(f"Too long ({words} words). Target 250-400 per Jobscan.")
+    if words < 180:
+        errors.append(f"Too short ({words} words). Target 250-400 per Jobscan; minimum 180.")
+    elif words < 250:
+        warnings.append(f"Below Jobscan ideal ({words} words, target 250-400) — passes but flagged.")
 
     # 4. LLM self-talk — always an error regardless of mode
     found_leaks = [p for p in LLM_LEAK_PHRASES if p in text_lower]
@@ -490,5 +532,18 @@ def validate_cover_letter(text: str, mode: str = "normal") -> dict:
     stripped = text.strip()
     if not stripped.lower().startswith("dear"):
         errors.append("Must start with 'Dear Hiring Manager,'")
+
+    # 6. Structure: prompt demands 4 body paragraphs (hook, evidence, company
+    # fit, close). "Substantial" = >= 15 words, which excludes the salutation
+    # and sign-off blocks. Before this check, the company-fit paragraph
+    # silently collapsed into the closer in most generated letters.
+    body_paragraphs = [p for p in re.split(r"\n\s*\n", text) if len(p.split()) >= 15]
+    if len(body_paragraphs) < 3:
+        errors.append(
+            f"Only {len(body_paragraphs)} body paragraph(s); structure requires 4 "
+            "(hook, evidence, company fit, close)."
+        )
+    elif len(body_paragraphs) == 3:
+        warnings.append("Only 3 body paragraphs; target structure is 4.")
 
     return {"passed": len(errors) == 0, "errors": errors, "warnings": warnings}

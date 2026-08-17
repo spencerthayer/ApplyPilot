@@ -59,7 +59,7 @@ except Exception:
     pass  # If patching fails, fall back to original behavior
 
 from applypilot import config
-from applypilot.database import commit_with_retry, get_connection, init_db
+from applypilot.database import get_connection, init_db, write_with_retry
 
 log = logging.getLogger(__name__)
 _SCRAPE_JOBS_PARAMS = set(inspect.signature(scrape_jobs).parameters)
@@ -911,75 +911,91 @@ def _concat_site_results(dataframes: list[object]):
 def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tuple[int, int]:
     """Store JobSpy DataFrame results into the DB. Returns (new, existing)."""
     now = datetime.now(timezone.utc).isoformat()
-    new = 0
-    existing = 0
+    counts = {"new": 0, "existing": 0}
 
-    for _, row in df.iterrows():
-        url = str(row.get("job_url", ""))
-        if not url or url == "nan":
-            continue
+    rows_iter = list(df.iterrows())
 
-        title = _clean(row.get("title"))
-        location_str = _clean(row.get("location"))
+    def _do_inserts() -> None:
+        counts["new"] = 0
+        counts["existing"] = 0
+        for _, row in rows_iter:
+            url = str(row.get("job_url", ""))
+            if not url or url == "nan":
+                continue
 
-        salary = None
-        min_amt = _clean(row.get("min_amount"))
-        max_amt = _clean(row.get("max_amount"))
-        interval = _clean(row.get("interval")) or ""
-        currency = _clean(row.get("currency")) or ""
-        if min_amt:
-            if max_amt:
-                salary = f"{currency}{int(float(min_amt)):,}-{currency}{int(float(max_amt)):,}"
-            else:
-                salary = f"{currency}{int(float(min_amt)):,}"
-            if interval:
-                salary += f"/{interval}"
+            title = str(row.get("title", "")) if str(row.get("title", "")) != "nan" else None
+            _company = str(row.get("company", "")) if str(row.get("company", "")) != "nan" else None
+            location_str = str(row.get("location", "")) if str(row.get("location", "")) != "nan" else None
 
-        description = _clean(row.get("description"))
-        site_name = str(row.get("site", source_label))
-        is_remote = row.get("is_remote", False)
+            # Build salary string from min/max
+            salary = None
+            min_amt = row.get("min_amount")
+            max_amt = row.get("max_amount")
+            interval = str(row.get("interval", "")) if str(row.get("interval", "")) != "nan" else ""
+            currency = str(row.get("currency", "")) if str(row.get("currency", "")) != "nan" else ""
+            if min_amt and str(min_amt) != "nan":
+                if max_amt and str(max_amt) != "nan":
+                    salary = f"{currency}{int(float(min_amt)):,}-{currency}{int(float(max_amt)):,}"
+                else:
+                    salary = f"{currency}{int(float(min_amt)):,}"
+                if interval:
+                    salary += f"/{interval}"
 
-        site_label = f"{site_name}"
-        if is_remote:
-            location_str = f"{location_str} (Remote)" if location_str else "Remote"
+            description = str(row.get("description", "")) if str(row.get("description", "")) != "nan" else None
+            site_name = str(row.get("site", source_label))
+            is_remote = row.get("is_remote", False)
 
-        strategy = "jobspy"
+            site_label = f"{site_name}"
+            if is_remote:
+                location_str = f"{location_str} (Remote)" if location_str else "Remote"
 
-        # If JobSpy gave us a full description, promote it directly
-        full_description = None
-        detail_scraped_at = None
-        if description and len(description) > 200:
-            full_description = description
-            detail_scraped_at = now
+            strategy = "jobspy"
 
-        # Extract apply URL if JobSpy provided it
-        apply_url = _clean(row.get("job_url_direct"))
+            # If JobSpy gave us a full description, promote it directly
+            full_description = None
+            detail_scraped_at = None
+            if description and len(description) > 200:
+                full_description = description
+                detail_scraped_at = now
 
-        try:
-            conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at, "
-                "full_description, application_url, detail_scraped_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    url,
-                    title,
-                    salary,
-                    description,
-                    location_str,
-                    site_label,
-                    strategy,
-                    now,
-                    full_description,
-                    apply_url,
-                    detail_scraped_at,
-                ),
-            )
-            new += 1
-        except sqlite3.IntegrityError:
-            existing += 1
+            # Extract apply URL if JobSpy provided it
+            apply_url = str(row.get("job_url_direct", "")) if str(row.get("job_url_direct", "")) != "nan" else None
 
-    commit_with_retry(conn)
-    return new, existing
+            # Capture posting date if available
+            date_posted_raw = row.get("date_posted")
+            posted_at = None
+            if date_posted_raw and str(date_posted_raw) not in ("nan", "None", ""):
+                try:
+                    dp = date_posted_raw
+                    if hasattr(dp, "isoformat"):
+                        posted_at = dp.isoformat()
+                    else:
+                        posted_at = str(dp)
+                except Exception:
+                    posted_at = None
+
+            initial_state = "enriched" if full_description else "discovered"
+
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at, "
+                    "full_description, application_url, detail_scraped_at, posted_at, state) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (url, title, salary, description, location_str, site_label, strategy, now,
+                     full_description, apply_url, detail_scraped_at, posted_at, initial_state),
+                )
+                conn.execute(
+                    "INSERT INTO job_state_transitions "
+                    "(job_url, from_state, to_state, at, reason, metadata) "
+                    "VALUES (?, NULL, ?, ?, ?, ?)",
+                    (url, initial_state, now, f"discovered via {strategy}", None),
+                )
+                counts["new"] += 1
+            except sqlite3.IntegrityError:
+                counts["existing"] += 1
+
+    write_with_retry(conn, _do_inserts)
+    return counts["new"], counts["existing"]
 
 
 # -- Single search execution -------------------------------------------------
@@ -1169,7 +1185,10 @@ def search_jobs(
 ) -> dict:
     """Run a single job search via JobSpy and store results in DB."""
     if sites is None:
-        sites = ["indeed", "linkedin", "zip_recruiter"]
+        # zip_recruiter removed 2026-06-10: Cloudflare-blocked, 403
+        # "forbidden aa" on 100% of requests; python-jobspy 1.1.82 is
+        # the latest release and has no fix. Re-add if a fix ships.
+        sites = ["indeed", "linkedin"]
 
     proxy_config = parse_proxy(proxy) if proxy else None
     effective_distance = _resolve_search_distance(
@@ -1318,7 +1337,10 @@ def _full_crawl(
 ) -> dict:
     """Run all search queries from search config across all locations."""
     if sites is None:
-        sites = ["indeed", "linkedin", "zip_recruiter"]
+        # zip_recruiter removed 2026-06-10: Cloudflare-blocked, 403
+        # "forbidden aa" on 100% of requests; python-jobspy 1.1.82 is
+        # the latest release and has no fix. Re-add if a fix ships.
+        sites = ["indeed", "linkedin"]
 
     # Build search combinations from config
     queries = search_cfg.get("queries", [])

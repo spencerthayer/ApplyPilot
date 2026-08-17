@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import sqlite3
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,7 +22,7 @@ import yaml
 
 from applypilot import config
 from applypilot.config import CONFIG_DIR
-from applypilot.database import commit_with_retry, get_connection, init_db
+from applypilot.database import get_connection, init_db, write_with_retry
 
 log = logging.getLogger(__name__)
 _QUARANTINE_HTTP_STATUSES = {401, 404, 422}
@@ -296,21 +297,36 @@ def search_employer(
     total = None
 
     while True:
-        try:
-            data = workday_search(employer, search_text, limit=page_size, offset=offset)
-        except urllib.error.HTTPError as e:
-            message = f"HTTP Error {e.code}: {e.reason}"
-            if offset == 0:
-                quarantine = e.code in _QUARANTINE_HTTP_STATUSES
-                log.error("%s: API error at offset %d (%s)", employer["name"], offset, message)
-                raise WorkdayEmployerFailure(message, quarantine=quarantine) from e
-            log.error("%s: API error at offset %d (%s)", employer["name"], offset, message)
-            break
-        except Exception as e:
-            if offset == 0:
-                log.error("%s: API error at offset %d (%s)", employer["name"], offset, _exception_summary(e))
-                raise WorkdayEmployerFailure(str(e)) from e
-            log.error("%s: API error at offset %d (%s)", employer["name"], offset, _exception_summary(e))
+        data = None
+        last_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                data = workday_search(employer, search_text, limit=page_size, offset=offset)
+                break
+            except urllib.error.HTTPError as e:
+                last_err = e
+                # 4xx is permanent (dead tenant / wrong site_id — e.g. the
+                # Netflix 422): retrying just hammers a dead endpoint.
+                if e.code < 500:
+                    break
+                # 5xx is usually transient (Remitly threw a one-off
+                # Cloudflare 520 mid-run 2026-06-10, healthy seconds later
+                # — it cost the whole employer for that run).
+                if attempt < 2:
+                    wait = 5 * (2 ** attempt)
+                    log.warning("%s: HTTP %d at offset %d — retry %d/2 in %ds",
+                                employer["name"], e.code, offset, attempt + 1, wait)
+                    time.sleep(wait)
+            except Exception as e:
+                # URLError / timeout / connection reset — same treatment
+                last_err = e
+                if attempt < 2:
+                    wait = 5 * (2 ** attempt)
+                    log.warning("%s: %s at offset %d — retry %d/2 in %ds",
+                                employer["name"], e, offset, attempt + 1, wait)
+                    time.sleep(wait)
+        if data is None:
+            log.error("%s: API error at offset %d: %s", employer["name"], offset, last_err)
             break
 
         if total is None:
@@ -365,6 +381,10 @@ def _fetch_one_detail(employer: dict, job: dict) -> dict:
         job["job_req_id"] = info.get("jobReqId", "")
         job["time_type"] = info.get("timeType", "")
         job["remote_type"] = info.get("remoteType", "")
+        # `startDate` is the ISO posting go-live date (e.g. "2026-05-12").
+        # The search-results `postedOn` is only a relative string
+        # ("Posted 3 Days Ago"), so we don't use it.
+        job["posted_at"] = info.get("startDate") or None
 
     except Exception as e:
         job["full_description"] = ""
@@ -399,41 +419,45 @@ def fetch_details(employer: dict, jobs: list[dict]) -> list[dict]:
 def store_results(conn: sqlite3.Connection, jobs: list[dict], employers: dict) -> tuple[int, int]:
     """Store corporate jobs in DB. Returns (new, existing)."""
     now = datetime.now(timezone.utc).isoformat()
-    new = 0
-    existing = 0
+    counts = {"new": 0, "existing": 0}
 
-    for job in jobs:
-        url = job.get("apply_url", "")
-        if not url:
-            emp = employers.get(job.get("employer_key", ""), {})
-            if emp and job.get("external_path"):
-                url = f"{emp['base_url']}/{emp['site_id']}{job['external_path']}"
-        if not url:
-            continue
+    def _do_inserts() -> None:
+        counts["new"] = 0
+        counts["existing"] = 0
+        for job in jobs:
+            url = job.get("apply_url", "")
+            if not url:
+                emp = employers.get(job.get("employer_key", ""), {})
+                if emp and job.get("external_path"):
+                    url = f"{emp['base_url']}/{emp['site_id']}{job['external_path']}"
+            if not url:
+                continue
 
-        description = job.get("full_description", "")
-        short_desc = description[:500] if description else None
-        full_description = description if len(description) > 200 else None
-        detail_scraped_at = now if full_description else None
-        detail_error = job.get("detail_error")
+            description = job.get("full_description", "")
+            short_desc = description[:500] if description else None
+            full_description = description if len(description) > 200 else None
+            detail_scraped_at = now if full_description else None
+            detail_error = job.get("detail_error")
 
-        site = job.get("employer_name", "Corporate")
-        strategy = "workday_api"
+            site = job.get("employer_name", "Corporate")
+            strategy = "workday_api"
 
-        try:
-            conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, "
-                "discovered_at, full_description, application_url, detail_scraped_at, detail_error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (url, job.get("title"), None, short_desc, job.get("location"),
-                 site, strategy, now, full_description, url, detail_scraped_at, detail_error),
-            )
-            new += 1
-        except sqlite3.IntegrityError:
-            existing += 1
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (url, title, salary, description, location, site, strategy, "
+                    "discovered_at, posted_at, full_description, application_url, "
+                    "detail_scraped_at, detail_error) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (url, job.get("title"), None, short_desc, job.get("location"),
+                     site, strategy, now, job.get("posted_at"), full_description, url,
+                     detail_scraped_at, detail_error),
+                )
+                counts["new"] += 1
+            except sqlite3.IntegrityError:
+                counts["existing"] += 1
 
-    commit_with_retry(conn)
-    return new, existing
+    write_with_retry(conn, _do_inserts)
+    return counts["new"], counts["existing"]
 
 
 def _process_one(

@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 import httpx
 
 from applypilot import config
-from applypilot.database import commit_with_retry, init_db
+from applypilot.database import init_db, write_with_retry
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -162,8 +162,17 @@ def _is_email(text: str) -> bool:
     return bool(re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', deobfuscated))
 
 
-def _store_hn_job(conn: sqlite3.Connection, job: dict, thread_title: str) -> bool:
-    """Store one extracted HN job in the DB. Returns True if new."""
+def _store_hn_job(
+    conn: sqlite3.Connection,
+    job: dict,
+    thread_title: str,
+    posted_at: str | None = None,
+) -> bool:
+    """Store one extracted HN job in the DB. Returns True if new.
+
+    posted_at: ISO timestamp of the HN comment's creation time (the
+    employer-reported posting date for "Who is hiring" listings).
+    """
     raw_url = job.get("url")
     contact = job.get("contact")
 
@@ -199,18 +208,32 @@ def _store_hn_job(conn: sqlite3.Connection, job: dict, thread_title: str) -> boo
     if contact and contact != url:
         description += f"\n\nContact: {contact}"
 
-    try:
-        conn.execute(
-            "INSERT INTO jobs (url, title, salary, description, location, site, strategy, "
-            "discovered_at, full_description, detail_scraped_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (url, title, salary, description, location,
-             f"HN: {company}", "hackernews", now, description, now),
-        )
-        commit_with_retry(conn)
-        return True
-    except sqlite3.IntegrityError:
-        return False
+    # HN comments are always the full text — enrich immediately when present.
+    initial_state = "enriched" if description else "discovered"
+
+    integrity_failed = {"v": False}
+
+    def _do_inserts() -> None:
+        integrity_failed["v"] = False
+        try:
+            conn.execute(
+                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, "
+                "discovered_at, posted_at, full_description, detail_scraped_at, state) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (url, title, salary, description, location,
+                 f"HN: {company}", "hackernews", now, posted_at, description, now, initial_state),
+            )
+            conn.execute(
+                "INSERT INTO job_state_transitions "
+                "(job_url, from_state, to_state, at, reason, metadata) "
+                "VALUES (?, NULL, ?, ?, ?, ?)",
+                (url, initial_state, now, "discovered via hackernews", None),
+            )
+        except sqlite3.IntegrityError:
+            integrity_failed["v"] = True
+
+    write_with_retry(conn, _do_inserts)
+    return not integrity_failed["v"]
 
 
 def run_hn_discovery(
@@ -302,12 +325,23 @@ def run_hn_discovery(
                 skipped += 1
                 continue
 
-            if _store_hn_job(conn, job, thread_title):
+            # Firebase items carry `time` (epoch seconds); Algolia hits carry
+            # `created_at_i`. Either is the comment's creation time — i.e. the
+            # employer-reported posting date for this listing.
+            posted_at = None
+            ts = comment.get("time") or comment.get("created_at_i")
+            if isinstance(ts, (int, float)) and ts > 0:
+                posted_at = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+            if _store_hn_job(conn, job, thread_title, posted_at=posted_at):
                 new += 1
+                # `or "?"` not a .get() default: the LLM emits explicit JSON
+                # nulls, and dict.get(key, default) returns None for those —
+                # subscripting it crashed the loop after the job was stored.
                 log.info("  + %s @ %s (%s)",
-                         job.get("title", "?")[:50],
-                         job.get("company", "?")[:30],
-                         job.get("location", "?")[:25])
+                         (job.get("title") or "?")[:50],
+                         (job.get("company") or "?")[:30],
+                         (job.get("location") or "?")[:25])
             else:
                 skipped += 1
 

@@ -16,9 +16,7 @@ from rich.console import Console
 from rich.table import Table
 
 from applypilot import __version__
-from applypilot.cli_greenhouse import app as greenhouse_app
-from applypilot.config import RESUME_JSON_PATH, get_resume_source, load_resume_text
-from applypilot.resume_json import ResumeJsonError
+from applypilot import config
 
 
 def _configure_logging() -> None:
@@ -237,10 +235,25 @@ def run(
             "Defaults to 'all' if omitted."
         ),
     ),
-    min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for tailor/cover stages."),
-    limit: int = typer.Option(0, "--limit", "-l", help="Max jobs per tailor/cover batch (0 = all eligible)."),
-    workers: int = typer.Option(1, "--workers", "-w", help="Parallel threads for discovery/enrichment stages."),
+    min_score: int = typer.Option(
+        config.DEFAULTS["min_score"], "--min-score",
+        help=f"Minimum fit score for tailor/cover stages (default: {config.DEFAULTS['min_score']}).",
+    ),
+    max_age_days: int = typer.Option(
+        config.DEFAULTS["max_job_age_days"], "--max-age-days",
+        help=(
+            "Skip jobs whose discovered_at is older than this many days. "
+            "0 = no age filter. "
+            f"Default: {config.DEFAULTS['max_job_age_days']}."
+        ),
+    ),
+    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max jobs per stage (tailor/cover). Default: 20."),
+    workers: int = typer.Option(
+        1, "--workers", "-w",
+        help="Parallel threads for Workday/smart-extract stages. (JobSpy runs sequentially regardless.)",
+    ),
     stream: bool = typer.Option(False, "--stream", help="Run stages concurrently (streaming mode)."),
+    doc_format: str = typer.Option("docx", "--doc-format", help="Document format for resumes/cover letters: docx (default) or pdf."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview stages without executing."),
     validation: str = typer.Option(
         "normal",
@@ -269,6 +282,21 @@ def run(
             )
             raise typer.Exit(code=1)
 
+    # Resolve --source aliases
+    resolved_sources: list[str] | None = None
+    if source:
+        try:
+            resolved_sources = resolve_source_names(source)
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(code=1)
+
+    # Validate --doc-format
+    from applypilot.scoring.pdf import VALID_DOC_FORMATS
+    if doc_format not in VALID_DOC_FORMATS:
+        console.print(f"[red]Invalid --doc-format:[/red] '{doc_format}'. Must be one of: {', '.join(VALID_DOC_FORMATS)}")
+        raise typer.Exit(code=1)
+
     # Gate AI stages behind Tier 2
     llm_stages = {"score", "tailor", "cover"}
     if any(s in stage_list for s in llm_stages) or "all" in stage_list:
@@ -287,11 +315,13 @@ def run(
     result = run_pipeline(
         stages=stage_list,
         min_score=min_score,
+        max_age_days=max_age_days,
         limit=limit,
         dry_run=dry_run,
         stream=stream,
         workers=workers,
-        validation_mode=validation,
+        sources=resolved_sources,
+        doc_format=doc_format,
     )
 
     if result.get("errors"):
@@ -300,40 +330,27 @@ def run(
 
 @app.command()
 def apply(
-    limit: Optional[int] = typer.Option(
-        None,
-        "--limit",
-        "-l",
-        help="Max applications to submit (default: all currently eligible jobs).",
+    limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
+    workers: int = typer.Option(5, "--workers", "-w", help="Number of parallel browser workers."),
+    min_score: int = typer.Option(
+        config.DEFAULTS["min_score"], "--min-score",
+        help=f"Minimum fit score for job selection (default: {config.DEFAULTS['min_score']}).",
     ),
-    workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
-    min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
-    agent: Optional[str] = typer.Option(
-        None,
-        "--agent",
-        help="Auto-apply backend: auto, codex, claude, or opencode.",
+    max_age_days: int = typer.Option(
+        config.DEFAULTS["max_job_age_days"], "--max-age-days",
+        help=(
+            "Skip jobs whose discovered_at is older than this many days. "
+            "0 = no age filter. "
+            f"Default: {config.DEFAULTS['max_job_age_days']}."
+        ),
     ),
-    backend: Optional[str] = typer.Option(
-        None,
-        "--backend",
-        help="Compatibility alias for --agent. Must match --agent if both are provided.",
-    ),
-    agent_model: Optional[str] = typer.Option(
-        None,
-        "--agent-model",
-        "--model",
-        "-m",
-        help="Browser agent model override. '--model' is kept as a deprecated alias.",
-    ),
-    opencode_agent: Optional[str] = typer.Option(
-        None,
-        "--opencode-agent",
-        help="OpenCode sub-agent override. Only applies when --agent opencode is selected.",
-    ),
+    max_score: Optional[int] = typer.Option(None, "--max-score", help="Maximum fit score for job selection (useful for testing on lower-score jobs)."),
+    model: str = typer.Option("sonnet", "--model", "-m", help="Claude model name (sonnet | haiku | opus)."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
+    doc_format: str = typer.Option("docx", "--doc-format", help="Document format for resumes/cover letters: docx (default) or pdf."),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
     mark_applied: Optional[str] = typer.Option(None, "--mark-applied", help="Manually mark a job URL as applied."),
     mark_failed: Optional[str] = typer.Option(None, "--mark-failed", help="Manually mark a job URL as failed (provide URL)."),
@@ -368,7 +385,17 @@ def apply(
 
     # --- Full apply mode ---
 
-    # Check 1: Tier 3 required (browser agent CLI + Chrome + Node.js)
+    # Validate --doc-format
+    from applypilot.scoring.pdf import VALID_DOC_FORMATS as _valid_fmts
+    if doc_format not in _valid_fmts:
+        console.print(f"[red]Invalid --doc-format:[/red] '{doc_format}'. Must be one of: {', '.join(_valid_fmts)}")
+        raise typer.Exit(code=1)
+
+    # Set doc format for apply workers
+    from applypilot.apply.launcher import set_doc_format
+    set_doc_format(doc_format)
+
+    # Check 1: Tier 3 required (Claude Code CLI + Chrome)
     check_tier(3, "auto-apply")
     resolved_agent, resolved_model = _resolve_backend_option(agent, backend, agent_model)
 
@@ -447,6 +474,8 @@ def apply(
         limit=effective_limit,
         target_url=url,
         min_score=min_score,
+        max_age_days=max_age_days,
+        max_score=max_score,
         headless=headless,
         agent=resolved_agent,
         model=resolved_model,
@@ -673,6 +702,60 @@ def status() -> None:
 
         console.print(site_table)
 
+    # ── Funnel diagnostics ────────────────────────────────────────
+    if stats.get("skipped_stale"):
+        max_age = config.DEFAULTS["max_job_age_days"]
+        console.print(
+            f"\n[dim]Skipped as stale (>{max_age}d old): "
+            f"{stats['skipped_stale']} ready-to-apply jobs[/dim]"
+        )
+
+    bbc = stats.get("blocked_by_cap") or {}
+    if bbc.get("count"):
+        console.print(
+            f"\n[yellow]Blocked by company cap:[/yellow] "
+            f"{bbc['count']} company/companies"
+        )
+        if bbc.get("companies"):
+            preview = ", ".join(bbc["companies"][:10])
+            more = f" (+{bbc['count'] - 10} more)" if bbc["count"] > 10 else ""
+            console.print(f"  [dim]{preview}{more}[/dim]")
+
+    # ── Pipeline state distribution (2026-04-24 state machine) ────
+    from applypilot.database import get_connection as _get_conn
+    _sc_conn = _get_conn()
+    state_rows = _sc_conn.execute(
+        "SELECT state, COUNT(*) FROM jobs WHERE state IS NOT NULL "
+        "GROUP BY state ORDER BY COUNT(*) DESC"
+    ).fetchall()
+    if state_rows:
+        state_table = Table(
+            title="\nPipeline State Distribution",
+            show_header=True, header_style="bold cyan",
+        )
+        state_table.add_column("State", style="bold")
+        state_table.add_column("Count", justify="right")
+        # Color-code by lifecycle phase.
+        TERMINAL_OK = {"applied", "responded", "interview", "offer"}
+        TERMINAL_BAD = {"rejected", "ghosted", "archived", "apply_failed",
+                        "enrich_failed", "score_failed", "tailor_failed",
+                        "cover_failed", "low_score"}
+        ACTIVE = {"applying", "tailoring", "cover_writing",
+                  "ready_to_apply", "needs_human"}
+        for r in state_rows:
+            st = r[0]
+            n = r[1]
+            if st in TERMINAL_OK:
+                color = "green"
+            elif st in TERMINAL_BAD:
+                color = "dim"
+            elif st in ACTIVE:
+                color = "yellow"
+            else:
+                color = "cyan"
+            state_table.add_row(f"[{color}]{st}[/{color}]", str(n))
+        console.print(state_table)
+
     console.print()
 
 
@@ -686,47 +769,11 @@ def dashboard() -> None:
     open_dashboard()
 
 
-@app.command()
-def doctor() -> None:
-    """Check your setup and diagnose missing requirements."""
-    import shutil
-    from applypilot.config import (
-        load_env, PROFILE_PATH, RESUME_JSON_PATH, RESUME_PATH, RESUME_PDF_PATH,
-        SEARCH_CONFIG_PATH, get_auto_apply_agent_setting,
-        get_auto_apply_agent_statuses, get_chrome_path,
-        resolve_auto_apply_agent,
-    )
-    from applypilot.llm_provider import format_llm_provider_status, llm_config_hint
-    from applypilot.resume_render import LOCAL_RESUMED
-
-    load_env()
-
-    ok_mark = "[green]OK[/green]"
-    fail_mark = "[red]MISSING[/red]"
-    warn_mark = "[yellow]WARN[/yellow]"
-
-    results: list[tuple[str, str, str]] = []  # (check, status, note)
-
-    # --- Tier 1 checks ---
-    resume_source = get_resume_source()
-    if PROFILE_PATH.exists():
-        try:
-            json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
-            results.append(("profile.json", ok_mark, str(PROFILE_PATH)))
-        except json.JSONDecodeError as exc:
-            results.append(
-                (
-                    "profile.json",
-                    fail_mark,
-                    f"Malformed JSON: line {exc.lineno}, column {exc.colno}: {exc.msg}",
-                )
-            )
-    elif resume_source.mode == "canonical":
-        results.append(("profile.json", warn_mark, "Missing, but will be auto-generated from resume.json on next run"))
-    elif resume_source.mode == "canonical_invalid":
-        results.append(("profile.json", fail_mark, "Missing, and resume.json must be fixed before it can backfill"))
-    else:
-        results.append(("profile.json", fail_mark, "Run 'applypilot init' to create"))
+# `applypilot human-review` was deleted in plan 5 of the apply UX overhaul.
+# The standalone HITL server (port 7373) duplicated the in-pipeline HITL
+# flow (port 7380+wid), so it was removed. Jobs that get parked as
+# `needs_human` are now picked up automatically by the next
+# `applypilot apply` run via _run_hitl's launcher-restart path.
 
     if resume_source.mode == "canonical":
         results.append(("resume.json", ok_mark, str(RESUME_JSON_PATH)))

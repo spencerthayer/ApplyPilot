@@ -46,7 +46,11 @@ class TestSuppressRestoreNag(unittest.TestCase):
         import tempfile
         from unittest.mock import patch
 
-        APPLYPILOT_EXT_ID = "almfihgbaclbghnagbfecfpppmjfmlnp"
+        # The actual ID Chrome assigns is computed from the manifest's `key`
+        # field, which is set to the per-install random key (decision #38).
+        # _applypilot_ext_id() resolves this at runtime.
+        from applypilot.apply.chrome import _applypilot_ext_id
+        APPLYPILOT_EXT_ID = _applypilot_ext_id()
         OLD_SRC_EXT_ID = "eloakdpcfbnnadhnohionnmicpmedapk"
 
         tmp = Path(tempfile.mkdtemp())

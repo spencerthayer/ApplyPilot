@@ -20,6 +20,18 @@ playwright install chromium
 
 This installs ApplyPilot in editable mode with all development dependencies (pytest, ruff, etc.) and downloads the Chromium browser binary for Playwright.
 
+### Enable the pre-push hook
+
+Point git at the tracked hooks directory once per clone so the same checks CI
+runs (`ruff check src/` + `pytest tests/`) run automatically before every push:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+A push that fails lint or tests is blocked; bypass with `git push --no-verify`
+if you really need to.
+
 ### Verify Installation
 
 ```bash

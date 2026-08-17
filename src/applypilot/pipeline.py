@@ -89,7 +89,12 @@ DISCOVERY_SOURCES: dict[str, str] = {
     "indeed":       "Indeed only (via JobSpy)",
     "ziprecruiter": "ZipRecruiter only (via JobSpy)",
     "workday":      "Workday corporate career sites",
-    "greenhouse":   "Greenhouse ATS career sites",
+    "greenhouse":   "Greenhouse ATS public board API",
+    "lever":        "Lever ATS public postings API",
+    "ashby":        "Ashby ATS public posting API",
+    "amazon":       "amazon.jobs public search API",
+    "costco":       "careers.costco.com public API (Issaquah HQ)",
+    "builtin":      "builtin.com (config-driven cities + categories)",
     "smartextract": "Smart extract (AI-powered scraping, incl. Dice via sites.yaml)",
     "hackernews":   "Hacker News 'Who is Hiring?' thread",
 }
@@ -176,6 +181,72 @@ def _run_discover(workers: int = 1, sources: list[str] | None = None) -> dict:
             console.print(f"  [red]Workday error:[/red] {e}")
             stats["workday"] = f"error: {e}"
 
+    if "greenhouse" in active:
+        console.print("  [cyan]Greenhouse ATS scraper...[/cyan]")
+        try:
+            from applypilot.discovery.greenhouse import run_greenhouse_discovery
+            run_greenhouse_discovery(workers=workers)
+            stats["greenhouse"] = "ok"
+        except Exception as e:
+            log.error("Greenhouse scraper failed: %s", e)
+            console.print(f"  [red]Greenhouse error:[/red] {e}")
+            stats["greenhouse"] = f"error: {e}"
+
+    if "lever" in active:
+        console.print("  [cyan]Lever ATS scraper...[/cyan]")
+        try:
+            from applypilot.discovery.lever import run_lever_discovery
+            run_lever_discovery(workers=workers)
+            stats["lever"] = "ok"
+        except Exception as e:
+            log.error("Lever scraper failed: %s", e)
+            console.print(f"  [red]Lever error:[/red] {e}")
+            stats["lever"] = f"error: {e}"
+
+    if "ashby" in active:
+        console.print("  [cyan]Ashby ATS scraper...[/cyan]")
+        try:
+            from applypilot.discovery.ashby import run_ashby_discovery
+            run_ashby_discovery(workers=workers)
+            stats["ashby"] = "ok"
+        except Exception as e:
+            log.error("Ashby scraper failed: %s", e)
+            console.print(f"  [red]Ashby error:[/red] {e}")
+            stats["ashby"] = f"error: {e}"
+
+    if "amazon" in active:
+        console.print("  [cyan]Amazon.jobs scraper...[/cyan]")
+        try:
+            from applypilot.discovery.amazon import run_amazon_discovery
+            run_amazon_discovery(workers=workers)
+            stats["amazon"] = "ok"
+        except Exception as e:
+            log.error("Amazon scraper failed: %s", e)
+            console.print(f"  [red]Amazon error:[/red] {e}")
+            stats["amazon"] = f"error: {e}"
+
+    if "costco" in active:
+        console.print("  [cyan]Costco careers scraper...[/cyan]")
+        try:
+            from applypilot.discovery.costco import run_costco_discovery
+            run_costco_discovery(workers=workers)
+            stats["costco"] = "ok"
+        except Exception as e:
+            log.error("Costco scraper failed: %s", e)
+            console.print(f"  [red]Costco error:[/red] {e}")
+            stats["costco"] = f"error: {e}"
+
+    if "builtin" in active:
+        console.print("  [cyan]BuiltIn (builtin.com) scraper...[/cyan]")
+        try:
+            from applypilot.discovery.builtin import run_builtin_discovery
+            run_builtin_discovery(workers=workers)
+            stats["builtin"] = "ok"
+        except Exception as e:
+            log.error("BuiltIn scraper failed: %s", e)
+            console.print(f"  [red]BuiltIn error:[/red] {e}")
+            stats["builtin"] = f"error: {e}"
+
     if "smartextract" in active:
         console.print("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
         try:
@@ -226,59 +297,64 @@ def _run_enrich(workers: int = 1) -> dict:
         return {"status": f"error: {e}"}
 
 
-def _run_score(workers: int = 1) -> dict:
+def _run_score(workers: int = 1, max_age_days: int | None = None) -> dict:
     """Stage: LLM scoring — assign fit scores 1-10."""
+    from applypilot.config import DEFAULTS
+    if max_age_days is None:
+        max_age_days = DEFAULTS["max_job_age_days"]
     try:
         from applypilot.scoring.scorer import run_scoring
-
-        run_scoring()
+        run_scoring(workers=workers, max_age_days=max_age_days)
         return {"status": "ok"}
     except Exception as e:
         log.exception("Scoring failed: %s", e)
         return {"status": f"error: {e}"}
 
 
-def _run_tailor(
-    min_score: int = 7,
-    limit: int = 0,
-    workers: int = 1,
-    validation_mode: str = "normal",
-) -> dict:
+def _run_tailor(min_score: int | None = None, max_age_days: int | None = None,
+                limit: int = 20, workers: int = 1, doc_format: str = "docx") -> dict:
     """Stage: Resume tailoring — generate tailored resumes for high-fit jobs."""
+    from applypilot.config import DEFAULTS
+    if min_score is None:
+        min_score = DEFAULTS["min_score"]
+    if max_age_days is None:
+        max_age_days = DEFAULTS["max_job_age_days"]
     try:
         from applypilot.scoring.tailor import run_tailoring
-        run_tailoring(min_score=min_score, limit=limit, validation_mode=validation_mode)
+        run_tailoring(min_score=min_score, max_age_days=max_age_days,
+                      limit=limit, workers=workers, doc_format=doc_format)
         return {"status": "ok"}
     except Exception as e:
         log.exception("Tailoring failed: %s", e)
         return {"status": f"error: {e}"}
 
 
-def _run_cover(
-    min_score: int = 7,
-    limit: int = 0,
-    workers: int = 1,
-    validation_mode: str = "normal",
-) -> dict:
+def _run_cover(min_score: int | None = None, max_age_days: int | None = None,
+               limit: int = 20, workers: int = 1, doc_format: str = "docx") -> dict:
     """Stage: Cover letter generation."""
+    from applypilot.config import DEFAULTS
+    if min_score is None:
+        min_score = DEFAULTS["min_score"]
+    if max_age_days is None:
+        max_age_days = DEFAULTS["max_job_age_days"]
     try:
         from applypilot.scoring.cover_letter import run_cover_letters
-        run_cover_letters(min_score=min_score, limit=limit, validation_mode=validation_mode)
+        run_cover_letters(min_score=min_score, max_age_days=max_age_days,
+                          limit=limit, workers=workers, doc_format=doc_format)
         return {"status": "ok"}
     except Exception as e:
         log.exception("Cover letter generation failed: %s", e)
         return {"status": f"error: {e}"}
 
 
-def _run_pdf() -> dict:
-    """Stage: PDF conversion — convert tailored resumes and cover letters to PDF."""
+def _run_pdf(doc_format: str = "docx") -> dict:
+    """Stage: Document conversion — convert tailored resumes and cover letters to PDF/DOCX."""
     try:
         from applypilot.scoring.pdf import batch_convert
-
-        batch_convert()
+        batch_convert(doc_format=doc_format)
         return {"status": "ok"}
     except Exception as e:
-        log.error("PDF conversion failed: %s", e)
+        log.error("Document conversion failed: %s", e)
         return {"status": f"error: {e}"}
 
 
@@ -344,15 +420,17 @@ class _StageTracker:
             return dict(self._results)
 
 
-# SQL to count pending work for each stage
+# SQL to count pending work for each stage.
+# The `?` params are: (min_score, age_cutoff_iso_offset) when both present;
+# scroll through _count_pending to see the binding order.
 _PENDING_SQL: dict[str, str] = {
-    "enrich": "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL",
-    "score": (
-        "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND ("
-        "  (fit_score IS NULL AND score_error IS NULL) "
-        "  OR (score_error IS NOT NULL "
-        "      AND (score_next_retry_at IS NULL OR score_next_retry_at <= datetime('now')))"
-        ")"
+    "enrich": (
+        "SELECT COUNT(*) FROM jobs "
+        "WHERE detail_scraped_at IS NULL"
+    ),
+    "score":  (
+        "SELECT COUNT(*) FROM jobs "
+        "WHERE full_description IS NOT NULL AND fit_score IS NULL"
     ),
     "tailor": (
         "SELECT COUNT(*) FROM jobs WHERE fit_score >= ? "
@@ -361,37 +439,58 @@ _PENDING_SQL: dict[str, str] = {
         "AND COALESCE(tailor_attempts, 0) < 5"
     ),
     "cover": (
-        "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL "
+        "SELECT COUNT(*) FROM jobs WHERE fit_score >= ? "
+        "AND tailored_resume_path IS NOT NULL "
         "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
         "AND COALESCE(cover_attempts, 0) < 5"
     ),
     "pdf": ("SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL AND tailored_resume_path LIKE '%.txt'"),
 }
 
+# Stages whose SQL takes a ? for min_score.
+_PENDING_SQL_TAKES_MIN_SCORE = {"tailor", "cover"}
+
 # How long to sleep between polling loops in streaming mode (seconds)
 _STREAM_POLL_INTERVAL = 10
 
 
-def _count_pending(stage: str, min_score: int = 7) -> int:
-    """Count pending work items for a stage."""
+def _count_pending(stage: str, min_score: int | None = None,
+                   max_age_days: int | None = None) -> int:
+    """Count pending work items for a stage, honoring min_score and max_age_days."""
+    from applypilot.config import DEFAULTS
+
+    if min_score is None:
+        min_score = DEFAULTS["min_score"]
+    if max_age_days is None:
+        max_age_days = DEFAULTS["max_job_age_days"]
+
     sql = _PENDING_SQL.get(stage)
     if sql is None:
         return 0
+
+    params: list = []
+    if stage in _PENDING_SQL_TAKES_MIN_SCORE:
+        params.append(min_score)
+
+    if max_age_days and max_age_days > 0:
+        sql += " AND discovered_at > datetime('now', ?)"
+        params.append(f"-{max_age_days} days")
+
     conn = get_connection()
-    if "?" in sql:
-        return conn.execute(sql, (min_score,)).fetchone()[0]
-    return conn.execute(sql).fetchone()[0]
+    return conn.execute(sql, params).fetchone()[0]
 
 
 def _run_stage_streaming(
     stage: str,
     tracker: _StageTracker,
     stop_event: threading.Event,
-    min_score: int = 7,
-    limit: int = 0,
+    min_score: int | None = None,
+    max_age_days: int | None = None,
+    limit: int = 20,
     workers: int = 1,
     validation_mode: str = "normal",
     sources: list[str] | None = None,
+    doc_format: str = "docx",
 ) -> None:
     """Run a single stage in streaming mode: loop until upstream done + no work.
 
@@ -399,8 +498,15 @@ def _run_stage_streaming(
     For all others: polls DB for pending work, runs the batch processor,
     and repeats until upstream is done and no pending work remains.
     """
+    from applypilot.config import DEFAULTS
+    if min_score is None:
+        min_score = DEFAULTS["min_score"]
+    if max_age_days is None:
+        max_age_days = DEFAULTS["max_job_age_days"]
     runner = _STAGE_RUNNERS[stage]
     kwargs: dict = {}
+    if stage in ("tailor", "cover", "pdf"):
+        kwargs["doc_format"] = doc_format
     if stage in ("tailor", "cover"):
         kwargs["min_score"] = min_score
         kwargs["limit"] = limit
@@ -409,6 +515,8 @@ def _run_stage_streaming(
         kwargs["workers"] = workers
     if stage == "discover" and sources is not None:
         kwargs["sources"] = sources
+    if stage in ("score", "tailor", "cover"):
+        kwargs["max_age_days"] = max_age_days
 
     upstream = _UPSTREAM[stage]
 
@@ -429,7 +537,7 @@ def _run_stage_streaming(
         if passes == 0 and upstream and not tracker.is_done(upstream):
             tracker.wait(upstream, timeout=_STREAM_POLL_INTERVAL)
 
-        pending = _count_pending(stage, min_score)
+        pending = _count_pending(stage, min_score, max_age_days)
 
         if pending > 0:
             try:
@@ -442,8 +550,17 @@ def _run_stage_streaming(
                                 stage, passes, _STREAM_POLL_INTERVAL)
                     if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
                         break
-                else:
-                    successes += 1
+                # Pending count looks like work but the runner did nothing
+                # (cap-blocked, all candidates filtered, etc.). Back off so
+                # we don't hot-loop logging the same "no jobs" message every
+                # millisecond — let upstream produce real new work first.
+                elif isinstance(result, dict):
+                    progress = sum(int(result.get(k, 0) or 0) for k in
+                                   ("approved", "failed", "errors", "processed",
+                                    "ok", "partial", "error", "new"))
+                    if progress == 0:
+                        if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
+                            break
             except Exception as e:
                 log.error("Stage '%s' error (pass %d): %s", stage, passes, e)
                 passes += 1
@@ -468,10 +585,12 @@ def _run_stage_streaming(
 def _run_sequential(
     ordered: list[str],
     min_score: int,
-    limit: int = 0,
+    max_age_days: int | None = None,
+    limit: int = 20,
     workers: int = 1,
     validation_mode: str = "normal",
     sources: list[str] | None = None,
+    doc_format: str = "docx",
 ) -> dict:
     """Execute stages one at a time (original behavior)."""
     results: list[dict] = []
@@ -490,6 +609,8 @@ def _run_sequential(
 
         try:
             kwargs: dict = {}
+            if name in ("tailor", "cover", "pdf"):
+                kwargs["doc_format"] = doc_format
             if name in ("tailor", "cover"):
                 kwargs["min_score"] = min_score
                 kwargs["limit"] = limit
@@ -498,6 +619,8 @@ def _run_sequential(
                 kwargs["workers"] = workers
             if name == "discover" and sources is not None:
                 kwargs["sources"] = sources
+            if name in ("score", "tailor", "cover"):
+                kwargs["max_age_days"] = max_age_days
             result = runner(**kwargs)
             elapsed = time.time() - t0
 
@@ -527,14 +650,10 @@ def _run_sequential(
     return {"stages": results, "errors": errors, "elapsed": total_elapsed}
 
 
-def _run_streaming(
-    ordered: list[str],
-    min_score: int,
-    limit: int = 0,
-    workers: int = 1,
-    validation_mode: str = "normal",
-    sources: list[str] | None = None,
-) -> dict:
+def _run_streaming(ordered: list[str], min_score: int,
+                   max_age_days: int | None = None,
+                   limit: int = 20, workers: int = 1,
+                   sources: list[str] | None = None, doc_format: str = "docx") -> dict:
     """Execute stages concurrently with DB as conveyor belt."""
     tracker = _StageTracker()
     stop_event = threading.Event()
@@ -556,7 +675,7 @@ def _run_streaming(
         start_times[name] = time.time()
         t = threading.Thread(
             target=_run_stage_streaming,
-            args=(name, tracker, stop_event, min_score, limit, workers, validation_mode, sources),
+            args=(name, tracker, stop_event, min_score, max_age_days, limit, workers, sources, doc_format),
             name=f"stage-{name}",
             daemon=True,
         )
@@ -597,21 +716,25 @@ def _run_streaming(
 
 def run_pipeline(
     stages: list[str] | None = None,
-    min_score: int = 7,
+    min_score: int | None = None,
+    max_age_days: int | None = None,
     limit: int | None = None,
     dry_run: bool = False,
     stream: bool = False,
     workers: int = 1,
     validation_mode: str = "normal",
     sources: list[str] | None = None,
+    doc_format: str = "docx",
 ) -> dict:
     """Run pipeline stages.
+
+    Defaults for min_score and max_age_days read from config.DEFAULTS when None.
 
     Args:
         stages: List of stage names, or None / ["all"] for full pipeline.
         min_score: Minimum fit score for tailor/cover stages.
-        limit: Max jobs per batch for tailor/cover stages. Default: all eligible jobs.
-               Pass 0 (or omit) for no batch cap.
+        max_age_days: Only process jobs discovered within this many days.
+        limit: Max jobs per batch for tailor/cover stages. Default: 20.
         dry_run: If True, preview stages without executing.
         stream: If True, run stages concurrently (streaming mode).
         workers: Number of parallel threads for discovery/enrichment stages.
@@ -620,6 +743,12 @@ def run_pipeline(
     Returns:
         Dict with keys: stages (list of result dicts), errors (dict), elapsed (float).
     """
+    from applypilot.config import DEFAULTS
+    if min_score is None:
+        min_score = DEFAULTS["min_score"]
+    if max_age_days is None:
+        max_age_days = DEFAULTS["max_job_age_days"]
+
     # Bootstrap
     load_env()
     ensure_dirs()
@@ -634,18 +763,15 @@ def run_pipeline(
     # Banner
     mode = "streaming" if stream else "sequential"
     console.print()
-    console.print(
-        Panel.fit(
-            f"[bold]ApplyPilot Pipeline[/bold] ({mode})",
-            border_style="blue",
-        )
-    )
-    console.print(f"  Min score:  {min_score}")
-    limit_label = f"{effective_limit} jobs/batch" if effective_limit > 0 else "all eligible jobs"
-    console.print(f"  Limit:      {limit_label}")
-    console.print(f"  Workers:    {workers}")
-    console.print(f"  Validation: {validation_mode}")
-    console.print(f"  Stages:     {' -> '.join(ordered)}")
+    console.print(Panel.fit(
+        f"[bold]ApplyPilot Pipeline[/bold] ({mode})",
+        border_style="blue",
+    ))
+    console.print(f"  Min score: {min_score}")
+    console.print(f"  Max age:   {max_age_days}d")
+    console.print(f"  Limit:     {effective_limit} jobs/batch")
+    console.print(f"  Workers:   {workers}")
+    console.print(f"  Stages:    {' -> '.join(ordered)}")
     if sources:
         console.print(f"  Sources:    {', '.join(sources)}")
 
@@ -667,23 +793,15 @@ def run_pipeline(
     # Execute
     try:
         if stream:
-            result = _run_streaming(
-                ordered,
-                min_score,
-                limit=effective_limit,
-                workers=workers,
-                validation_mode=validation_mode,
-                sources=sources,
-            )
+            result = _run_streaming(ordered, min_score,
+                                    max_age_days=max_age_days,
+                                    limit=effective_limit, workers=workers,
+                                    sources=sources, doc_format=doc_format)
         else:
-            result = _run_sequential(
-                ordered,
-                min_score,
-                limit=effective_limit,
-                workers=workers,
-                validation_mode=validation_mode,
-                sources=sources,
-            )
+            result = _run_sequential(ordered, min_score,
+                                     max_age_days=max_age_days,
+                                     limit=effective_limit, workers=workers,
+                                     sources=sources, doc_format=doc_format)
     finally:
         # Always remove file handler, even on crash
         if file_handler:

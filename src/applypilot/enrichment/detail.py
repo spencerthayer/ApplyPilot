@@ -18,12 +18,14 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+# Patchright (Playwright drop-in with TLS-fingerprint and JS-stealth patches)
+# is a hard dependency — see pyproject.toml.
+from patchright.sync_api import sync_playwright
 
-from applypilot.database import init_db
+from applypilot.database import commit_with_retry, init_db, transition_state
 from applypilot.llm import get_client
 from applypilot.url_safety import is_algolia_queries_url
 
@@ -152,8 +154,9 @@ def resolve_all_urls(conn: sqlite3.Connection) -> dict:
             conn.execute("UPDATE jobs SET application_url = ? WHERE url = ?", (new_app, url))
             app_resolved += 1
 
-    conn.commit()
-    return {"resolved": resolved, "failed": failed, "already_absolute": already_absolute, "app_resolved": app_resolved}
+    commit_with_retry(conn)
+    return {"resolved": resolved, "failed": failed, "already_absolute": already_absolute,
+            "app_resolved": app_resolved}
 
 
 def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
@@ -174,7 +177,11 @@ def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
                 pass
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        # chromium_sandbox=True: Playwright defaults to False, which injects
+        # --no-sandbox (Chrome shows an "unsupported flag" warning bar and we
+        # browse untrusted job sites unsandboxed). Host has unprivileged
+        # user namespaces, so the real sandbox works.
+        browser = p.chromium.launch(headless=True, chromium_sandbox=True)
         context = browser.new_context(user_agent=UA)
         context.add_init_script(_STEALTH_INIT_SCRIPT)
         page = context.new_page()
@@ -231,7 +238,7 @@ def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
                         updated += 1
                     break
 
-    conn.commit()
+    commit_with_retry(conn)
     return updated
 
 
@@ -355,13 +362,20 @@ DESCRIPTION_SELECTORS = [
 
 
 def extract_apply_url_deterministic(page) -> str | None:
-    """Try known CSS patterns for apply buttons/links."""
+    """Try known CSS patterns for apply buttons/links.
+
+    Returns absolute URLs only — browser-resolves relative hrefs via
+    ``el.href`` (DOM property, not the ``href`` attribute) so SimplyHired's
+    ``/out?r=...`` style apply links land in the DB as absolute.
+    """
     for sel in APPLY_SELECTORS:
         try:
             el = page.query_selector(sel)
             if el:
-                href = el.get_attribute("href")
-                if href and href != "#":
+                # el.href is the DOM property → already absolute, unlike
+                # el.get_attribute("href") which returns the literal href.
+                href = el.evaluate("e => e.href || null")
+                if href and href != "#" and "javascript:" not in href:
                     return href
                 tag = el.evaluate("el => el.tagName.toLowerCase()")
                 if tag == "button":
@@ -377,7 +391,7 @@ def extract_apply_url_deterministic(page) -> str | None:
         for link in links:
             text = link.inner_text().strip().lower()
             if "apply" in text and len(text) < 50:
-                href = link.get_attribute("href")
+                href = link.evaluate("e => e.href || null")
                 if href and href != "#" and "javascript:" not in href:
                     return href
     except Exception:
@@ -512,6 +526,12 @@ def extract_with_llm(page, url: str) -> dict:
         if desc:
             desc = clean_description(desc)
 
+        # Defense: LLM sometimes returns the literal href attribute (e.g.
+        # `/out?r=...` from SimplyHired). Resolve against the page URL so
+        # downstream stages see an absolute URL.
+        if apply_url and not apply_url.startswith(("http://", "https://")):
+            apply_url = urljoin(url, apply_url)
+
         return {"full_description": desc, "application_url": apply_url}
     except Exception as e:
         log.error("LLM ERROR: %s", e)
@@ -611,6 +631,121 @@ def _classify_detail_error(error: str, current_retry_count: int) -> tuple[str, s
     return "permanent", None
 
 
+def _mark_enrich_result(
+    conn,
+    url: str,
+    *,
+    status: str,
+    full_description: str | None,
+    application_url: str | None,
+    error: str | None,
+    tier: int | None,
+    retry_count: int,
+    category: str | None = None,
+    next_retry_at: str | None = None,
+    now: str | None = None,
+) -> None:
+    """Persist one enrichment result and emit a state transition.
+
+    Extracted from the inline UPDATE blocks inside ``run_detail_scraper`` so
+    that tests can call it without launching a browser.
+
+    ``status`` should be one of: ``"ok"``, ``"partial"``, ``"error"``.
+    Retriable errors do NOT emit a transition (job stays in ``discovered``).
+
+    ``category`` and ``next_retry_at`` may be pre-computed by the caller
+    (e.g. to log them before writing).  When absent they are derived
+    internally via ``_classify_detail_error``.
+    """
+    assert status in ("ok", "partial", "error"), f"Unexpected status: {status!r}"
+
+    if now is None:
+        now = datetime.now(timezone.utc).isoformat()
+
+    if status in ("ok", "partial"):
+        # Belt-and-suspenders: if any upstream caller still passes a relative
+        # application_url, resolve it against the page URL before storing.
+        # The deterministic and LLM extractors both already resolve, so this
+        # only fires for legacy paths or future regressions.
+        if application_url and not application_url.startswith(("http://", "https://")):
+            application_url = urljoin(url, application_url)
+        # Rewrite embedded-ATS URLs (?gh_jid=N etc.) to their canonical
+        # ATS form so the apply agent never has to navigate the iframe.
+        # canonicalize_application_url consults both the static slug map
+        # AND the runtime cache populated by scrape_detail_page when it
+        # finds a job-boards.greenhouse.io iframe on an unknown host.
+        from applypilot.discovery.url_normalize import canonicalize_application_url
+        canonical = canonicalize_application_url(application_url) if application_url else application_url
+        conn.execute(
+            "UPDATE jobs SET full_description = ?, application_url = ?, "
+            "detail_scraped_at = ?, detail_error = NULL, "
+            "detail_error_category = NULL, enrich_attempts = 0, "
+            "enrich_next_retry_at = NULL WHERE url = ?",
+            (full_description, canonical, now, url),
+        )
+        transition_state(
+            conn, url, "enriched",
+            reason="description fetched",
+            metadata={"chars": len(full_description or ""), "tier": tier},
+            force=True,
+        )
+    else:
+        error_msg = error or "unknown"
+        if category is None or next_retry_at is None:
+            category, next_retry_at = _classify_detail_error(error_msg, retry_count)
+        conn.execute(
+            "UPDATE jobs SET detail_error = ?, detail_error_category = ?, "
+            "enrich_attempts = ?, enrich_next_retry_at = ?, "
+            "detail_scraped_at = ? WHERE url = ?",
+            (error_msg, category, retry_count + 1, next_retry_at, now, url),
+        )
+        if category != "retriable":
+            transition_state(
+                conn, url, "enrich_failed",
+                reason=category,
+                metadata={"error": error_msg},
+                force=True,
+            )
+        # retriable: no transition — job stays in 'discovered' for retry loop
+
+
+def _learn_greenhouse_slug_from_iframe(page, parent_url: str) -> None:
+    """If the rendered page embeds a Greenhouse iframe, register the slug.
+
+    Called once per enriched page so aggregator-discovered URLs (LinkedIn,
+    Indeed, BuiltIn) on unknown employer hosts gradually teach the
+    canonicalizer the right slug for that host. After registration, the
+    next encounter rewrites without an HTML fetch.
+    """
+    if not parent_url or not parent_url.startswith(("http://", "https://")):
+        return
+    parent_host = urlparse(parent_url).netloc.lower()
+    if parent_host.startswith("www."):
+        parent_host = parent_host[4:]
+    if not parent_host or parent_host.endswith("greenhouse.io"):
+        return
+    try:
+        from applypilot.discovery.url_normalize import (
+            lookup_slug, parse_greenhouse_slug_from_iframe_src,
+            register_runtime_slug,
+        )
+        if lookup_slug(parent_host):
+            return  # already known
+        srcs = page.evaluate(
+            "() => Array.from(document.querySelectorAll('iframe'))"
+            ".map(f => f.src).filter(s => s && s.includes('greenhouse.io'))"
+        )
+        for src in (srcs or []):
+            slug = parse_greenhouse_slug_from_iframe_src(src)
+            if slug:
+                register_runtime_slug(parent_host, slug)
+                return
+    except Exception:
+        # Iframe sniffing is best-effort; don't fail enrichment over it.
+        log.debug("greenhouse iframe slug sniff failed for %s",
+                  parent_url[:80], exc_info=True)
+
+
 def scrape_detail_page(page, url: str) -> dict:
     """Full cascade for one detail page."""
     result: dict = {
@@ -641,6 +776,11 @@ def scrape_detail_page(page, url: str) -> dict:
             result["error"] = err_str[:200]
         result["elapsed"] = time.time() - t0
         return result
+
+    # Best-effort: learn the greenhouse slug for this employer host so
+    # canonicalize_application_url can rewrite ?gh_jid=N URLs the next
+    # time discovery encounters this host.
+    _learn_greenhouse_slug_from_iframe(page, url)
 
     intel = collect_detail_intelligence(page)
 
@@ -716,7 +856,7 @@ def scrape_site_batch(
 
     try:
         with sync_playwright() as p:
-            launch_opts: dict = {"headless": True}
+            launch_opts: dict = {"headless": True, "chromium_sandbox": True}
             if _PROXY_CONFIG:
                 launch_opts["proxy"] = _PROXY_CONFIG["playwright"]
             browser = p.chromium.launch(**launch_opts)
@@ -754,33 +894,43 @@ def scrape_site_batch(
 
                 if status in ("ok", "partial"):
                     stats[status] += 1
-                    conn.execute(
-                        "UPDATE jobs SET full_description = ?, application_url = ?, "
-                        "detail_scraped_at = ?, detail_error = NULL, "
-                        "detail_error_category = NULL, detail_retry_count = 0, "
-                        "detail_next_retry_at = NULL WHERE url = ?",
-                        (result.get("full_description"), result.get("application_url"), now, url),
+                    _mark_enrich_result(
+                        conn, url,
+                        status=status,
+                        full_description=result.get("full_description"),
+                        application_url=result.get("application_url"),
+                        error=None,
+                        tier=tier,
+                        retry_count=0,
+                        now=now,
                     )
                 else:
                     stats["error"] += 1
-                    error_msg = result.get("error", "unknown")
-                    # Fetch current retry count before classifying
+                    # Fetch current retry count before classifying so the
+                    # helper can compute the right backoff window.
                     row = conn.execute(
-                        "SELECT COALESCE(detail_retry_count, 0) FROM jobs WHERE url = ?", (url,)
+                        "SELECT COALESCE(enrich_attempts, 0) FROM jobs WHERE url = ?", (url,)
                     ).fetchone()
                     retry_count = row[0] if row else 0
-                    category, next_retry_at = _classify_detail_error(error_msg, retry_count)
-                    conn.execute(
-                        "UPDATE jobs SET detail_error = ?, detail_error_category = ?, "
-                        "detail_retry_count = ?, detail_next_retry_at = ?, "
-                        "detail_scraped_at = ? WHERE url = ?",
-                        (error_msg, category, retry_count + 1, next_retry_at, now, url),
-                    )
+                    error_msg = result.get("error", "unknown")
+                    _cat, _next = _classify_detail_error(error_msg, retry_count)
                     log.info("  error_category=%s retry=%d/%d next=%s",
-                             category, retry_count + 1, MAX_DETAIL_RETRIES,
-                             next_retry_at or "never")
+                             _cat, retry_count + 1, MAX_DETAIL_RETRIES,
+                             _next or "never")
+                    _mark_enrich_result(
+                        conn, url,
+                        status=status,
+                        full_description=None,
+                        application_url=None,
+                        error=error_msg,
+                        tier=tier,
+                        retry_count=retry_count,
+                        category=_cat,
+                        next_retry_at=_next,
+                        now=now,
+                    )
 
-                conn.commit()
+                commit_with_retry(conn)
 
                 if i < len(jobs) - 1:
                     time.sleep(delay)
@@ -813,7 +963,7 @@ def _run_detail_scraper(
         f"WHERE site NOT IN ({placeholders}) AND ("
         "  detail_scraped_at IS NULL "
         "  OR (detail_error_category = 'retriable' "
-        "      AND (detail_next_retry_at IS NULL OR detail_next_retry_at <= datetime('now')))"
+        "      AND (enrich_next_retry_at IS NULL OR enrich_next_retry_at <= datetime('now')))"
         ") "
         "ORDER BY site, discovered_at DESC",
         list(SKIP_DETAIL_SITES),
@@ -962,7 +1112,7 @@ def stream_detail(
                 f"WHERE site NOT IN ({placeholders}) AND ("
                 "  detail_scraped_at IS NULL "
                 "  OR (detail_error_category = 'retriable' "
-                "      AND (detail_next_retry_at IS NULL OR detail_next_retry_at <= datetime('now')))"
+                "      AND (enrich_next_retry_at IS NULL OR enrich_next_retry_at <= datetime('now')))"
                 ") "
                 "ORDER BY site, discovered_at DESC LIMIT 200",
                 list(SKIP_DETAIL_SITES),

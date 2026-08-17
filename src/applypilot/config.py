@@ -98,6 +98,11 @@ class AutoApplyAgentSelection:
 def get_chrome_path() -> str:
     """Auto-detect Chrome/Chromium executable path, cross-platform.
 
+    On Linux, prefers Chrome for Testing at
+    ~/.applypilot/chrome-for-testing/chrome-linux64/chrome if installed —
+    CfT is the only branded Chromium build that still accepts
+    --load-extension (required by the apply layer).
+
     Override with CHROME_PATH environment variable.
     """
     env_path = os.environ.get("CHROME_PATH")
@@ -120,6 +125,13 @@ def get_chrome_path() -> str:
         ]
     else:  # Linux
         candidates = []
+        # Prefer Chrome for Testing if installed: it is the only Chromium build
+        # that still honors --load-extension (Chrome 137+ silently rejects it on
+        # branded Stable/Beta/Dev/Canary). The apply layer relies on the
+        # ApplyPilot extension loading.
+        cft = Path.home() / ".applypilot" / "chrome-for-testing" / "chrome-linux64" / "chrome"
+        if cft.exists():
+            candidates.append(cft)
         for name in ("google-chrome", "google-chrome-stable", "chromium-browser", "chromium"):
             found = shutil.which(name)
             if found:
@@ -334,10 +346,14 @@ def load_base_urls() -> dict[str, str | None]:
 # ---------------------------------------------------------------------------
 
 DEFAULTS = {
-    "min_score": 7,
-    "max_apply_attempts": 10,
-    "max_tailor_attempts": 10,
-    "poll_interval": 30,
+    "min_score": 8,                           # was 7; per 2026-04-23 funnel spec
+    "max_job_age_days": 14,                   # stale-job cutoff (discovered_at)
+    "max_in_flight_per_company": 3,           # hard cap per company (apply-time)
+    "in_flight_window_days": 30,              # window for in-flight count
+    "max_tailored_per_company": 10,           # cap per company at tailor stage
+    "max_apply_attempts": 3,
+    "max_tailor_attempts": 5,
+    "poll_interval": 60,
     "apply_timeout": 300,
     "viewport": "1280x900",
 }
@@ -696,3 +712,78 @@ def check_tier(required: int, feature: str) -> None:
             _console.print(f"  - {m}")
     _console.print()
     raise SystemExit(1)
+
+
+# ---------------------------------------------------------------------------
+# Per-company application limits (open-pipeline cap)
+# ---------------------------------------------------------------------------
+
+COMPANY_LIMITS_PATH_NAME = "company_limits.yaml"
+
+_company_limits_cache: dict | None = None
+
+
+def _load_company_limits() -> dict:
+    """Load and cache ~/.applypilot/company_limits.yaml.
+
+    Returns an empty dict if the file doesn't exist or fails to parse.
+    Cache can be reset by setting `_company_limits_cache = None`.
+    """
+    global _company_limits_cache
+    if _company_limits_cache is not None:
+        return _company_limits_cache
+
+    path = APP_DIR / COMPANY_LIMITS_PATH_NAME
+    if not path.exists():
+        _company_limits_cache = {}
+        return _company_limits_cache
+
+    import logging
+    import yaml
+
+    log = logging.getLogger(__name__)
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(data, dict):
+            raise ValueError(f"expected mapping, got {type(data).__name__}")
+        overrides = data.get("overrides", {}) or {}
+        if isinstance(overrides, dict):
+            data["overrides"] = {str(k).lower(): (v or {}) for k, v in overrides.items()}
+        _company_limits_cache = data
+    except Exception as e:
+        log.warning("Failed to parse %s (%s); using defaults.", path, e)
+        _company_limits_cache = {}
+
+    return _company_limits_cache
+
+
+def get_company_limit(company: str) -> tuple[int, int]:
+    """Return (max_in_flight, window_days) for the given company.
+
+    Resolution order:
+      1. overrides.<company-lowercased> (YAML)
+      2. defaults.* (YAML)
+      3. DEFAULTS["max_in_flight_per_company"] / ["in_flight_window_days"]
+
+    If a per-company entry omits either key, the missing value falls back
+    to the YAML defaults block (or DEFAULTS if not specified there).
+
+    A cap of -1 means "unlimited". A cap of 0 means "explicitly blocked".
+    Both are passed through as-is; interpretation lives in the caller.
+    """
+    limits = _load_company_limits()
+
+    yaml_defaults = limits.get("defaults", {}) or {}
+    default_cap = yaml_defaults.get("max_in_flight", DEFAULTS["max_in_flight_per_company"])
+    default_window = yaml_defaults.get("window_days", DEFAULTS["in_flight_window_days"])
+
+    overrides = limits.get("overrides", {}) or {}
+    co = (company or "").lower().strip()
+    if co:
+        if co in overrides:
+            entry = overrides[co] or {}
+            cap = entry.get("max_in_flight", default_cap)
+            window = entry.get("window_days", default_window)
+            return int(cap), int(window)
+
+    return int(default_cap), int(default_window)

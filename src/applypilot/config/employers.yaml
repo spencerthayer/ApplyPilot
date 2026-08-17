@@ -1,119 +1,20 @@
+# Workday employer registry for ApplyPilot
+# Users can add their own employers by following this pattern.
+# Find your employer's Workday URL at: https://[company].wd[N].myworkdayjobs.com
+
+# Canada-only employers removed 2026-06-10 — the pipeline targets Seattle/US
+# roles and the scorer terminal-archives non-US-eligible postings, so crawling
+# them only burned enrich/score tokens. Removed: TD, CIBC, RBC, BMO, Manulife,
+# Sun Life, Desjardins, Intact, Aviva Canada, TMX, Brookfield, CPP Investments,
+# OMERS, Ontario Teachers, PSP, CDPQ, HOOPP, AIMCo, BlackBerry, PwC, BDO,
+# TELUS International, TELUS Health, Canadian Tire, PC Financial, CAE, Magna,
+# MLSE, OLG, Enbridge, Canadian Solar. Recover entries from git history if a
+# US-focused board emerges for any of them.
+
 employers:
-  td:
-    name: TD Bank
-    tenant: td
-    site_id: TD_Bank_Careers
-    base_url: https://td.wd3.myworkdayjobs.com
-  cibc:
-    name: CIBC
-    tenant: cibc
-    site_id: search
-    base_url: https://cibc.wd3.myworkdayjobs.com
-  rbc:
-    name: RBC
-    tenant: rbc
-    site_id: RBCGLOBAL1
-    base_url: https://rbc.wd3.myworkdayjobs.com
-  bmo:
-    name: BMO
-    tenant: bmo
-    site_id: External
-    base_url: https://bmo.wd3.myworkdayjobs.com
-  manulife:
-    name: Manulife
-    tenant: manulife
-    site_id: MFCJH_Jobs
-    base_url: https://manulife.wd3.myworkdayjobs.com
-  sunlife:
-    name: Sun Life
-    tenant: sunlife
-    site_id: Experienced-Jobs
-    base_url: https://sunlife.wd3.myworkdayjobs.com
-  desjardins:
-    name: Desjardins
-    tenant: desjardins
-    site_id: Desjardins
-    base_url: https://desjardins.wd10.myworkdayjobs.com
-  intact:
-    name: Intact Financial
-    tenant: intactfc
-    site_id: intactfc
-    base_url: https://intactfc.wd3.myworkdayjobs.com
-  aviva:
-    name: Aviva Canada
-    tenant: aviva
-    site_id: External
-    base_url: https://aviva.wd1.myworkdayjobs.com
-  tmx:
-    name: TMX Group
-    tenant: tmx
-    site_id: TMX_Careers
-    base_url: https://tmx.wd3.myworkdayjobs.com
-  brookfield:
-    name: Brookfield
-    tenant: brookfield
-    site_id: brookfield
-    base_url: https://brookfield.wd5.myworkdayjobs.com
-  fis:
-    name: FIS Global
-    tenant: fis
-    site_id: SearchJobs
-    base_url: https://fis.wd5.myworkdayjobs.com
-  mastercard:
-    name: Mastercard
-    tenant: mastercard
-    site_id: CorporateCareers
-    base_url: https://mastercard.wd1.myworkdayjobs.com
-  paypal:
-    name: PayPal
-    tenant: paypal
-    site_id: jobs
-    base_url: https://paypal.wd1.myworkdayjobs.com
-  cppib:
-    name: CPP Investments
-    tenant: cppib
-    site_id: cppinvestments
-    base_url: https://cppib.wd10.myworkdayjobs.com
-  omers:
-    name: OMERS
-    tenant: omers
-    site_id: OMERS_External
-    base_url: https://omers.wd3.myworkdayjobs.com
-  otpp:
-    name: Ontario Teachers
-    tenant: otppb
-    site_id: OntarioTeachers_Careers
-    base_url: https://otppb.wd3.myworkdayjobs.com
-  psp:
-    name: PSP Investments
-    tenant: investpsp
-    site_id: psp_careers
-    base_url: https://investpsp.wd3.myworkdayjobs.com
-  cdpq:
-    name: CDPQ
-    tenant: cdpq
-    site_id: CDPQ
-    base_url: https://cdpq.wd10.myworkdayjobs.com
-  hoopp:
-    name: HOOPP
-    tenant: hoopp
-    site_id: HOOPP
-    base_url: https://hoopp.wd10.myworkdayjobs.com
-  aimco:
-    name: AIMCo
-    tenant: aimco
-    site_id: AIMCoCareers
-    base_url: https://aimco.wd10.myworkdayjobs.com
-  blackberry:
-    name: BlackBerry
-    tenant: bb
-    site_id: BlackBerry
-    base_url: https://bb.wd3.myworkdayjobs.com
-  ciena:
-    name: Ciena
-    tenant: ciena
-    site_id: Careers
-    base_url: https://ciena.wd5.myworkdayjobs.com
+
+  # ── US Tech ─────────────────────────────────────────────────────────────
+
   workday:
     name: Workday
     tenant: workday
@@ -125,15 +26,17 @@ employers:
     site_id: External_Career_Site
     base_url: https://salesforce.wd12.myworkdayjobs.com
   nvidia:
-    name: NVIDIA
-    tenant: nvidia
-    site_id: NVIDIAExternalCareerSite
-    base_url: https://nvidia.wd5.myworkdayjobs.com
-  netflix:
-    name: Netflix
-    tenant: netflix
-    site_id: Netflix
-    base_url: https://netflix.wd1.myworkdayjobs.com
+    name: "NVIDIA"
+    tenant: "nvidia"
+    site_id: "NVIDIAExternalCareerSite"
+    base_url: "https://nvidia.wd5.myworkdayjobs.com"
+
+  # Netflix — disabled 2026-06-10: netflix.wd1 CXS API returns HTTP 422
+  # (same death signature as ServiceNow/DocuSign/Uber). Netflix moved to
+  # Eightfold; unlike Starbucks/HP, their deployment answers anonymously:
+  #   https://explore.jobs.netflix.net/api/apply/v2/jobs?domain=netflix.com
+  # → future-scraper candidate, see CLAUDE.md Future Work.
+
   cisco:
     name: Cisco
     tenant: cisco
@@ -150,747 +53,127 @@ employers:
     site_id: external_experienced
     base_url: https://adobe.wd5.myworkdayjobs.com
   motorola:
-    name: Motorola Solutions
-    tenant: motorolasolutions
-    site_id: Careers
-    base_url: https://motorolasolutions.wd5.myworkdayjobs.com
-  thomson_reuters:
-    name: Thomson Reuters
-    tenant: thomsonreuters
-    site_id: External_Career_Site
-    base_url: https://thomsonreuters.wd5.myworkdayjobs.com
+    name: "Motorola Solutions"
+    tenant: "motorolasolutions"
+    site_id: "Careers"
+    base_url: "https://motorolasolutions.wd5.myworkdayjobs.com"
+
+  ciena:
+    name: "Ciena"
+    tenant: "ciena"
+    site_id: "Careers"
+    base_url: "https://ciena.wd5.myworkdayjobs.com"
+
+  # Thomson Reuters removed 2026-04-23 — user is not interested; 327 jobs
+  # had been pulled wastefully over prior runs. Existing TR jobs in DB are
+  # also blocked at apply-time via ~/.applypilot/company_limits.yaml
+  # (thomsonreuters: max_in_flight: 0).
+
   moderna:
-    name: Moderna
-    tenant: modernatx
-    site_id: M_tx
-    base_url: https://modernatx.wd1.myworkdayjobs.com
-  servicenow:
-    name: ServiceNow
-    tenant: servicenow
-    site_id: ServiceNowCareers
-    base_url: https://servicenow.wd1.myworkdayjobs.com
-  docusign:
-    name: DocuSign
-    tenant: docusign
-    site_id: External
-    base_url: https://docusign.wd5.myworkdayjobs.com
-  uber:
-    name: Uber
-    tenant: uber
-    site_id: uberCareers
-    base_url: https://uber.wd5.myworkdayjobs.com
-  pwc:
-    name: PwC
-    tenant: pwc
-    site_id: Global_Experienced_Careers
-    base_url: https://pwc.wd3.myworkdayjobs.com
-  bdo:
-    name: BDO
-    tenant: bdo
-    site_id: BDO
-    base_url: https://bdo.wd3.myworkdayjobs.com
-  telus:
-    name: TELUS International
-    tenant: telusinternational
-    site_id: External
-    base_url: https://telusinternational.wd3.myworkdayjobs.com
-  telus_health:
-    name: TELUS Health
-    tenant: lifeworks
-    site_id: External
-    base_url: https://lifeworks.wd3.myworkdayjobs.com
-  canadian_tire:
-    name: Canadian Tire
-    tenant: canadiantirecorporation
-    site_id: Enterprise_External_Careers_Site
-    base_url: https://canadiantirecorporation.wd3.myworkdayjobs.com
-  pc_financial:
-    name: PC Financial
-    tenant: myview
-    site_id: pc_financial
-    base_url: https://myview.wd3.myworkdayjobs.com
-  cae:
-    name: CAE
-    tenant: cae
-    site_id: career
-    base_url: https://cae.wd3.myworkdayjobs.com
-  magna:
-    name: Magna International
-    tenant: magna
-    site_id: Magna
-    base_url: https://magna.wd3.myworkdayjobs.com
-  mlse:
-    name: MLSE
-    tenant: mlse
-    site_id: MLSE
-    base_url: https://mlse.wd3.myworkdayjobs.com
-  olg:
-    name: OLG
-    tenant: olg
-    site_id: Careers
-    base_url: https://olg.wd3.myworkdayjobs.com
-  enbridge:
-    name: Enbridge
-    tenant: enbridge
-    site_id: enbridge_careers
-    base_url: https://enbridge.wd3.myworkdayjobs.com
-  canadian_solar:
-    name: Canadian Solar
-    tenant: canadiansolar
-    site_id: CanadianSolar
-    base_url: https://canadiansolar.wd5.myworkdayjobs.com
-  openai:
-    name: OpenAI
-    tenant: openai
-    site_id: OpenAI
-    base_url: https://openai.wd1.myworkdayjobs.com
-  anthropic:
-    name: Anthropic
-    tenant: anthropic
-    site_id: Anthropic
-    base_url: https://anthropic.wd1.myworkdayjobs.com
-  cohere:
-    name: Cohere
-    tenant: cohere
-    site_id: Cohere
-    base_url: https://cohere.wd1.myworkdayjobs.com
-  scale_ai:
-    name: Scale AI
-    tenant: scale
-    site_id: Scale
-    base_url: https://scale.wd1.myworkdayjobs.com
-  databricks:
-    name: Databricks
-    tenant: databricks
-    site_id: Databricks
-    base_url: https://databricks.wd1.myworkdayjobs.com
-  snowflake:
-    name: Snowflake
-    tenant: snowflake
-    site_id: Snowflake
-    base_url: https://snowflake.wd1.myworkdayjobs.com
-  palantir:
-    name: Palantir
-    tenant: palantir
-    site_id: Palantir
-    base_url: https://palantir.wd1.myworkdayjobs.com
-  datadog:
-    name: Datadog
-    tenant: datadog
-    site_id: Datadog
-    base_url: https://datadog.wd1.myworkdayjobs.com
-  hashicorp:
-    name: HashiCorp
-    tenant: hashicorp
-    site_id: HashiCorp
-    base_url: https://hashicorp.wd1.myworkdayjobs.com
-  mongodb:
-    name: MongoDB
-    tenant: mongodb
-    site_id: MongoDB
-    base_url: https://mongodb.wd1.myworkdayjobs.com
-  confluent:
-    name: Confluent
-    tenant: confluent
-    site_id: Confluent
-    base_url: https://confluent.wd1.myworkdayjobs.com
-  cloudflare:
-    name: Cloudflare
-    tenant: cloudflare
-    site_id: Cloudflare
-    base_url: https://cloudflare.wd1.myworkdayjobs.com
-  plaid:
-    name: Plaid
-    tenant: plaid
-    site_id: Plaid
-    base_url: https://plaid.wd1.myworkdayjobs.com
-  stripe:
-    name: Stripe
-    tenant: stripe
-    site_id: Stripe
-    base_url: https://stripe.wd1.myworkdayjobs.com
-  square:
-    name: Square
-    tenant: square
-    site_id: Square
-    base_url: https://square.wd1.myworkdayjobs.com
-  block:
-    name: Block
-    tenant: block
-    site_id: Block
-    base_url: https://block.wd1.myworkdayjobs.com
-  robinhood:
-    name: Robinhood
-    tenant: robinhood
-    site_id: Robinhood
-    base_url: https://robinhood.wd1.myworkdayjobs.com
-  coinbase:
-    name: Coinbase
-    tenant: coinbase
-    site_id: Coinbase
-    base_url: https://coinbase.wd1.myworkdayjobs.com
-  chainalysis:
-    name: Chainalysis
-    tenant: chainalysis
-    site_id: Chainalysis
-    base_url: https://chainalysis.wd1.myworkdayjobs.com
-  flexport:
-    name: Flexport
-    tenant: flexport
-    site_id: Flexport
-    base_url: https://flexport.wd1.myworkdayjobs.com
-  ginkgo_bioworks:
-    name: Ginkgo Bioworks
-    tenant: ginkgobioworks
-    site_id: GinkgoBioworks
-    base_url: https://ginkgobioworks.wd1.myworkdayjobs.com
-  insitro:
-    name: Insitro
-    tenant: insitro
-    site_id: Insitro
-    base_url: https://insitro.wd1.myworkdayjobs.com
-  recursiv:
-    name: Recursion
-    tenant: recursion
-    site_id: Recursion
-    base_url: https://recursion.wd1.myworkdayjobs.com
-  tempus:
-    name: Tempus
-    tenant: tempus
-    site_id: Tempus
-    base_url: https://tempus.wd1.myworkdayjobs.com
-  23andme:
-    name: 23andMe
-    tenant: 23andme
-    site_id: 23andMe
-    base_url: https://23andme.wd1.myworkdayjobs.com
-  benchling:
-    name: Benchling
-    tenant: benchling
-    site_id: Benchling
-    base_url: https://benchling.wd1.myworkdayjobs.com
-  samsara:
-    name: Samsara
-    tenant: samsara
-    site_id: Samsara
-    base_url: https://samsara.wd1.myworkdayjobs.com
-  astranis:
-    name: Astranis
-    tenant: astranis
-    site_id: Astranis
-    base_url: https://astranis.wd1.myworkdayjobs.com
-  planet:
-    name: Planet Labs
-    tenant: planet
-    site_id: Planet
-    base_url: https://planet.wd1.myworkdayjobs.com
-  anduril:
-    name: Anduril
-    tenant: anduril
-    site_id: Anduril
-    base_url: https://anduril.wd1.myworkdayjobs.com
-  shield_ai:
-    name: Shield AI
-    tenant: shieldai
-    site_id: ShieldAI
-    base_url: https://shieldai.wd1.myworkdayjobs.com
-  applied_intuition:
-    name: Applied Intuition
-    tenant: appliedintuition
-    site_id: AppliedIntuition
-    base_url: https://appliedintuition.wd1.myworkdayjobs.com
-  aurora:
-    name: Aurora Innovation
-    tenant: aurora
-    site_id: Aurora
-    base_url: https://aurora.wd1.myworkdayjobs.com
-  nuro:
-    name: Nuro
-    tenant: nuro
-    site_id: Nuro
-    base_url: https://nuro.wd1.myworkdayjobs.com
-  zoox:
-    name: Zoox
-    tenant: zoox
-    site_id: Zoox
-    base_url: https://zoox.wd1.myworkdayjobs.com
-  wayve:
-    name: Wayve
-    tenant: wayve
-    site_id: Wayve
-    base_url: https://wayve.wd1.myworkdayjobs.com
-  weave:
-    name: Weave
-    tenant: weave
-    site_id: Weave
-    base_url: https://weave.wd1.myworkdayjobs.com
-  moveworks:
-    name: Moveworks
-    tenant: moveworks
-    site_id: Moveworks
-    base_url: https://moveworks.wd1.myworkdayjobs.com
-  cresta:
-    name: Cresta
-    tenant: cresta
-    site_id: Cresta
-    base_url: https://cresta.wd1.myworkdayjobs.com
-  observe:
-    name: Observe
-    tenant: observe
-    site_id: Observe
-    base_url: https://observe.wd1.myworkdayjobs.com
-  bigpanda:
-    name: BigPanda
-    tenant: bigpanda
-    site_id: BigPanda
-    base_url: https://bigpanda.wd1.myworkdayjobs.com
-  launchdarkly:
-    name: LaunchDarkly
-    tenant: launchdarkly
-    site_id: LaunchDarkly
-    base_url: https://launchdarkly.wd1.myworkdayjobs.com
-  amplitude:
-    name: Amplitude
-    tenant: amplitude
-    site_id: Amplitude
-    base_url: https://amplitude.wd1.myworkdayjobs.com
-  mixpanel:
-    name: Mixpanel
-    tenant: mixpanel
-    site_id: Mixpanel
-    base_url: https://mixpanel.wd1.myworkdayjobs.com
-  clearbit:
-    name: Clearbit
-    tenant: clearbit
-    site_id: Clearbit
-    base_url: https://clearbit.wd1.myworkdayjobs.com
-  crunchbase:
-    name: Crunchbase
-    tenant: crunchbase
-    site_id: Crunchbase
-    base_url: https://crunchbase.wd1.myworkdayjobs.com
-  gong:
-    name: Gong
-    tenant: gong
-    site_id: Gong
-    base_url: https://gong.wd1.myworkdayjobs.com
-  chorus:
-    name: Chorus.ai
-    tenant: chorus
-    site_id: Chorus
-    base_url: https://chorus.wd1.myworkdayjobs.com
-  zoominfo:
-    name: ZoomInfo
-    tenant: zoominfo
-    site_id: ZoomInfo
-    base_url: https://zoominfo.wd1.myworkdayjobs.com
-  outreach:
-    name: Outreach
-    tenant: outreach
-    site_id: Outreach
-    base_url: https://outreach.wd1.myworkdayjobs.com
-  salesloft:
-    name: SalesLoft
-    tenant: salesloft
-    site_id: SalesLoft
-    base_url: https://salesloft.wd1.myworkdayjobs.com
-  apollo:
-    name: Apollo.io
-    tenant: apollo
-    site_id: Apollo
-    base_url: https://apollo.wd1.myworkdayjobs.com
-  loom:
-    name: Loom
-    tenant: loom
-    site_id: Loom
-    base_url: https://loom.wd1.myworkdayjobs.com
-  miro:
-    name: Miro
-    tenant: miro
-    site_id: Miro
-    base_url: https://miro.wd1.myworkdayjobs.com
-  figma:
-    name: Figma
-    tenant: figma
-    site_id: Figma
-    base_url: https://figma.wd1.myworkdayjobs.com
-  notion:
-    name: Notion
-    tenant: notion
-    site_id: Notion
-    base_url: https://notion.wd1.myworkdayjobs.com
-  asana:
-    name: Asana
-    tenant: asana
-    site_id: Asana
-    base_url: https://asana.wd1.myworkdayjobs.com
-  monday:
-    name: monday.com
-    tenant: monday
-    site_id: Monday
-    base_url: https://monday.wd1.myworkdayjobs.com
-  clickup:
-    name: ClickUp
-    tenant: clickup
-    site_id: ClickUp
-    base_url: https://clickup.wd1.myworkdayjobs.com
-  airtable:
-    name: Airtable
-    tenant: airtable
-    site_id: Airtable
-    base_url: https://airtable.wd1.myworkdayjobs.com
-  retool:
-    name: Retool
-    tenant: retool
-    site_id: Retool
-    base_url: https://retool.wd1.myworkdayjobs.com
-  zapier:
-    name: Zapier
-    tenant: zapier
-    site_id: Zapier
-    base_url: https://zapier.wd1.myworkdayjobs.com
-  workato:
-    name: Workato
-    tenant: workato
-    site_id: Workato
-    base_url: https://workato.wd1.myworkdayjobs.com
-  n8n:
-    name: n8n
-    tenant: n8n
-    site_id: n8n
-    base_url: https://n8n.wd1.myworkdayjobs.com
-  make:
-    name: Make
-    tenant: make
-    site_id: Make
-    base_url: https://make.wd1.myworkdayjobs.com
-  babylon:
-    name: Babylon Health
-    tenant: babylon
-    site_id: Babylon
-    base_url: https://babylon.wd1.myworkdayjobs.com
-  ada_health:
-    name: Ada Health
-    tenant: adahealth
-    site_id: AdaHealth
-    base_url: https://adahealth.wd1.myworkdayjobs.com
-  k_health:
-    name: K Health
-    tenant: khealth
-    site_id: KHealth
-    base_url: https://khealth.wd1.myworkdayjobs.com
-  buoy_health:
-    name: Buoy Health
-    tenant: buoy
-    site_id: Buoy
-    base_url: https://buoy.wd1.myworkdayjobs.com
-  infermedica:
-    name: Infermedica
-    tenant: infermedica
-    site_id: Infermedica
-    base_url: https://infermedica.wd1.myworkdayjobs.com
-  zebra_medical:
-    name: Zebra Medical Vision
-    tenant: zebra
-    site_id: Zebra
-    base_url: https://zebra.wd1.myworkdayjobs.com
-  aidoc:
-    name: Aidoc
-    tenant: aidoc
-    site_id: Aidoc
-    base_url: https://aidoc.wd1.myworkdayjobs.com
-  viz_ai:
-    name: Viz.ai
-    tenant: vizai
-    site_id: VizAI
-    base_url: https://vizai.wd1.myworkdayjobs.com
-  pathai:
-    name: PathAI
-    tenant: pathai
-    site_id: PathAI
-    base_url: https://pathai.wd1.myworkdayjobs.com
-  paige:
-    name: Paige
-    tenant: paige
-    site_id: Paige
-    base_url: https://paige.wd1.myworkdayjobs.com
-  freenome:
-    name: Freenome
-    tenant: freenome
-    site_id: Freenome
-    base_url: https://freenome.wd1.myworkdayjobs.com
-  grail:
-    name: GRAIL
-    tenant: grail
-    site_id: GRAIL
-    base_url: https://grail.wd1.myworkdayjobs.com
-  veracyte:
-    name: Veracyte
-    tenant: veracyte
-    site_id: Veracyte
-    base_url: https://veracyte.wd1.myworkdayjobs.com
-  guardant:
-    name: Guardant Health
-    tenant: guardant
-    site_id: Guardant
-    base_url: https://guardant.wd1.myworkdayjobs.com
-  foundation:
-    name: Foundation Medicine
-    tenant: foundation
-    site_id: Foundation
-    base_url: https://foundation.wd1.myworkdayjobs.com
-  flatiron:
-    name: Flatiron Health
-    tenant: flatiron
-    site_id: Flatiron
-    base_url: https://flatiron.wd1.myworkdayjobs.com
-  upstart:
-    name: Upstart
-    tenant: upstart
-    site_id: Upstart
-    base_url: https://upstart.wd1.myworkdayjobs.com
-  affirm:
-    name: Affirm
-    tenant: affirm
-    site_id: Affirm
-    base_url: https://affirm.wd1.myworkdayjobs.com
-  klarna:
-    name: Klarna
-    tenant: klarna
-    site_id: Klarna
-    base_url: https://klarna.wd1.myworkdayjobs.com
-  lemonade:
-    name: Lemonade
-    tenant: lemonade
-    site_id: Lemonade
-    base_url: https://lemonade.wd1.myworkdayjobs.com
-  root:
-    name: Root Insurance
-    tenant: root
-    site_id: Root
-    base_url: https://root.wd1.myworkdayjobs.com
-  oscar:
-    name: Oscar Health
-    tenant: oscar
-    site_id: Oscar
-    base_url: https://oscar.wd1.myworkdayjobs.com
-  hippo:
-    name: Hippo Insurance
-    tenant: hippo
-    site_id: Hippo
-    base_url: https://hippo.wd1.myworkdayjobs.com
-  metromile:
-    name: Metromile
-    tenant: metromile
-    site_id: Metromile
-    base_url: https://metromile.wd1.myworkdayjobs.com
-  next_insurance:
-    name: Next Insurance
-    tenant: next
-    site_id: Next
-    base_url: https://next.wd1.myworkdayjobs.com
-  coalition:
-    name: Coalition
-    tenant: coalition
-    site_id: Coalition
-    base_url: https://coalition.wd1.myworkdayjobs.com
-  brex:
-    name: Brex
-    tenant: brex
-    site_id: Brex
-    base_url: https://brex.wd1.myworkdayjobs.com
-  mercury:
-    name: Mercury
-    tenant: mercury
-    site_id: Mercury
-    base_url: https://mercury.wd1.myworkdayjobs.com
-  uipath:
-    name: UiPath
-    tenant: uipath
-    site_id: UiPath
-    base_url: https://uipath.wd1.myworkdayjobs.com
-  automation_anywhere:
-    name: Automation Anywhere
-    tenant: automationanywhere
-    site_id: AutomationAnywhere
-    base_url: https://automationanywhere.wd1.myworkdayjobs.com
-  blue_prism:
-    name: Blue Prism
-    tenant: blueprism
-    site_id: BluePrism
-    base_url: https://blueprism.wd1.myworkdayjobs.com
-  workfusion:
-    name: WorkFusion
-    tenant: workfusion
-    site_id: WorkFusion
-    base_url: https://workfusion.wd1.myworkdayjobs.com
-  hyperscience:
-    name: Hyperscience
-    tenant: hyperscience
-    site_id: Hyperscience
-    base_url: https://hyperscience.wd1.myworkdayjobs.com
-  instabase:
-    name: Instabase
-    tenant: instabase
-    site_id: Instabase
-    base_url: https://instabase.wd1.myworkdayjobs.com
-  veritone:
-    name: Veritone
-    tenant: veritone
-    site_id: Veritone
-    base_url: https://veritone.wd1.myworkdayjobs.com
-  dataiku:
-    name: Dataiku
-    tenant: dataiku
-    site_id: Dataiku
-    base_url: https://dataiku.wd1.myworkdayjobs.com
-  alteryx:
-    name: Alteryx
-    tenant: alteryx
-    site_id: Alteryx
-    base_url: https://alteryx.wd1.myworkdayjobs.com
-  domino:
-    name: Domino Data Lab
-    tenant: domino
-    site_id: Domino
-    base_url: https://domino.wd1.myworkdayjobs.com
-  anyscale:
-    name: Anyscale
-    tenant: anyscale
-    site_id: Anyscale
-    base_url: https://anyscale.wd1.myworkdayjobs.com
-  determined:
-    name: Determined AI
-    tenant: determined
-    site_id: Determined
-    base_url: https://determined.wd1.myworkdayjobs.com
-  weights_biases:
-    name: Weights & Biases
-    tenant: wandb
-    site_id: WandB
-    base_url: https://wandb.wd1.myworkdayjobs.com
-  neptune:
-    name: Neptune.ai
-    tenant: neptune
-    site_id: Neptune
-    base_url: https://neptune.wd1.myworkdayjobs.com
-  clearml:
-    name: ClearML
-    tenant: clearml
-    site_id: ClearML
-    base_url: https://clearml.wd1.myworkdayjobs.com
-  huggingface:
-    name: Hugging Face
-    tenant: huggingface
-    site_id: HuggingFace
-    base_url: https://huggingface.wd1.myworkdayjobs.com
-  replicate:
-    name: Replicate
-    tenant: replicate
-    site_id: Replicate
-    base_url: https://replicate.wd1.myworkdayjobs.com
-  baseten:
-    name: Baseten
-    tenant: baseten
-    site_id: Baseten
-    base_url: https://baseten.wd1.myworkdayjobs.com
-  bananaml:
-    name: Banana ML
-    tenant: banana
-    site_id: Banana
-    base_url: https://banana.wd1.myworkdayjobs.com
-  sierra:
-    name: Sierra
-    tenant: sierra
-    site_id: Sierra
-    base_url: https://sierra.wd1.myworkdayjobs.com
-  ada:
-    name: Ada
-    tenant: ada
-    site_id: Ada
-    base_url: https://ada.wd1.myworkdayjobs.com
-  forethought:
-    name: Forethought
-    tenant: forethought
-    site_id: Forethought
-    base_url: https://forethought.wd1.myworkdayjobs.com
-  kustomer:
-    name: Kustomer
-    tenant: kustomer
-    site_id: Kustomer
-    base_url: https://kustomer.wd1.myworkdayjobs.com
-  cognigy:
-    name: Cognigy
-    tenant: cognigy
-    site_id: Cognigy
-    base_url: https://cognigy.wd1.myworkdayjobs.com
-  kore:
-    name: Kore.ai
-    tenant: kore
-    site_id: Kore
-    base_url: https://kore.wd1.myworkdayjobs.com
-  darktrace:
-    name: Darktrace
-    tenant: darktrace
-    site_id: Darktrace
-    base_url: https://darktrace.wd1.myworkdayjobs.com
-  vade:
-    name: Vade Secure
-    tenant: vade
-    site_id: Vade
-    base_url: https://vade.wd1.myworkdayjobs.com
-  abnormalsecurity:
-    name: Abnormal Security
-    tenant: abnormal
-    site_id: Abnormal
-    base_url: https://abnormal.wd1.myworkdayjobs.com
-  perimeterx:
-    name: PerimeterX
-    tenant: perimeterx
-    site_id: PerimeterX
-    base_url: https://perimeterx.wd1.myworkdayjobs.com
-  human:
-    name: HUMAN
-    tenant: human
-    site_id: HUMAN
-    base_url: https://human.wd1.myworkdayjobs.com
-  jasper:
-    name: Jasper
-    tenant: jasper
-    site_id: Jasper
-    base_url: https://jasper.wd1.myworkdayjobs.com
-  copyai:
-    name: Copy.ai
-    tenant: copyai
-    site_id: CopyAI
-    base_url: https://copyai.wd1.myworkdayjobs.com
-  writer:
-    name: Writer
-    tenant: writer
-    site_id: Writer
-    base_url: https://writer.wd1.myworkdayjobs.com
-  synthesia:
-    name: Synthesia
-    tenant: synthesia
-    site_id: Synthesia
-    base_url: https://synthesia.wd1.myworkdayjobs.com
-  runway:
-    name: Runway
-    tenant: runway
-    site_id: Runway
-    base_url: https://runway.wd1.myworkdayjobs.com
-  stability:
-    name: Stability AI
-    tenant: stability
-    site_id: Stability
-    base_url: https://stability.wd1.myworkdayjobs.com
-  midjourney:
-    name: Midjourney
-    tenant: midjourney
-    site_id: Midjourney
-    base_url: https://midjourney.wd1.myworkdayjobs.com
-  canva:
-    name: Canva
-    tenant: canva
-    site_id: Canva
-    base_url: https://canva.wd1.myworkdayjobs.com
+    name: "Moderna"
+    tenant: "modernatx"
+    site_id: "M_tx"
+    base_url: "https://modernatx.wd1.myworkdayjobs.com"
+
+  # ServiceNow / DocuSign / Uber — disabled 2026-05-07 after persistent HTTP 422
+  # responses across all search queries. Manual probe confirmed:
+  #   - servicenow.wd1.myworkdayjobs.com/ServiceNowCareers → HTTP 500 on UI, 422 on API
+  #   - docusign.wd5.myworkdayjobs.com/External           → HTTP 500; DocuSign moved to iCIMS
+  #     (uscareers-docusign.icims.com)
+  #   - uber.wd5.myworkdayjobs.com/uberCareers            → HTTP 500; Uber pulled the public
+  #     Workday tenant. Uber's Greenhouse board (slug "uber") returns 404 too.
+  # If any of these tenants comes back online, re-add with the new site_id.
+
+  # ── US Fintech ──────────────────────────────────────────────────────────
+
+  fis:
+    name: "FIS Global"
+    tenant: "fis"
+    site_id: "SearchJobs"
+    base_url: "https://fis.wd5.myworkdayjobs.com"
+
+  mastercard:
+    name: "Mastercard"
+    tenant: "mastercard"
+    site_id: "CorporateCareers"
+    base_url: "https://mastercard.wd1.myworkdayjobs.com"
+
+  paypal:
+    name: "PayPal"
+    tenant: "paypal"
+    site_id: "jobs"
+    base_url: "https://paypal.wd1.myworkdayjobs.com"
+
+  # ── Seattle-area additions (2026-04-24) ──────────────────────────
+  # Verified via the Missing-Employer ATS audit.
+
+  expedia:
+    name: "Expedia Group"
+    tenant: "expedia"
+    site_id: "search"
+    base_url: "https://expedia.wd108.myworkdayjobs.com"
+
+  # ── Mega-corps verified 2026-04-26 (P2.6) ─────────────────────────────
+  # Found by scraping each company's careers landing page for
+  # myworkdayjobs URLs + brute-forcing common site_id values, then
+  # confirming the CXS jobs API returned a non-zero total.
+
+  tmobile:
+    name: "T-Mobile"
+    tenant: "tmobile"
+    site_id: "External"
+    base_url: "https://tmobile.wd1.myworkdayjobs.com"
+
+  boeing:
+    name: "Boeing"
+    tenant: "boeing"
+    site_id: "External_Careers"
+    base_url: "https://boeing.wd1.myworkdayjobs.com"
+
+  accenture:
+    name: "Accenture"
+    tenant: "accenture"
+    site_id: "AccentureCareers"
+    base_url: "https://accenture.wd103.myworkdayjobs.com"
+
+  # ── Seattle expansion (2026-06-10) ──────────────────────────────────────
+  # Verified via probe agents + manual CXS re-probe (POST .../wday/cxs/
+  # {tenant}/{site_id}/jobs returned non-zero "total" for each).
+
+  nordstrom:
+    name: "Nordstrom"
+    tenant: "nordstrom"
+    site_id: "nordstrom_careers"
+    base_url: "https://nordstrom.wd501.myworkdayjobs.com"  # non-standard wd501 cluster
+
+  rtx:
+    name: "Raytheon (RTX)"
+    tenant: "globalhr"
+    site_id: "REC_RTX_Ext_Gateway"
+    base_url: "https://globalhr.wd5.myworkdayjobs.com"
+    # Gateway covers all RTX business units (Raytheon, Pratt & Whitney,
+    # Collins Aerospace) — ~4,200 postings; rely on location/keyword filters.
+
+  remitly:
+    name: "Remitly"
+    tenant: "remitly"
+    site_id: "Remitly_Careers"
+    base_url: "https://remitly.wd5.myworkdayjobs.com"
+
+  zillow:
+    name: "Zillow Group"
+    tenant: "zillow"
+    site_id: "Zillow_Group_External"
+    base_url: "https://zillow.wd5.myworkdayjobs.com"
+
+  f5:
+    name: "F5"
+    tenant: "ffive"
+    site_id: "f5jobs"
+    base_url: "https://ffive.wd5.myworkdayjobs.com"
+
+  prologis:
+    name: "Prologis"
+    tenant: "prologis"
+    site_id: "Prologis_External_Careers"
+    base_url: "https://prologis.wd5.myworkdayjobs.com"

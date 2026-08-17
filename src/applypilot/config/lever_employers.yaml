@@ -1,0 +1,33 @@
+# Lever ATS direct-API employer registry.
+#
+# Slugs are the tenant part of the public Lever URL —
+# https://jobs.lever.co/{slug} or
+# https://api.lever.co/v0/postings/{slug}?mode=json.
+#
+# Verified 2026-04-26 by probing the postings endpoint (200 = valid,
+# 404 = wrong slug or no public board).
+#
+# To add an employer:
+#   1. Find their Lever board URL (jobs.lever.co/{slug}).
+#   2. curl -sIo /dev/null -w '%{http_code}\n' \
+#         https://api.lever.co/v0/postings/{slug}?mode=json
+#      Should be 200.
+#   3. Add an entry below.
+
+employers:
+  highspot:
+    name: "Highspot"
+    neighborhood: "Downtown Seattle"
+    tier: 2
+  outreach:
+    name: "Outreach"
+    neighborhood: "Downtown Seattle"
+    tier: 2
+  rover:
+    name: "Rover"
+    neighborhood: "Downtown Seattle"
+    tier: 2
+  plaid:
+    name: "Plaid"
+    neighborhood: "Remote / SF"
+    tier: 2

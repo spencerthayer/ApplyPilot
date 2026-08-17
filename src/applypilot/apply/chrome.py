@@ -39,6 +39,227 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only when optional d
 
     _sys.modules.setdefault("websocket", _websocket)
 
+
+def _get_or_create_extension_key() -> str:
+    """Return the base64-encoded RSA public key used as manifest.json `key`.
+
+    Generates a fresh RSA-2048 key pair on first call, persists the public
+    key (DER + base64) to ~/.applypilot/extension_key.b64, and reuses it on
+    subsequent calls. Per-install randomness (NOT per-worker — all workers
+    on this install share the same extension ID) defeats LinkedIn's
+    cross-user fingerprint of ApplyPilot's extension.
+    """
+    import base64
+    import os as _os
+    import subprocess as _sp
+
+    key_path = config.APP_DIR / "extension_key.b64"
+    if key_path.exists():
+        return key_path.read_text(encoding="utf-8").strip()
+
+    # Generate a new RSA-2048 key pair via openssl. We only persist the
+    # PUBLIC key in DER + base64 (Chrome's manifest.json `key` format).
+    privkey_der = _sp.check_output(
+        ["openssl", "genpkey", "-algorithm", "RSA",
+         "-pkeyopt", "rsa_keygen_bits:2048", "-outform", "DER"],
+        stderr=_sp.DEVNULL,
+    )
+    pubkey_der = _sp.check_output(
+        ["openssl", "rsa", "-pubout", "-inform", "DER", "-outform", "DER"],
+        input=privkey_der, stderr=_sp.DEVNULL,
+    )
+    pubkey_b64 = base64.b64encode(pubkey_der).decode("ascii")
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text(pubkey_b64, encoding="utf-8")
+    _os.chmod(key_path, 0o600)
+    return pubkey_b64
+
+
+_DRY_RUN_GATE_JS = r"""
+(function() {
+  if (window.__ap_dry_run_gate_installed) return;
+  window.__ap_dry_run_gate_installed = true;
+  // Block form submits outright.
+  document.addEventListener('submit', e => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    try { console.log('[ApplyPilot] dry-run: form submit blocked', e.target); } catch (_) {}
+  }, true);
+  // Block clicks on anything that looks like a final-submit affordance.
+  // We match generously by visible text + aria-label, not by element type
+  // alone — many ATS submit controls are <a role="button"> or custom
+  // <div onclick>, not <button type="submit">.
+  const SUBMIT_RE =
+    /\b(submit application|submit my application|submit and apply|submit$|apply now|send application|finish application|complete application|complete and submit)\b/i;
+  document.addEventListener('click', e => {
+    let t = e.target;
+    if (!t) return;
+    if (t.nodeType !== 1) t = t.parentElement;
+    const candidate = t && t.closest && t.closest(
+      'button, input[type=submit], input[type=button], a[role=button], [role=button], [data-action*=submit i]'
+    );
+    if (!candidate) return;
+    const text = (
+      (candidate.innerText || candidate.value || '') + ' ' +
+      (candidate.getAttribute('aria-label') || '') + ' ' +
+      (candidate.getAttribute('title') || '')
+    ).trim();
+    if (SUBMIT_RE.test(text)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      try {
+        candidate.style.outline = '3px dashed #fbbf24';
+        candidate.style.outlineOffset = '2px';
+        candidate.title = 'ApplyPilot dry-run: this button is disabled';
+      } catch (_) {}
+      try { console.log('[ApplyPilot] dry-run: submit click blocked:', text); } catch (_) {}
+    }
+  }, true);
+})();
+"""
+
+
+def inject_dry_run_gate(cdp_port: int) -> bool:
+    """Install a JS gate that blocks form submits + submit-button clicks.
+
+    Used when the apply pipeline runs with --dry-run. Connects to the
+    browser-level CDP target, calls Page.addScriptToEvaluateOnNewDocument
+    so the gate persists across navigations, and Runtime.evaluate the
+    same script in every existing page so it covers the current tab too.
+
+    Earlier, dry-run was prompt-only ("don't click submit"). Haiku
+    sometimes ignored that and submitted real applications. A code-side
+    gate is non-negotiable: even if the agent fires `browser_click
+    Submit`, the click event is intercepted at the capture phase and
+    preventDefault'd before any handler runs.
+
+    Returns True on success, False on any failure (in which case the
+    caller should fall back to the prompt-only override).
+    """
+    import urllib.request
+    import websocket  # type: ignore
+
+    try:
+        # Browser-level WS endpoint (covers all targets via the dispatcher).
+        info = json.loads(urllib.request.urlopen(
+            f"http://localhost:{cdp_port}/json/version", timeout=3,
+        ).read())
+        browser_ws = info.get("webSocketDebuggerUrl")
+        if not browser_ws:
+            return False
+    except Exception:
+        logger.debug("dry_run_gate: could not fetch CDP /json/version", exc_info=True)
+        return False
+
+    msg_id = [0]
+
+    def _send(ws, method, params=None, session_id=None):
+        msg_id[0] += 1
+        req = {"id": msg_id[0], "method": method}
+        if params is not None:
+            req["params"] = params
+        if session_id is not None:
+            req["sessionId"] = session_id
+        ws.send(json.dumps(req))
+        # Drain until we see our response (skip events).
+        for _ in range(40):
+            raw = ws.recv()
+            try:
+                resp = json.loads(raw)
+            except Exception:
+                continue
+            if resp.get("id") == msg_id[0]:
+                return resp
+        return None
+
+    try:
+        ws = websocket.create_connection(browser_ws, timeout=5)
+    except Exception:
+        logger.debug("dry_run_gate: ws connect failed", exc_info=True)
+        return False
+
+    try:
+        # Find every page target so we can inject into each one.
+        targets_resp = _send(ws, "Target.getTargets") or {}
+        page_targets = [
+            t for t in (targets_resp.get("result", {}).get("targetInfos", []) or [])
+            if t.get("type") == "page"
+        ]
+        installed = 0
+        for tgt in page_targets:
+            attach = _send(ws, "Target.attachToTarget",
+                           {"targetId": tgt["targetId"], "flatten": True})
+            if not attach:
+                continue
+            sid = attach.get("result", {}).get("sessionId")
+            if not sid:
+                continue
+            try:
+                _send(ws, "Page.enable", session_id=sid)
+                _send(ws, "Page.addScriptToEvaluateOnNewDocument",
+                      {"source": _DRY_RUN_GATE_JS}, session_id=sid)
+                # Also evaluate immediately so the current page is gated.
+                _send(ws, "Runtime.evaluate",
+                      {"expression": _DRY_RUN_GATE_JS, "awaitPromise": False},
+                      session_id=sid)
+                installed += 1
+            finally:
+                # Best-effort detach so we don't leave a session pinned.
+                _send(ws, "Target.detachFromTarget", {"sessionId": sid})
+        logger.info("Installed dry-run submit-blocker on %d page target(s)", installed)
+        return installed > 0
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
+def _patch_manifest_key(manifest_path: Path) -> None:
+    """Replace the `key` field in an extension manifest.json with our
+    per-install random key. Idempotent — calling again with the same key
+    is a no-op.
+    """
+    import json as _json
+    pubkey_b64 = _get_or_create_extension_key()
+    text = manifest_path.read_text(encoding="utf-8")
+    data = _json.loads(text)
+    if data.get("key") == pubkey_b64:
+        return  # already patched
+    data["key"] = pubkey_b64
+    manifest_path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _compute_extension_id(pubkey_b64: str) -> str:
+    """Derive the Chrome extension ID from the manifest's `key` field.
+
+    Chrome computes:
+      1. base64-decode the public key (DER format)
+      2. sha256 hash → 32 bytes
+      3. Take first 16 bytes (= 32 hex nibbles)
+      4. Map each hex nibble 0-f → a-p
+
+    Per-install random keys (decision #38) mean we can't hardcode the ID
+    anywhere — pinning, ext_settings entries, popup URLs all need to
+    compute it from the same key the manifest uses.
+    """
+    import base64 as _b64
+    import hashlib as _hashlib
+    raw = _b64.b64decode(pubkey_b64)
+    digest = _hashlib.sha256(raw).hexdigest()[:32]
+    return "".join(chr(ord("a") + int(c, 16)) for c in digest)
+
+
+def _applypilot_ext_id() -> str:
+    """Return the ID Chrome assigns our extension on this install.
+
+    Memoized via _get_or_create_extension_key (which itself caches to
+    disk on first call), so repeated lookups are cheap.
+    """
+    return _compute_extension_id(_get_or_create_extension_key())
+
+
+# --- Port table (audit #11 — centralize all port literals here) -----
 # CDP port base — each worker uses BASE_CDP_PORT + worker_id
 BASE_CDP_PORT = 9222
 
@@ -46,6 +267,17 @@ BASE_CDP_PORT = 9222
 # that don't conflict with apply workers (9222–9230+)
 HITL_CDP_PORT = 9300
 HITL_WORKER_ID = 99
+
+# In-pipeline HITL HTTP listener: each worker exposes /api/done/{hash},
+# /api/status, /api/takeover, etc. on HITL_LISTEN_BASE_PORT + worker_id.
+# Extension (popup.js, background.js, content.js) also reads from this base.
+HITL_LISTEN_BASE_PORT = 7380
+
+# Standalone `applypilot human-review` server (separate from in-pipeline HITL).
+# Will be deleted in plan 5 once _start_done_watcher is migrated out of
+# human_review.py.
+HUMAN_REVIEW_PORT = 7373
+# ---------------------------------------------------------------------------
 
 # Track Chrome processes per worker for cleanup
 _chrome_procs: dict[int, subprocess.Popen] = {}
@@ -448,7 +680,7 @@ def setup_worker_profile(worker_id: int, refresh_cookies: bool = False,
         ext_dst = config.CHROME_WORKER_DIR / "extensions" / f"worker-{worker_id}"
         try:
             shutil.copytree(str(ext_src), str(ext_dst), dirs_exist_ok=True)
-            server_port = 7380 + worker_id
+            server_port = HITL_LISTEN_BASE_PORT + worker_id
             config_js = (
                 f"// Per-worker config — generated by setup_worker_profile()\n"
                 f"// DO NOT EDIT — regenerated each time the worker profile is set up\n"
@@ -459,6 +691,15 @@ def setup_worker_profile(worker_id: int, refresh_cookies: bool = False,
             # Prepend config inline to background.js (classic SW — no module import needed)
             bg_src = (ext_dst / "background.js").read_text(encoding="utf-8")
             (ext_dst / "background.js").write_text(config_js + bg_src, encoding="utf-8")
+            # Per-install random extension key (spec §3.1) — defeats LinkedIn's
+            # bulk fingerprint of ApplyPilot's extension across users. Key is
+            # generated once and persisted; same key across all workers on
+            # this install so the extension ID is stable for our flows.
+            try:
+                _patch_manifest_key(ext_dst / "manifest.json")
+            except Exception:
+                logger.debug("[worker-%d] Manifest key patch failed (non-fatal)",
+                             worker_id, exc_info=True)
             logger.debug("[worker-%d] Extension deployed to %s", worker_id, ext_dst)
         except (OSError, shutil.Error) as e:
             logger.warning("[worker-%d] Extension deploy failed (non-fatal): %s", worker_id, e)
@@ -508,7 +749,7 @@ def _suppress_restore_nag(profile_dir: Path, worker_id: int | None = None) -> No
         if worker_id is not None:
             # Open the worker's status homepage on startup (served by the always-on
             # HTTP server at port 7380+worker_id, which starts before Chrome launches).
-            server_port = 7380 + worker_id
+            server_port = HITL_LISTEN_BASE_PORT + worker_id
             prefs.setdefault("session", {})["restore_on_startup"] = 4  # 4 = open specific URLs
             prefs.setdefault("session", {})["startup_urls"] = [f"http://localhost:{server_port}/"]
         else:
@@ -544,10 +785,13 @@ def _suppress_restore_nag(profile_dir: Path, worker_id: int | None = None) -> No
         })
 
         # --- 4. Extension registration and pinning ---
-        # APPLYPILOT_EXT_ID is derived from the RSA key in manifest.json ("key" field).
-        # sha256(base64decode(key))[:16bytes] mapped nibble→a-p.
-        # Verified: base64.b64decode(key) | sha256 | first 32 hex nibbles → a-p
-        APPLYPILOT_EXT_ID = "almfihgbaclbghnagbfecfpppmjfmlnp"
+        # The extension ID is derived from manifest.json's "key" field. Per
+        # decision #38 we generate a per-install random RSA key, so the ID
+        # differs across installs — must be computed at runtime.
+        # The previous hardcoded literal "almfihgbac..." was the static-key
+        # ID and never matched any actual loaded extension after #38;
+        # that's why the user kept seeing "extension unpinned every run".
+        APPLYPILOT_EXT_ID = _applypilot_ext_id()
 
         ext_dir = prefs.setdefault("extensions", {})
 
@@ -597,7 +841,14 @@ def _suppress_restore_nag(profile_dir: Path, worker_id: int | None = None) -> No
         _EXTRA_STALE = {
             "eloakdpcfbnnadhnohionnmicpmedapk",  # old path-derived source-dir ID (no key)
             "lafmhibgcablhganbgeffcppmpfjlmpn",  # previously computed wrong key-derived ID
+            "almfihgbaclbghnagbfecfpppmjfmlnp",  # static manifest-key ID (pre per-install
+                                                  # random key, decision #38). Was hardcoded
+                                                  # as APPLYPILOT_EXT_ID until the runtime
+                                                  # computation fix; existing installs may
+                                                  # have it polluting pinned_extensions.
         }
+        # Don't list our actual runtime ID as stale.
+        _EXTRA_STALE.discard(APPLYPILOT_EXT_ID)
         # Delete from settings unconditionally (the keep_prefix check would have spared these
         # since they pointed to the worker ext dir, causing the duplicate-dir loading bug).
         for bad_id in _EXTRA_STALE:
@@ -1139,7 +1390,38 @@ def launch_chrome(worker_id: int, port: int | None = None,
         # Bypass XDG portal for file dialogs — portal routes through Nautilus which
         # hangs when the saved last-directory path doesn't exist on this machine.
         # GtkFileDialogPortal disables portal; FileSystemAccessAPI keeps upload working.
-        "GtkFileDialogPortal",
+        "GtkFileDialogPortal,"
+        # patchright/playwright disabled-features (anti-fingerprint + stability):
+        # AvoidUnnecessaryBeforeUnloadCheckSync, BoundaryEventDispatchTracksNodeRemoval,
+        # DestroyProfileOnBrowserClose, DialMediaRouteProvider, GlobalMediaControls,
+        # HttpsUpgrades, LensOverlay, MediaRouter, PaintHolding,
+        # ThirdPartyStoragePartitioning, Translate, AutoDeElevate, RenderDocument,
+        # OptimizationHints
+        "AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,"
+        "DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,"
+        "HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,"
+        "ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,"
+        "OptimizationHints",
+        # patchright launch-time anti-fingerprint flags (from chromiumSwitches.js).
+        # `--enable-features=CDPScreenshotNewSurface` + `--disable-blink-features=AutomationControlled`
+        # are the two most fingerprint-relevant; the rest reduce noise and prevent the
+        # automation banner from leaking. See spec §2.2 and audit-related findings.
+        "--disable-field-trial-config",
+        "--disable-background-networking",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-breakpad",
+        "--disable-dev-shm-usage",
+        "--enable-features=CDPScreenshotNewSurface",
+        "--disable-hang-monitor",
+        "--disable-prompt-on-repost",
+        "--disable-renderer-backgrounding",
+        "--force-color-profile=srgb",
+        "--use-mock-keychain",
+        "--no-service-autorun",
+        "--export-tagged-pdf",
+        "--disable-search-engine-choice-screen",
+        "--edge-skip-compat-layer-relaunch",
         "--hide-crash-restore-bubble",
         "--noerrdialogs",
         "--password-store=basic",

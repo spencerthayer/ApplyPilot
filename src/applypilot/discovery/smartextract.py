@@ -24,11 +24,14 @@ from urllib.parse import quote_plus
 
 import yaml
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+# Patchright (Playwright drop-in with TLS-fingerprint and JS-stealth patches)
+# is a hard dependency — see pyproject.toml. Used everywhere we drive a
+# browser so Cloudflare/Akamai don't reject us at the protocol level.
+from patchright.sync_api import sync_playwright
 
 from applypilot import config
 from applypilot.config import CONFIG_DIR
-from applypilot.database import init_db, get_stats
+from applypilot.database import init_db, get_stats, write_with_retry
 from applypilot.llm import get_client
 
 log = logging.getLogger(__name__)
@@ -106,40 +109,44 @@ def _store_jobs_filtered(
 ) -> tuple[int, int]:
     """Store jobs with location filtering. Returns (new, existing)."""
     now = datetime.now(timezone.utc).isoformat()
-    new = 0
-    existing = 0
-    filtered = 0
+    counts = {"new": 0, "existing": 0, "filtered": 0}
 
-    for job in jobs:
-        url = job.get("url")
-        if not url:
-            continue
-        if not _location_ok(job.get("location"), accept_locs, reject_locs):
-            filtered += 1
-            continue
-        try:
-            conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, discovered_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    url,
-                    job.get("title"),
-                    job.get("salary"),
-                    job.get("description"),
-                    job.get("location"),
-                    site,
-                    strategy,
-                    now,
-                ),
-            )
-            new += 1
-        except sqlite3.IntegrityError:
-            existing += 1
+    def _do_inserts() -> None:
+        counts["new"] = 0
+        counts["existing"] = 0
+        counts["filtered"] = 0
+        for job in jobs:
+            url = job.get("url")
+            if not url:
+                continue
+            if not _location_ok(job.get("location"), accept_locs, reject_locs):
+                counts["filtered"] += 1
+                continue
+            description = job.get("description")
+            initial_state = "enriched" if description and len(description) > 200 else "discovered"
+            try:
+                conn.execute(
+                    "INSERT INTO jobs (url, title, salary, description, location, site, strategy, "
+                    "discovered_at, posted_at, state) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (url, job.get("title"), job.get("salary"), description,
+                     job.get("location"), site, strategy, now,
+                     job.get("posted_at"), initial_state),
+                )
+                conn.execute(
+                    "INSERT INTO job_state_transitions "
+                    "(job_url, from_state, to_state, at, reason, metadata) "
+                    "VALUES (?, NULL, ?, ?, ?, ?)",
+                    (url, initial_state, now, f"discovered via {strategy}", None),
+                )
+                counts["new"] += 1
+            except sqlite3.IntegrityError:
+                counts["existing"] += 1
 
-    if filtered:
-        log.info("Filtered %d jobs (wrong location)", filtered)
-    conn.commit()
-    return new, existing
+    write_with_retry(conn, _do_inserts)
+    if counts["filtered"]:
+        log.info("Filtered %d jobs (wrong location)", counts["filtered"])
+    return counts["new"], counts["existing"]
 
 
 # -- Page intelligence collector ---------------------------------------------
@@ -185,18 +192,25 @@ def collect_page_intelligence(url: str, headless: bool = True) -> dict:
 
     with sync_playwright() as p:
         from applypilot.enrichment.detail import _STEALTH_INIT_SCRIPT
-        browser = p.chromium.launch(headless=headless)
+        # chromium_sandbox=True drops Playwright's default --no-sandbox flag —
+        # the headful-retry path (headless=False) showed Chrome's "unsupported
+        # command-line flag" warning bar, and untrusted job sites should not
+        # run unsandboxed anyway.
+        browser = p.chromium.launch(headless=headless, chromium_sandbox=True)
         context = browser.new_context(user_agent=UA)
         context.add_init_script(_STEALTH_INIT_SCRIPT)
         page = context.new_page()
         page.on("response", on_response)
 
+        page.goto(url, timeout=60000, wait_until="domcontentloaded")
+        # networkidle never fires on tracker-heavy sites (PowerToFly,
+        # SimplyHired, etc.) because analytics keep pinging. Wait for it
+        # opportunistically but don't fail the whole crawl if it never
+        # settles — DOM is already loaded by the time goto returned.
         try:
-            page.goto(url, timeout=60000)
-            page.wait_for_load_state("networkidle", timeout=60000)
+            page.wait_for_load_state("networkidle", timeout=10000)
         except Exception:
-            browser.close()
-            raise
+            pass
 
         intel["page_title"] = page.title()
 
@@ -690,12 +704,17 @@ PAGE HTML:
 
 # -- LLM helpers -------------------------------------------------------------
 
+def ask_llm(prompt: str, max_tokens: int = 8192, quality: bool = False) -> tuple[str, float, dict]:
+    """Send prompt to LLM. Returns (response_text, seconds_taken, metadata).
 
-def ask_llm(prompt: str) -> tuple[str, float, dict]:
-    """Send prompt to LLM. Returns (response_text, seconds_taken, metadata)."""
-    client = get_client()
+    Default max_tokens=8192 because Gemini 2.5+ thinking tokens consume the
+    output budget; 4096 was hitting truncation (raw=`{` or empty after fences).
+    quality=True routes to the quality fallback chain (Pro → GPT-4 → Sonnet)
+    for harder pages where the fast model returns empty/unparseable JSON.
+    """
+    client = get_client(quality=quality)
     t0 = time.time()
-    text = client.chat([{"role": "user", "content": prompt}], max_output_tokens=4096)
+    text = client.ask(prompt, temperature=0.0, max_tokens=max_tokens)
     elapsed = time.time() - t0
     meta = {
         "finish_reason": "stop",
@@ -742,12 +761,15 @@ def resolve_json_path_raw(data, path: str):
             if not part:
                 continue
             if part.startswith("[") and part.endswith("]"):
-                idx = int(part[1:-1])
-                current = current[idx]
+                inner = part[1:-1]
+                if inner.lstrip("-").isdigit():
+                    current = current[int(inner)]
+                else:
+                    current = current[inner]
             else:
                 current = current[part]
         return current
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError, ValueError):
         return None
 
 
@@ -761,8 +783,11 @@ def resolve_json_path(data, path: str):
             if not part:
                 continue
             if part.startswith("[") and part.endswith("]"):
-                idx = int(part[1:-1])
-                current = current[idx]
+                inner = part[1:-1]
+                if inner.lstrip("-").isdigit():
+                    current = current[int(inner)]
+                else:
+                    current = current[inner]
             else:
                 current = current[part]
         if isinstance(current, (str, int, float)):
@@ -774,7 +799,7 @@ def resolve_json_path(data, path: str):
                 return ", ".join(str(item.get("name", item.get("text", ""))) for item in current[:3])
             return ", ".join(str(x) for x in current[:3])
         return str(current) if current else None
-    except (KeyError, IndexError, TypeError):
+    except (KeyError, IndexError, TypeError, ValueError):
         return None
 
 
@@ -795,6 +820,12 @@ def execute_json_ld(intel: dict, plan: dict) -> list[dict]:
                 job[field] = None
                 continue
             job[field] = resolve_json_path(entry, path)
+        # datePosted is a fixed schema.org JobPosting field — read it
+        # directly rather than trusting an LLM-chosen path. The api_response
+        # and css_selectors strategies have no reliable date field, so jobs
+        # from those paths keep posted_at = NULL.
+        date_posted = entry.get("datePosted")
+        job["posted_at"] = date_posted if isinstance(date_posted, str) and date_posted else None
         jobs.append(job)
     return jobs
 
@@ -837,7 +868,12 @@ def execute_api_response(intel: dict, plan: dict) -> list[dict]:
 
 def execute_css_selectors(intel: dict) -> tuple[dict, list[dict]]:
     """Phase 2: Send full cleaned page HTML to LLM for card detection + selector generation.
-    Returns (selectors, jobs)."""
+    Returns (selectors, jobs).
+
+    On parse failure or empty response from the fast model (truncated thinking
+    tokens, sometimes the response is just the ```json fence), retries once
+    with the quality fallback chain.
+    """
     full_html = intel.get("full_html", "")
     if not full_html:
         log.warning("No page HTML captured")
@@ -848,18 +884,38 @@ def execute_css_selectors(intel: dict) -> tuple[dict, list[dict]]:
 
     prompt = FULL_PAGE_SELECTOR_PROMPT.format(page_html=cleaned)
 
-    try:
-        raw, elapsed, meta = ask_llm(prompt)
-    except Exception as e:
-        log.error("LLM_ERROR in Phase 2: %s", e)
-        return {}, []
+    selectors: dict | None = None
+    for attempt, quality in enumerate([False, True]):
+        try:
+            raw, elapsed, meta = ask_llm(prompt, quality=quality)
+        except Exception as e:
+            log.error("LLM_ERROR in Phase 2 (quality=%s): %s", quality, e)
+            continue
 
-    log.info("Phase 2 LLM: %d chars, %.1fs", meta["response_chars"], elapsed)
+        log.info("Phase 2 LLM (quality=%s): %d chars, %.1fs",
+                 quality, meta['response_chars'], elapsed)
 
-    try:
-        selectors = extract_json(raw)
-    except Exception as e:
-        log.error("PARSE_ERROR in Phase 2: %s | raw: %s", e, raw[:500])
+        # Truncated/empty responses (just ```json with no body, or short raw `{`)
+        # bypass the parser entirely so we can escalate before logging an error.
+        stripped = raw.strip().lstrip("`").strip("json").strip()
+        if not stripped or stripped in ("{", "}"):
+            if attempt == 0:
+                log.warning("Phase 2 returned empty/truncated body — escalating to quality model")
+                continue
+            log.error("Phase 2 empty after quality retry — giving up | raw: %s", raw[:500])
+            return {}, []
+
+        try:
+            selectors = extract_json(raw)
+            break
+        except Exception as e:
+            if attempt == 0:
+                log.warning("PARSE_ERROR in Phase 2 (fast) — escalating to quality model: %s", e)
+                continue
+            log.error("PARSE_ERROR in Phase 2 (quality): %s | raw: %s", e, raw[:500])
+            return {}, []
+
+    if selectors is None:
         return {}, []
 
     if "error" in selectors:
@@ -965,19 +1021,45 @@ def _run_one_site(name: str, url: str, no_headful: bool = False) -> dict:
     log.info("[2] Phase 1: Strategy selection (%s chars briefing)", f"{len(briefing):,}")
 
     prompt = STRATEGY_PROMPT.format(briefing=briefing)
-    try:
-        raw, elapsed, meta = ask_llm(prompt)
-    except Exception as e:
-        log.error("LLM_ERROR (%s)", _exception_summary(e))
-        return {"name": name, "status": "LLM_ERROR", "error": str(e)}
+    plan = None
+    raw = ""
+    last_err: Exception | None = None
+    for attempt, quality in enumerate([False, True]):
+        try:
+            raw, elapsed, meta = ask_llm(prompt, quality=quality)
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                log.warning("Phase 1 LLM_ERROR (fast) — escalating to quality: %s", e)
+                continue
+            log.error("Phase 1 LLM_ERROR (quality): %s", e)
+            return {"name": name, "status": "LLM_ERROR", "error": str(e)}
 
-    log.info("LLM: %d chars, %.1fs", meta["response_chars"], elapsed)
+        log.info("LLM (quality=%s): %d chars, %.1fs",
+                 quality, meta["response_chars"], elapsed)
 
-    try:
-        plan = extract_json(raw)
-    except Exception as e:
-        log.error("PARSE_ERROR (%s)", _exception_summary(e))
-        return {"name": name, "status": "PARSE_ERROR", "error": str(e), "raw": raw}
+        stripped = raw.strip().lstrip("`").strip("json").strip()
+        if not stripped or stripped in ("{", "}"):
+            if attempt == 0:
+                log.warning("Phase 1 empty/truncated — escalating to quality")
+                continue
+            log.error("Phase 1 empty after quality retry | raw: %s", raw[:500])
+            return {"name": name, "status": "PARSE_ERROR", "error": "empty response", "raw": raw}
+
+        try:
+            plan = extract_json(raw)
+            break
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                log.warning("PARSE_ERROR in Phase 1 (fast) — escalating to quality: %s", e)
+                continue
+            log.error("PARSE_ERROR: %s | raw: %s", e, raw[:500])
+            return {"name": name, "status": "PARSE_ERROR", "error": str(e), "raw": raw}
+
+    if plan is None:
+        return {"name": name, "status": "PARSE_ERROR",
+                "error": str(last_err) if last_err else "no plan", "raw": raw}
 
     strategy = plan.get("strategy", "?")
     reasoning = plan.get("reasoning", "?")

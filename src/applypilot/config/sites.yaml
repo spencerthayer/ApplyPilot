@@ -75,7 +75,6 @@ base_urls:
   "Jobgether": "https://jobgether.com"
   "TopStartups": "https://topstartups.io"
   "Jobspresso": "https://jobspresso.co"
-  "FlexJobs": "https://www.flexjobs.com"
   "Otta": "https://otta.com"
   "Eluta": "https://www.eluta.ca"
   "Remotive": "https://remotive.com"
@@ -202,10 +201,6 @@ sites:
 
   - name: "Jobspresso"
     url: "https://jobspresso.co/remote-work/remote-software-development/"
-    type: static
-
-  - name: "FlexJobs"
-    url: "https://www.flexjobs.com/remote-jobs/computer-it"
     type: static
 
   - name: "Otta"

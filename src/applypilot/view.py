@@ -25,6 +25,38 @@ from applypilot.database import get_connection
 
 console = Console()
 
+# Stage definitions: (label, bg_color, text_color)
+STAGE_META = {
+    "discovered":    ("Discovered",    "#64748b", "#e2e8f0"),
+    "enrich_error":  ("Enrich Error",  "#ef4444", "#fecaca"),
+    "enriched":      ("Enriched",      "#3b82f6", "#dbeafe"),
+    "scored":        ("Scored <7",     "#f59e0b", "#fef3c7"),
+    "scored_high":   ("Scored 7+",     "#10b981", "#d1fae5"),
+    "tailor_failed": ("Tailor Failed", "#ef4444", "#fecaca"),
+    "tailored":      ("Tailored",      "#14b8a6", "#ccfbf1"),
+    "cover_ready":   ("Cover Ready",   "#06b6d4", "#cffafe"),
+    "needs_human":   ("Needs Human",   "#7c3aed", "#ede9fe"),
+    "applied":       ("Applied",       "#10b981", "#d1fae5"),
+    # Apply category stages
+    "blocked_auth":         ("Auth Barrier",      "#f59e0b", "#fef3c7"),
+    "blocked_technical":    ("Technical Issue",   "#f97316", "#ffedd5"),
+    "archived_ineligible":  ("Ineligible",        "#6b7280", "#e5e7eb"),
+    "non_us_only":          ("Non-US Only",       "#6b7280", "#e5e7eb"),
+    "archived_expired":     ("Expired",           "#6b7280", "#e5e7eb"),
+    "archived_platform":    ("Platform Blocked",  "#ef4444", "#fecaca"),
+    "archived_no_url":      ("No URL",            "#6b7280", "#e5e7eb"),
+    "manual_only":          ("Manual Only",       "#64748b", "#e2e8f0"),
+    # Legacy stages (kept for backward compat until all rows have apply_category)
+    "apply_failed":  ("Apply Failed",  "#ef4444", "#fecaca"),
+    "apply_retry":   ("Retry Apply",   "#f97316", "#ffedd5"),
+    # Tracking stages
+    "track_confirmation": ("Confirmation", "#10b981", "#d1fae5"),
+    "track_rejection":    ("Rejected",     "#ef4444", "#fecaca"),
+    "track_interview":    ("Interview",    "#a855f7", "#f3e8ff"),
+    "track_follow_up":    ("Follow-Up",    "#f59e0b", "#fef3c7"),
+    "track_offer":        ("Offer",        "#14b8a6", "#ccfbf1"),
+    "track_ghosted":      ("Ghosted",      "#64748b", "#e2e8f0"),
+}
 
 def _resolve_applypilot_binary() -> str:
     """Resolve the applypilot executable path for copy/paste dashboard actions."""
@@ -37,9 +69,64 @@ def _resolve_applypilot_binary() -> str:
     return "applypilot"
 
 
-def _build_auto_apply_command(url: str, applypilot_binary: str) -> str:
-    """Build a shell-safe auto-apply command."""
-    return f"{shlex.quote(applypilot_binary)} apply --url {shlex.quote(url)}"
+def _classify_job(row) -> tuple[str, str]:
+    """Classify a job into its pipeline stage and tab.
+
+    Uses apply_category when available for precise classification of
+    apply outcomes. Falls back to legacy error-based logic for rows
+    that haven't been backfilled yet.
+
+    Returns:
+        (stage, tab) where tab is 'active', 'archive', 'applied', or 'tracking'.
+    """
+    # Check apply_category first (set by mark_result / backfill_categories)
+    category = _safe_get(row, "apply_category")
+
+    if row["apply_status"] == "needs_human":
+        return "needs_human", "active"
+    if row["applied_at"] and row["apply_status"] == "applied":
+        # Jobs with tracking status move to the tracking tab
+        try:
+            tracking_status = row["tracking_status"]
+        except (IndexError, KeyError):
+            tracking_status = None
+        if tracking_status:
+            stage = f"track_{tracking_status}"
+            if stage in STAGE_META:
+                return stage, "tracking"
+            return "applied", "tracking"
+        return "applied", "applied"
+
+    # Use category-based classification for apply outcomes
+    if category:
+        if category in _ARCHIVED_CATEGORIES:
+            return category, "archive"
+        if category in _BLOCKED_CATEGORIES:
+            return category, "active"
+        if category == "manual_only":
+            return "manual_only", "archive"
+
+    # Eligibility gate: non-US-only roles are terminal-archived by the
+    # scorer — never show them as actionable, regardless of fit_score.
+    if _safe_get(row, "eligibility") == "non_us_only":
+        return "non_us_only", "archive"
+
+    # Pre-apply pipeline stages (no category set)
+    if row["cover_letter_path"] and not row["apply_error"]:
+        return "cover_ready", "active"
+    if row["tailored_resume_path"] and not row["apply_error"]:
+        return "tailored", "active"
+    if (row["tailor_attempts"] or 0) >= 5 and not row["tailored_resume_path"]:
+        return "tailor_failed", "archive"
+    if row["fit_score"] is not None:
+        if row["fit_score"] >= 7:
+            return "scored_high", "active"
+        return "scored", "archive"
+    if row["detail_error"]:
+        return "enrich_error", "archive"
+    if row["full_description"]:
+        return "enriched", "active"
+    return "discovered", "active"
 
 
 def _build_force_tailor_command(url: str, applypilot_binary: str) -> str:
@@ -102,7 +189,15 @@ def generate_dashboard(output_path: str | None = None) -> str:
                full_description, application_url, detail_error,
                tailored_resume_path,
                fit_score, score_reasoning,
-               applied_at, apply_status, apply_error, last_attempted_at
+               tailored_resume_path, tailored_at, tailor_attempts,
+               cover_letter_path, cover_letter_at,
+               applied_at, apply_status, apply_error, apply_attempts,
+               apply_duration_ms, agent_id, last_attempted_at,
+               discovered_at, detail_scraped_at, scored_at,
+               company, tracking_status, tracking_updated_at,
+               tracking_doc_path, last_email_at, next_action, next_action_due,
+               needs_human_reason, needs_human_url, needs_human_instructions,
+               apply_category, eligibility
         FROM jobs
         WHERE fit_score >= 5
         ORDER BY fit_score DESC, site, title

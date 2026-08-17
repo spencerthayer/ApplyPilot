@@ -1,416 +1,196 @@
-"""Greenhouse ATS discovery: fetches jobs from Greenhouse Job Board API.
+"""Greenhouse ATS direct API scraper.
 
-Greenhouse is used by ~60% of AI/ML startups (OpenAI, Anthropic, Scale AI, etc.).
-Uses the official public Job Board API: https://boards-api.greenhouse.io/v1/boards/{token}/jobs
+Scrapes Greenhouse-powered career sites (Temporal, Pulumi, Anduril, Stripe,
+Databricks, etc.) via the public board API. Zero LLM, zero browser — pure HTTP.
+
+Board API: https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true
+
+Company slugs are configured in config/greenhouse_employers.yaml.
 """
 
+from __future__ import annotations
+
+import json
 import logging
 import re
 import sqlite3
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+import urllib.error
+import urllib.request
+from html.parser import HTMLParser
 
-import httpx
 import yaml
 
 from applypilot import config
-from applypilot.config import APP_DIR, CONFIG_DIR
-from applypilot.database import get_connection
+from applypilot.config import CONFIG_DIR
 
 log = logging.getLogger(__name__)
 
-# Greenhouse Job Board API endpoint
-GREENHOUSE_API_BASE = "https://boards-api.greenhouse.io/v1/boards"
+
+GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
+_HEADERS = {
+    "User-Agent": "ApplyPilot/1.0 (job-discovery)",
+    "Accept": "application/json",
+}
 
 
-def _exception_summary(exc: Exception) -> str:
-    """Return a minimal exception summary safe for logs."""
-    if isinstance(exc, httpx.HTTPStatusError):
-        return f"{exc.__class__.__name__}(status={exc.response.status_code})"
-    return exc.__class__.__name__
-
-
-def _validate_employer_registry(data: dict, source: str) -> dict:
-    """Validate the parsed Greenhouse registry shape."""
-    if not isinstance(data, dict):
-        raise ValueError(f"Invalid Greenhouse config at {source}: expected a mapping at the top level.")
-
-    extra_keys = sorted(key for key in data.keys() if key != "employers")
-    if extra_keys:
-        joined = ", ".join(extra_keys[:5])
-        raise ValueError(
-            f"Invalid Greenhouse config at {source}: unexpected top-level keys outside 'employers' ({joined})."
-        )
-
-    employers = data.get("employers")
-    if not isinstance(employers, dict):
-        raise ValueError(f"Invalid Greenhouse config at {source}: 'employers' must be a mapping.")
-
-    for employer_key, employer in employers.items():
-        if not isinstance(employer, dict):
-            raise ValueError(
-                f"Invalid Greenhouse config at {source}: employer '{employer_key}' must map to an object."
-            )
-        if not str(employer.get("name", "")).strip():
-            raise ValueError(
-                f"Invalid Greenhouse config at {source}: employer '{employer_key}' is missing a non-empty name."
-            )
-
-    return employers
-
+# ── Employer registry ─────────────────────────────────────────────────
 
 def load_employers() -> dict:
-    """Load Greenhouse employer registry.
-
-    Tries user config first (~/.applypilot/greenhouse.yaml),
-    falls back to package config.
-    """
-    # Try user config
-    user_path = APP_DIR / "greenhouse.yaml"
-    if user_path.exists():
-        log.info("Loading user Greenhouse config from %s", user_path)
-        data = yaml.safe_load(user_path.read_text(encoding="utf-8"))
-        return _validate_employer_registry(data or {}, str(user_path))
-
-    # Fall back to package config
-    package_path = CONFIG_DIR / "greenhouse.yaml"
-    if not package_path.exists():
-        log.warning("greenhouse.yaml not found at %s", package_path)
+    """Load Greenhouse employer registry from config/greenhouse_employers.yaml."""
+    path = CONFIG_DIR / "greenhouse_employers.yaml"
+    if not path.exists():
+        log.warning("greenhouse_employers.yaml not found at %s", path)
         return {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return data.get("employers", {})
 
-    data = yaml.safe_load(package_path.read_text(encoding="utf-8"))
-    return _validate_employer_registry(data or {}, str(package_path))
 
+# ── HTML strip helper ─────────────────────────────────────────────────
+
+class _HTMLStripper(HTMLParser):
+    """Strip HTML tags, preserve text content and line breaks."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+        self._skip = False
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag in ("script", "style"):
+            self._skip = True
+        elif tag in ("p", "br", "li", "div", "tr", "h1", "h2", "h3", "h4"):
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in ("script", "style"):
+            self._skip = False
+
+    def handle_data(self, data: str) -> None:
+        if not self._skip and data.strip():
+            self.parts.append(data)
+
+    def text(self) -> str:
+        raw = "".join(self.parts)
+        # Collapse whitespace
+        raw = re.sub(r"[ \t]+", " ", raw)
+        raw = re.sub(r"\n{3,}", "\n\n", raw)
+        return raw.strip()
+
+
+def _strip_html(html: str) -> str:
+    if not html:
+        return ""
+    s = _HTMLStripper()
+    try:
+        s.feed(html)
+    except Exception:
+        return html  # fallback: return raw
+    return s.text()
+
+
+# ── Location filter ───────────────────────────────────────────────────
 
 def _load_location_filter(search_cfg: dict | None = None):
-    """Load location accept/reject lists from search config."""
     if search_cfg is None:
         search_cfg = config.load_search_config()
+    loc = search_cfg.get("location", {}) or {}
+    accept = loc.get("accept_patterns", []) or []
+    return accept
 
-    accept = search_cfg.get("location_accept", [])
-    reject = search_cfg.get("location_reject_non_remote", [])
-    return accept, reject
 
+def _location_ok(location: str | None, accept: list[str]) -> bool:
+    """Return True if location passes the user's filter.
 
-def _location_ok(location: str | None, accept: list[str], reject: list[str]) -> bool:
-    """Check if a job location passes the user's location filter."""
+    Remote is always accepted. Otherwise location must contain one of the
+    accept patterns (case-insensitive).
+    """
     if not location:
+        # Empty location — let it through (some Greenhouse jobs omit location).
         return True
-
     loc = location.lower()
-
-    if any(r in loc for r in ("remote", "anywhere", "work from home", "wfh", "distributed")):
+    if any(r in loc for r in ("remote", "anywhere", "work from home", "wfh")):
         return True
-
-    for r in reject:
-        if r.lower() in loc:
-            return False
-
-    for a in accept:
-        if a.lower() in loc:
-            return True
-
-    return False
-
-
-def _title_matches_query(title: str, query: str) -> bool:
-    """Check if job title matches search query (simple keyword matching)."""
-    if not query:
+    if not accept:
         return True
-
-    title_lower = title.lower()
-    query_terms = query.lower().split()
-
-    # Match if any query term appears in title
-    return any(term in title_lower for term in query_terms)
+    return any(a.lower() in loc for a in accept)
 
 
-def _strip_html(html_content: str) -> str:
-    """Strip HTML tags from content to get plain text."""
-    if not html_content:
-        return ""
+# ── HTTP fetch ────────────────────────────────────────────────────────
 
-    # Simple regex to remove HTML tags
-    text = re.sub(r"<[^>]+>", "", html_content)
-    # Normalize whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+def _fetch_json(url: str, timeout: float = 20.0) -> dict:
+    req = urllib.request.Request(url, headers=_HEADERS)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
-def fetch_jobs_api(board_token: str, content: bool = True) -> dict | None:
-    """Fetch jobs from Greenhouse Job Board API.
+# ── Per-employer scrape ───────────────────────────────────────────────
 
-    Args:
-        board_token: The company slug (e.g., "stripe", "robinhood")
-        content: If True, include full job description in response
+def scrape_one_employer(
+    slug: str,
+    emp: dict,
+    accept_locs: list[str],
+    max_retries: int = 2,
+) -> tuple[list[dict], str | None]:
+    """Fetch all jobs from one Greenhouse board.
 
-    Returns:
-        API response dict with "jobs" and "meta" keys, or None on error
+    Returns (jobs, error) — jobs is a list of normalized dicts, error is
+    non-None if the fetch failed.
     """
-    url = f"{GREENHOUSE_API_BASE}/{board_token}/jobs"
-    params = {"content": "true"} if content else {}
+    from applypilot.discovery.ats_common import fetch_with_retry
+    url = GREENHOUSE_API.format(slug=slug) + "?content=true"
+    data, err = fetch_with_retry(url, max_retries=max_retries)
+    if err:
+        return [], err
+    jobs_raw = (data or {}).get("jobs", [])
+    name = emp.get("name", slug)
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-    }
-
-    try:
-        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-            resp = client.get(url, headers=headers, params=params)
-
-            if resp.status_code == 404:
-                log.debug("Greenhouse board not found")
-                return None
-            elif resp.status_code == 429:
-                log.warning("Greenhouse API rate limited; retrying")
-                time.sleep(2)
-                resp = client.get(url, headers=headers, params=params)
-                resp.raise_for_status()
-            else:
-                resp.raise_for_status()
-
-            return resp.json()
-
-    except httpx.HTTPStatusError as e:
-        log.warning("Greenhouse API HTTP error (%s)", _exception_summary(e))
-        return None
-    except Exception as e:
-        log.warning("Greenhouse fetch failed (%s)", _exception_summary(e))
-        return None
-
-
-def parse_api_response(data: dict, company_name: str, query: str = "") -> list[dict]:
-    """Parse job listings from Greenhouse API response.
-
-    Args:
-        data: API response dict with "jobs" key
-        company_name: Display name of the company
-        query: Optional query string to filter jobs
-
-    Returns:
-        List of job dicts with standardized fields
-    """
-    jobs = []
-    job_list = data.get("jobs", [])
-
-    for job_data in job_list:
-        try:
-            title = job_data.get("title", "")
-            if not title:
-                continue
-
-            # Filter by query
-            if query and not _title_matches_query(title, query):
-                continue
-
-            # Extract location
-            location_obj = job_data.get("location", {})
-            location = location_obj.get("name", "") if isinstance(location_obj, dict) else str(location_obj)
-
-            # Extract department
-            departments = job_data.get("departments", [])
-            department = departments[0].get("name", "") if departments else ""
-
-            # Extract offices
-            offices = job_data.get("offices", [])
-            office_names = [office.get("name", "") for office in offices if office.get("name")]
-
-            # Get full description and strip HTML
-            html_content = job_data.get("content", "")
-            description = _strip_html(html_content)
-
-            # Build job dict
-            job = {
-                "title": title,
-                "company": company_name,
-                "location": location,
-                "department": department,
-                "offices": office_names,
-                "url": job_data.get("absolute_url", ""),
-                "strategy": "greenhouse",
-                # New fields from API
-                "job_id": job_data.get("id"),
-                "internal_job_id": job_data.get("internal_job_id"),
-                "description": description,
-                "updated_at": job_data.get("updated_at"),
-            }
-
-            jobs.append(job)
-
-        except Exception:
-            log.debug("Skipping malformed Greenhouse job payload")
+    out = []
+    for job in jobs_raw:
+        location_name = (job.get("location") or {}).get("name") or ""
+        if not _location_ok(location_name, accept_locs):
             continue
 
-    return jobs
+        abs_url = job.get("absolute_url")
+        if not abs_url:
+            continue
+
+        content_html = job.get("content") or ""
+        # Greenhouse sometimes returns HTML-entity-encoded content
+        content_html = content_html.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+        description = _strip_html(content_html)
+
+        # Greenhouse returns `updated_at` + `first_published`. Prefer the
+        # earlier posting date when available.
+        posted_at = job.get("first_published") or job.get("updated_at") or None
+
+        out.append({
+            "url": abs_url,
+            "title": job.get("title") or "",
+            "location": location_name or None,
+            "description": description[:500] if description else None,
+            "full_description": description if len(description) > 200 else None,
+            "application_url": abs_url,
+            "employer_name": name,
+            "employer_slug": slug,
+            "posted_at": posted_at,
+        })
+
+    return out, None
 
 
-def search_employer(
-    employer_key: str,
-    employer: dict,
-    search_text: str,
-    location_filter: bool = True,
-    accept_locs: list[str] | None = None,
-    reject_locs: list[str] | None = None,
-) -> list[dict]:
-    """Search a single Greenhouse employer via API."""
-    log.info("%s: starting Greenhouse search", employer["name"])
+# ── DB insert / driver ────────────────────────────────────────────────
+# Both sit in ats_common now; thin shims kept here for any external
+# imports (existing tests reference greenhouse._insert_jobs by name).
 
-    # Fetch from API
-    api_data = fetch_jobs_api(employer_key, content=True)
-    if not api_data:
-        return []
-
-    jobs = parse_api_response(api_data, employer["name"], search_text)
-
-    # Apply location filter
-    if location_filter and (accept_locs or reject_locs):
-        filtered = []
-        for job in jobs:
-            if _location_ok(job.get("location"), accept_locs or [], reject_locs or []):
-                filtered.append(job)
-        jobs = filtered
-
-    log.info("%s: Greenhouse search complete", employer["name"])
-    return jobs
+def _insert_jobs(conn: sqlite3.Connection, jobs: list[dict]) -> tuple[int, int]:
+    from applypilot.discovery.ats_common import insert_normalized_jobs
+    return insert_normalized_jobs(conn, jobs, "Greenhouse", "greenhouse_api")
 
 
-def search_all(
-    search_text: str,
-    workers: int = 4,
-    location_filter: bool = True,
-    _employers_override: dict | None = None,
-) -> tuple[int, int]:
-    """Search all configured Greenhouse employers via API.
-
-    Returns (new_jobs_count, existing_jobs_count).
-    """
-    employers = _employers_override if _employers_override else load_employers()
-    if not employers:
-        log.warning("No Greenhouse employers configured")
-        return 0, 0
-
-    accept_locs, reject_locs = _load_location_filter()
-
-    log.info("Greenhouse API search starting")
-
-    all_jobs = []
-    errors = 0
-
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {
-            executor.submit(
-                search_employer,
-                key,
-                emp,
-                search_text,
-                location_filter,
-                accept_locs,
-                reject_locs,
-            ): key
-            for key, emp in employers.items()
-        }
-
-        for future in as_completed(futures):
-            key = futures[future]
-            try:
-                jobs = future.result()
-                all_jobs.extend(jobs)
-            except Exception as e:
-                log.error("Greenhouse employer search failed for %s (%s)", key, _exception_summary(e))
-                errors += 1
-
-    log.info("Greenhouse API search complete")
-
-    # Store in database
-    return _store_jobs(all_jobs)
-
-
-def _store_jobs(jobs: list[dict]) -> tuple[int, int]:
-    """Store discovered jobs in the database. Returns (new, existing)."""
-    conn = get_connection()
-    now = datetime.now(timezone.utc).isoformat()
-    new = 0
-    existing = 0
-
-    for job in jobs:
-        try:
-            conn.execute(
-                "INSERT INTO jobs (url, title, salary, description, location, site, strategy, "
-                "discovered_at, full_description, application_url, detail_scraped_at, detail_error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    job["url"],
-                    job["title"],
-                    None,  # salary not provided by API
-                    job.get("description", ""),  # Now we have full description!
-                    job.get("location", ""),
-                    job["company"],
-                    "greenhouse",
-                    now,
-                    job.get("description"),  # full_description
-                    job["url"],  # application_url
-                    now,  # detail_scraped_at (we got it from API)
-                    None,
-                ),
-            )
-            new += 1
-        except sqlite3.IntegrityError:
-            existing += 1
-
-    conn.commit()
-    return new, existing
-
-
-def run_all_searches(
-    searches: list[dict],
-    workers: int = 4,
-) -> dict:
-    """Run multiple search queries across all Greenhouse employers.
-
-    Args:
-        searches: List of search configs with 'query' key
-        workers: Number of parallel threads
-
-    Returns:
-        Dict with total new/existing counts and per-query breakdown
-    """
-    total_new = 0
-    total_existing = 0
-    per_query = []
-
-    for search in searches:
-        query = search.get("query", "")
-        log.info("Running Greenhouse API query")
-
-        new, existing = search_all(query, workers=workers)
-        total_new += new
-        total_existing += existing
-
-        per_query.append(
-            {
-                "query": query,
-                "new": new,
-                "existing": existing,
-            }
-        )
-
-    return {
-        "total_new": total_new,
-        "total_existing": total_existing,
-        "per_query": per_query,
-    }
-
-
-# Legacy functions for backward compatibility (deprecated)
-def fetch_greenhouse_board(company_slug: str) -> str | None:
-    """DEPRECATED: Use fetch_jobs_api() instead."""
-    log.warning("fetch_greenhouse_board() is deprecated, use fetch_jobs_api()")
-    return None
-
-
-def parse_greenhouse_jobs(html: str, company_name: str, query: str = "") -> list[dict]:
-    """DEPRECATED: Use parse_api_response() instead."""
-    log.warning("parse_greenhouse_jobs() is deprecated, use parse_api_response()")
-    return []
+def run_greenhouse_discovery(employers: dict | None = None, workers: int = 1) -> dict:
+    """Discover jobs from Greenhouse-powered career sites."""
+    from applypilot.discovery.ats_common import run_ats_crawl
+    if employers is None:
+        employers = load_employers()
+    return run_ats_crawl("Greenhouse", "Greenhouse", "greenhouse_api",
+                         employers, scrape_one_employer)

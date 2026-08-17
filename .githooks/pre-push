@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Mirror the GitHub Actions CI gate locally so lint/test failures are caught
+# before they reach the remote. Bypass with `git push --no-verify` if needed.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+# Prefer the project venv tools; fall back to whatever is on PATH.
+if [ -x ".venv/bin/ruff" ]; then RUFF=".venv/bin/ruff"; else RUFF="ruff"; fi
+if [ -x ".venv/bin/pytest" ]; then PYTEST=".venv/bin/pytest"; else PYTEST="pytest"; fi
+
+echo "pre-push: ruff check src/"
+"$RUFF" check src/
+
+echo "pre-push: pytest tests/"
+"$PYTEST" tests/ -q
+
+echo "pre-push: OK"

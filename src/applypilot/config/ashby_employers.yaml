@@ -1,0 +1,65 @@
+# Ashby ATS direct-API employer registry.
+#
+# Slugs are the tenant part of the public Ashby URL —
+# https://jobs.ashbyhq.com/{slug} or
+# https://api.ashbyhq.com/posting-api/job-board/{slug}.
+#
+# Verified 2026-04-26 by probing the posting-api endpoint
+# (200 = valid, 404 = wrong slug or no public board).
+#
+# To add an employer:
+#   1. Find their Ashby board URL (jobs.ashbyhq.com/{slug}).
+#   2. curl -sIo /dev/null -w '%{http_code}\n' \
+#         https://api.ashbyhq.com/posting-api/job-board/{slug}
+#      Should be 200.
+#   3. Add an entry below.
+
+employers:
+  motherduck:
+    name: "MotherDuck"
+    neighborhood: "Remote / SF"
+    tier: 2
+  statsig:
+    name: "Statsig"
+    neighborhood: "Downtown Seattle"
+    tier: 2
+  deepgram:
+    name: "Deepgram"
+    neighborhood: "Remote"
+    tier: 2
+  commonroom:
+    name: "Common Room"
+    neighborhood: "Downtown Seattle"
+    tier: 2
+  clarify:
+    name: "Clarify"
+    neighborhood: "Remote"
+    tier: 2
+  posthog:
+    name: "PostHog"
+    neighborhood: "Remote"
+    tier: 2
+  vercel:
+    name: "Vercel"
+    neighborhood: "Remote"
+    tier: 2
+  openai:
+    name: "OpenAI"
+    neighborhood: "SF / Remote"
+    tier: 1
+  linear:
+    name: "Linear"
+    neighborhood: "Remote"
+    tier: 2
+  notion:
+    name: "Notion"
+    neighborhood: "SF / Remote"
+    tier: 2
+  ramp:
+    name: "Ramp"
+    neighborhood: "NY / Remote"
+    tier: 2
+  ashby:
+    name: "Ashby"
+    neighborhood: "Remote"
+    tier: 2

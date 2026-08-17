@@ -26,14 +26,16 @@ dependencies = [
     "tenacity>=8.2",
     "beautifulsoup4>=4.12",
     "playwright>=1.40",
-    "python-dotenv>=1.0",
+    "patchright>=1.50",
+    "python-dotenv>=1.2.2",  # CVE-2026-28684
     "pyyaml>=6.0",
     "pandas>=2.0",
     "mcp>=1.9",
     "python-jobspy>=1.1",
     "markdownify>=0.14.1",
     "websocket-client>=1.0",
-    "transitions>=0.9",
+    "python-docx>=1.1",
+    "pypdf>=6.13.3",  # CVE-2026-48156/48155/48735/49461/49460/54531/54530 + GHSA-jm82-fx9c-mx94
     ]
 
 [project.optional-dependencies]

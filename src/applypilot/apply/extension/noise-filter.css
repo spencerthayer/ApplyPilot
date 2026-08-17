@@ -1,0 +1,58 @@
+/* Hide analytics / tracking iframes from the page so the apply agent's
+ * browser_snapshot a11y tree is smaller and cleaner.
+ *
+ * What we hide:
+ *   * Pure analytics + ad pixels (Google Tag Manager, GA, doubleclick,
+ *     Hotjar, Bing UET, Facebook Pixel, Cloudflare Insights, Mixpanel).
+ *   * Social embeds that never carry form content (twitter / fb /
+ *     instagram / tiktok / pinterest widgets).
+ *
+ * What we DO NOT hide:
+ *   * reCAPTCHA / hCaptcha / Cloudflare Turnstile iframes — the apply
+ *     prompt's CAPTCHA DETECT step queries those exact iframe[src=*"…"]
+ *     selectors via querySelector, and the agent has to know when one is
+ *     present in order to invoke CapSolver.
+ *   * The form-bearing ATS iframes (greenhouse / lever / etc.) — those
+ *     are addressed by prompt step 1b which navigates to them directly.
+ *
+ * Use display:none rather than visibility:hidden so the elements are
+ * excluded from Chrome's accessibility tree (Playwright's snapshot reads
+ * from the a11y tree, not the layout tree).
+ */
+iframe[src*="googletagmanager.com"],
+iframe[src*="google-analytics.com"],
+iframe[src*="analytics.google.com"],
+iframe[src*="googletagservices.com"],
+iframe[src*="googleadservices.com"],
+iframe[src*="googlesyndication.com"],
+iframe[src*="doubleclick.net"],
+iframe[src*="hotjar.com"],
+iframe[src*="static.hotjar.com"],
+iframe[src*="bat.bing.com"],
+iframe[src*="connect.facebook.net"],
+iframe[src*="facebook.com/tr"],
+iframe[src*="li.lms-analytics"],
+iframe[src*="px.ads.linkedin.com"],
+iframe[src*="cloudflareinsights.com"],
+iframe[src*="static.cloudflareinsights.com"],
+iframe[src*="cdn.mxpnl.com"],
+iframe[src*="api.mixpanel.com"],
+iframe[src*="cdn.segment.com"],
+iframe[src*="cdn.amplitude.com"],
+iframe[src*="ct.pinterest.com"],
+iframe[src*="analytics.tiktok.com"],
+iframe[src*="platform.twitter.com"],
+iframe[src*="syndication.twitter.com"],
+iframe[src*="platform.x.com"],
+iframe[src*="instagram.com/embed"],
+iframe[src*="youtube.com/embed"],
+iframe[src*="vimeo.com/video"],
+iframe[src*="player.vimeo.com"],
+iframe[src*="js.intercomcdn.com"],
+iframe[src*="widget.intercom.io"],
+iframe[src*="js.driftt.com"],
+iframe[src*="getdrift.com/embed"],
+iframe[src*="js.zi-scripts.com"]
+{
+  display: none !important;
+}

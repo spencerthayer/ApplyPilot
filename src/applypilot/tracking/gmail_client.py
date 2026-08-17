@@ -20,10 +20,6 @@ log = logging.getLogger(__name__)
 GMAIL_MCP_DIR = Path.home() / ".gmail-mcp"
 OAUTH_KEYS_PATH = GMAIL_MCP_DIR / "gcp-oauth.keys.json"
 
-# The To: header shows the alias address. Gmail's `to:` operator
-# matches on the header, so we filter by the alias directly.
-RECIPIENT = "alex@elninja.com"
-
 
 def check_gmail_setup() -> tuple[bool, str]:
     """Verify Gmail MCP prerequisites are in place.
@@ -57,7 +53,9 @@ async def _create_mcp_client():
 
     server_params = StdioServerParameters(
         command="npx",
-        args=["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
+        # Pinned: holds Gmail OAuth tokens; bump only after verifying the
+        # release (age + tarball diff). See launcher._gmail_mcp pin note.
+        args=["-y", "@gongrzhe/server-gmail-autoauth-mcp@1.1.11"],
         env={
             **os.environ,
             "GMAIL_MCP_DIR": str(GMAIL_MCP_DIR),
