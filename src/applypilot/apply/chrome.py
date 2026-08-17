@@ -4,8 +4,6 @@ Handles launching an isolated Chrome instance with remote debugging,
 worker profile setup/cloning, and cross-platform process cleanup.
 """
 
-from __future__ import annotations
-
 import glob as _glob
 import json
 import logging
@@ -16,29 +14,12 @@ import shutil
 import subprocess
 import threading
 import time
-import types
 import urllib.request as _ureq
 from pathlib import Path
 
 from applypilot import config
 
 logger = logging.getLogger(__name__)
-
-try:
-    import websocket as _websocket  # type: ignore[import-not-found]
-except ModuleNotFoundError:  # pragma: no cover - exercised only when optional dep is absent
-    class _MissingWebSocket:
-        def __init__(self, *args, **kwargs) -> None:
-            raise ModuleNotFoundError(
-                "websocket-client is required for CDP foreground control. "
-                "Install optional ApplyPilot dependencies first."
-            )
-
-    _websocket = types.SimpleNamespace(WebSocket=_MissingWebSocket)
-    import sys as _sys
-
-    _sys.modules.setdefault("websocket", _websocket)
-
 
 def _get_or_create_extension_key() -> str:
     """Return the base64-encoded RSA public key used as manifest.json `key`.
@@ -259,7 +240,7 @@ def _applypilot_ext_id() -> str:
     return _compute_extension_id(_get_or_create_extension_key())
 
 
-# --- Port table (audit #11 — centralize all port literals here) -----
+# --- Port table (audit #11 — centralize all port literals here) -------------
 # CDP port base — each worker uses BASE_CDP_PORT + worker_id
 BASE_CDP_PORT = 9222
 
@@ -1098,7 +1079,8 @@ def bring_to_foreground_cdp(cdp_port: int) -> bool:
         return False
 
     try:
-        ws = _websocket.WebSocket()
+        import websocket  # websocket-client
+        ws = websocket.WebSocket()
         ws.connect(ws_url, timeout=3, origin="http://localhost")
         ws.send(json.dumps({"id": 1, "method": "Page.bringToFront"}))
         ws.recv()
@@ -1235,14 +1217,13 @@ def bring_to_foreground_pid(pid: int) -> None:
         return
     try:
         if platform.system() == "Darwin":
-            result = subprocess.run(
+            subprocess.run(
                 ["osascript", "-e",
                  f'tell application "System Events" to set frontmost of '
                  f'(first process whose unix id is {pid}) to true'],
                 timeout=3, capture_output=True,
             )
-            if result.returncode == 0:
-                return
+            return
         # xdotool
         result = subprocess.run(
             ["xdotool", "search", "--pid", str(pid), "windowactivate", "--sync"],

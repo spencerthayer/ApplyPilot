@@ -2,14 +2,8 @@
 
 from __future__ import annotations
 
-import json
-import inspect
 import logging
-import os
-from datetime import datetime
-from pathlib import Path
 from typing import Optional
-from importlib import metadata as importlib_metadata
 
 import typer
 from rich.console import Console
@@ -18,85 +12,22 @@ from rich.table import Table
 from applypilot import __version__
 from applypilot import config
 
-
-def _configure_logging() -> None:
-    """Set consistent logging output for CLI runs."""
-    bootstrap_log = logging.getLogger(__name__)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        datefmt="%H:%M:%S",
-    )
-
-    # Keep LiteLLM internals quiet by default; warnings/errors still surface.
-    for name in ("LiteLLM", "litellm"):
-        noisy = logging.getLogger(name)
-        noisy.handlers.clear()
-        noisy.setLevel(logging.WARNING)
-        noisy.propagate = True
-
-    # Route verbose tailor/cover loggers to a file instead of the terminal.
-    # Per-attempt warnings and validation details are useful for debugging
-    # but too noisy for normal CLI output.
-    from applypilot.config import LOG_DIR
-    _file_fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s", datefmt="%H:%M:%S")
-    try:
-        LOG_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        bootstrap_log.debug("Could not create log directory %s: %s", LOG_DIR, exc)
-        return
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
-    for logger_name in ("applypilot.scoring.tailor", "applypilot.scoring.cover_letter"):
-        file_log = logging.getLogger(logger_name)
-        file_log.propagate = False  # suppress terminal output
-        if any(isinstance(handler, logging.FileHandler) for handler in file_log.handlers):
-            continue
-        log_filename = f"{ts}_tailor.log" if logger_name == "applypilot.scoring.tailor" else "cover_letter.log"
-        delay_open = logger_name == "applypilot.scoring.tailor"
-        try:
-            fh = logging.FileHandler(LOG_DIR / log_filename, encoding="utf-8", delay=delay_open)
-        except OSError as exc:
-            bootstrap_log.debug("Could not open log file for %s: %s", logger_name, exc)
-            file_log.propagate = True
-            continue
-        fh.setFormatter(_file_fmt)
-        file_log.addHandler(fh)
-
-
-_configure_logging()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 app = typer.Typer(
     name="applypilot",
     help="AI-powered end-to-end job application pipeline.",
     no_args_is_help=True,
 )
-resume_app = typer.Typer(help="Manage the canonical JSON Resume artifact.")
-app.add_typer(greenhouse_app, name="greenhouse")
-app.add_typer(resume_app, name="resume")
 console = Console()
 log = logging.getLogger(__name__)
 
 # Valid pipeline stages (in execution order)
 VALID_STAGES = ("discover", "enrich", "score", "tailor", "cover", "pdf")
-
-
-def _jobspy_runtime_capabilities() -> tuple[str | None, list[str], list[str]]:
-    """Return installed python-jobspy version and capability info."""
-    try:
-        import jobspy
-    except ImportError:
-        return None, [], []
-
-    try:
-        version = importlib_metadata.version("python-jobspy")
-    except importlib_metadata.PackageNotFoundError:
-        version = "unknown"
-
-    params = list(inspect.signature(jobspy.scrape_jobs).parameters)
-    expected = ["hours_old", "description_format", "linkedin_fetch_description", "proxies"]
-    missing = [name for name in expected if name not in params]
-    return version, params, missing
 
 
 # ---------------------------------------------------------------------------
@@ -119,82 +50,6 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def _resolve_auto_apply_settings(agent: Optional[str], agent_model: Optional[str]) -> tuple[str, str | None]:
-    """Resolve the selected auto-apply backend and model override."""
-
-    from applypilot.config import AUTO_APPLY_AGENT_CHOICES, resolve_auto_apply_agent
-
-    if agent is not None and agent not in AUTO_APPLY_AGENT_CHOICES:
-        console.print(
-            f"[red]Invalid --agent value:[/red] '{agent}'. "
-            f"Choose from: {', '.join(AUTO_APPLY_AGENT_CHOICES)}"
-        )
-        raise typer.Exit(code=1)
-
-    selection = resolve_auto_apply_agent(preferred=agent)
-    if selection.resolved is None:
-        requested = selection.requested
-        console.print(
-            f"[red]Selected auto-apply agent unavailable:[/red] {requested}\n"
-            "Install Codex CLI and run [bold]codex login[/bold], or install Claude Code CLI."
-        )
-        raise typer.Exit(code=1)
-
-    effective_model = agent_model.strip() if agent_model and agent_model.strip() else selection.model
-    return selection.resolved, effective_model
-
-
-def _resolve_backend_option(
-    agent: Optional[str],
-    backend: Optional[str],
-    agent_model: Optional[str],
-) -> tuple[str, str | None]:
-    """Resolve canonical backend selection, allowing --backend as a strict alias."""
-
-    if agent and backend and agent.strip().lower() != backend.strip().lower():
-        console.print("[red]--agent and --backend must match when both are provided.[/red]")
-        raise typer.Exit(code=1)
-    requested_agent = agent if agent is not None else backend
-    return _resolve_auto_apply_settings(requested_agent, agent_model)
-
-
-def _load_job_for_analysis(url: Optional[str], job_id: Optional[int]) -> dict:
-    """Load a job from the database for the analyze command."""
-
-    from applypilot.database import get_connection
-
-    conn = get_connection()
-    if job_id is not None:
-        row = conn.execute(
-            """
-            SELECT url, title, site, application_url, full_description
-            FROM jobs
-            WHERE id = ?
-            LIMIT 1
-            """,
-            (job_id,),
-        ).fetchone()
-    elif url is not None:
-        like = f"%{url.split('?')[0].rstrip('/')}%"
-        row = conn.execute(
-            """
-            SELECT url, title, site, application_url, full_description
-            FROM jobs
-            WHERE url = ? OR application_url = ? OR url LIKE ? OR application_url LIKE ?
-            LIMIT 1
-            """,
-            (url, url, like, like),
-        ).fetchone()
-    else:
-        raise typer.Exit(code=1)
-
-    if row is None:
-        target = f"id={job_id}" if job_id is not None else url
-        console.print(f"[red]No matching job found:[/red] {target}")
-        raise typer.Exit(code=1)
-    return dict(row)
-
-
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -212,17 +67,11 @@ def main(
 
 
 @app.command()
-def init(
-    resume_json: Optional[Path] = typer.Option(
-        None,
-        "--resume-json",
-        help="Import an existing JSON Resume file during setup.",
-    ),
-) -> None:
+def init() -> None:
     """Run the first-time setup wizard (profile, resume, search config)."""
     from applypilot.wizard.init import run_wizard
 
-    run_wizard(resume_json=resume_json)
+    run_wizard()
 
 
 @app.command()
@@ -255,21 +104,31 @@ def run(
     stream: bool = typer.Option(False, "--stream", help="Run stages concurrently (streaming mode)."),
     doc_format: str = typer.Option("docx", "--doc-format", help="Document format for resumes/cover letters: docx (default) or pdf."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview stages without executing."),
-    validation: str = typer.Option(
-        "normal",
-        "--validation",
-        help=(
-            "Validation strictness for tailor/cover stages. "
-            "strict: banned words = errors, judge must pass. "
-            "normal: banned words = warnings only (default, recommended for Gemini free tier). "
-            "lenient: banned words ignored, LLM judge skipped (fastest, fewest API calls)."
-        ),
+    source: Optional[list[str]] = typer.Option(
+        None, "--source", "-s",
+        help="Discovery source(s) to run. Repeatable: --source hn --source jobspy. "
+             "Aliases: hn=hackernews, smart=smartextract. Only affects the discover stage.",
+    ),
+    list_sources: bool = typer.Option(
+        False, "--list-sources",
+        help="List available discovery sources and exit.",
     ),
 ) -> None:
     """Run pipeline stages: discover, enrich, score, tailor, cover, pdf."""
+    # Handle --list-sources before bootstrap (no DB/env needed)
+    if list_sources:
+        from applypilot.pipeline import DISCOVERY_SOURCES, _SOURCE_ALIASES
+        console.print("\n[bold]Available discovery sources:[/bold]\n")
+        for name, desc in DISCOVERY_SOURCES.items():
+            aliases = [a for a, canon in _SOURCE_ALIASES.items() if canon == name]
+            alias_str = f"  (alias: {', '.join(aliases)})" if aliases else ""
+            console.print(f"  [cyan]{name:<14s}[/cyan] {desc}{alias_str}")
+        console.print("\nUsage: applypilot run discover --source hn --source jobspy")
+        raise typer.Exit()
+
     _bootstrap()
 
-    from applypilot.pipeline import run_pipeline
+    from applypilot.pipeline import run_pipeline, resolve_source_names
 
     stage_list = stages if stages else ["all"]
 
@@ -302,15 +161,6 @@ def run(
     if any(s in stage_list for s in llm_stages) or "all" in stage_list:
         from applypilot.config import check_tier
         check_tier(2, "AI scoring/tailoring")
-
-    # Validate the --validation flag value
-    valid_modes = ("strict", "normal", "lenient")
-    if validation not in valid_modes:
-        console.print(
-            f"[red]Invalid --validation value:[/red] '{validation}'. "
-            f"Choose from: {', '.join(valid_modes)}"
-        )
-        raise typer.Exit(code=1)
 
     result = run_pipeline(
         stages=stage_list,
@@ -353,17 +203,23 @@ def apply(
     doc_format: str = typer.Option("docx", "--doc-format", help="Document format for resumes/cover letters: docx (default) or pdf."),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
     mark_applied: Optional[str] = typer.Option(None, "--mark-applied", help="Manually mark a job URL as applied."),
+    fresh_sessions: bool = typer.Option(False, "--fresh-sessions", help="Refresh Chrome session cookies from your real profile before launching."),
+    no_hitl: bool = typer.Option(False, "--no-hitl", help="Skip HITL waits: park needs_human jobs and move on. Use for overnight runs."),
+    no_focus: bool = typer.Option(False, "--no-focus", help="Prevent Chrome windows from stealing keyboard focus (Linux/GNOME only). Windows stay visible but won't interrupt your active app."),
     mark_failed: Optional[str] = typer.Option(None, "--mark-failed", help="Manually mark a job URL as failed (provide URL)."),
     fail_reason: Optional[str] = typer.Option(None, "--fail-reason", help="Reason for --mark-failed."),
     reset_failed: bool = typer.Option(False, "--reset-failed", help="Reset all failed jobs for retry."),
+    reset_category: Optional[str] = typer.Option(None, "--reset-category", help="Reset all jobs in a category for retry (e.g., blocked_technical)."),
+    sessions: bool = typer.Option(False, "--sessions", help="List saved ATS sessions."),
+    clear_session: Optional[str] = typer.Option(None, "--clear-session", help="Clear a saved ATS session (e.g., workday)."),
 ) -> None:
     """Launch auto-apply to submit job applications."""
     _bootstrap()
 
-    from applypilot.config import check_tier, load_profile
+    from applypilot.config import check_tier, PROFILE_PATH as _profile_path
     from applypilot.database import get_connection
 
-    # --- Utility modes (no Chrome/browser agent needed) ---
+    # --- Utility modes (no Chrome/Claude needed) ---
 
     if mark_applied:
         from applypilot.apply.launcher import mark_job
@@ -383,6 +239,37 @@ def apply(
         console.print(f"[green]Reset {count} failed job(s) for retry.[/green]")
         return
 
+    if reset_category:
+        from applypilot.database import reset_by_category
+        count = reset_by_category(reset_category)
+        console.print(f"[green]Reset {count} job(s) in category '{reset_category}' for retry.[/green]")
+        return
+
+    if sessions:
+        from applypilot.apply.chrome import list_ats_sessions
+        ats_sessions = list_ats_sessions()
+        if not ats_sessions:
+            console.print("[dim]No saved ATS sessions.[/dim]")
+            return
+        from rich.table import Table
+        t = Table(title="Saved ATS Sessions", show_header=True, header_style="bold cyan")
+        t.add_column("ATS")
+        t.add_column("Cookies")
+        t.add_column("Age")
+        for s in ats_sessions:
+            age_str = f"{s['age_hours']:.1f}h" if s["age_hours"] is not None else "n/a"
+            t.add_row(s["slug"], "yes" if s["has_cookies"] else "no", age_str)
+        console.print(t)
+        return
+
+    if clear_session:
+        from applypilot.apply.chrome import clear_ats_session
+        if clear_ats_session(clear_session):
+            console.print(f"[green]Cleared ATS session: {clear_session}[/green]")
+        else:
+            console.print(f"[yellow]No session found for: {clear_session}[/yellow]")
+        return
+
     # --- Full apply mode ---
 
     # Validate --doc-format
@@ -397,23 +284,14 @@ def apply(
 
     # Check 1: Tier 3 required (Claude Code CLI + Chrome)
     check_tier(3, "auto-apply")
-    resolved_agent, resolved_model = _resolve_backend_option(agent, backend, agent_model)
 
-    # Check 2: Profile exists or can be repaired from canonical resume.json.
-    try:
-        load_profile()
-    except FileNotFoundError:
+    # Check 2: Profile exists
+    if not _profile_path.exists():
         console.print(
             "[red]Profile not found.[/red]\n"
             "Run [bold]applypilot init[/bold] to create your profile first."
         )
         raise typer.Exit(code=1)
-    except ResumeJsonError as exc:
-        console.print(f"[red]Profile load failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
-    except ValueError as exc:
-        console.print(f"[red]Profile load failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
 
     # Check 3: Tailored resumes exist (skip for --gen with --url)
     if not (gen and url):
@@ -429,43 +307,37 @@ def apply(
             raise typer.Exit(code=1)
 
     if gen:
-        from applypilot.apply.agent_backends import build_manual_command
         from applypilot.apply.launcher import gen_prompt
         target = url or ""
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
             raise typer.Exit(code=1)
-        prompt_file = gen_prompt(target, min_score=min_score, model=resolved_model)
+        prompt_file = gen_prompt(target, min_score=min_score, max_score=max_score, model=model)
         if not prompt_file:
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
+        mcp_path = _profile_path.parent / ".mcp-apply-0.json"
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
         console.print("\n[bold]Run manually:[/bold]")
-        console.print(f"  {build_manual_command(resolved_agent, prompt_file, 0, resolved_model)}")
+        console.print(
+            f"  claude --model {model} -p "
+            f"--mcp-config {mcp_path} "
+            f"--permission-mode bypassPermissions < {prompt_file}"
+        )
         return
 
     from applypilot.apply.launcher import main as apply_main
 
-    if limit is not None and limit < 0:
-        console.print("[red]--limit must be 0 or greater.[/red]")
-        raise typer.Exit(code=1)
+    effective_limit = limit if limit is not None else 0
 
-    effective_limit = None if continuous or limit in (None, 0) else limit
-    limit_label = "unlimited" if continuous else ("all available" if effective_limit is None else effective_limit)
-
-    console.print(
-        "[yellow]Security: Auto-apply runs with --permission-mode bypassPermissions. "
-        "Review generated prompts before use.[/yellow]"
-    )
     console.print("\n[bold blue]Launching Auto-Apply[/bold blue]")
-    console.print(f"  Limit:    {limit_label}")
+    console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
     console.print(f"  Workers:  {workers}")
-    console.print(f"  Agent:    {resolved_agent}")
-    console.print(f"  Model:    {resolved_model or '(default)'}")
-    if opencode_agent:
-        console.print(f"  OpenCode: {opencode_agent}")
+    console.print(f"  Model:    {model}")
     console.print(f"  Headless: {headless}")
     console.print(f"  Dry run:  {dry_run}")
+    if fresh_sessions:
+        console.print("  Sessions: [yellow]refreshing from real Chrome profile[/yellow]")
     if url:
         console.print(f"  Target:   {url}")
     console.print()
@@ -477,165 +349,13 @@ def apply(
         max_age_days=max_age_days,
         max_score=max_score,
         headless=headless,
-        agent=resolved_agent,
-        model=resolved_model,
-        opencode_agent=opencode_agent,
+        model=model,
         dry_run=dry_run,
         continuous=continuous,
         workers=workers,
-    )
-
-
-@app.command("tailor")
-def tailor_cmd(
-    url: Optional[str] = typer.Option(None, "--url", help="Tailor resume for a specific job URL."),
-    min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for tailoring."),
-    limit: int = typer.Option(0, "--limit", "-l", help="Max jobs to process when --url is not provided."),
-    force: bool = typer.Option(False, "--force", help="Regenerate even if a tailored resume already exists."),
-    validation: str = typer.Option(
-        "normal",
-        "--validation",
-        help=(
-            "Validation strictness: strict, normal, lenient. "
-            "Use normal unless you specifically want stricter/faster behavior."
-        ),
-    ),
-) -> None:
-    """Generate tailored resume artifacts."""
-    _bootstrap()
-
-    from applypilot.config import check_tier
-    from applypilot.scoring.tailor import run_tailoring
-
-    valid_modes = ("strict", "normal", "lenient")
-    if validation not in valid_modes:
-        console.print(
-            f"[red]Invalid --validation value:[/red] '{validation}'. "
-            f"Choose from: {', '.join(valid_modes)}"
-        )
-        raise typer.Exit(code=1)
-
-    check_tier(2, "resume tailoring")
-
-    result = run_tailoring(
-        min_score=min_score,
-        limit=limit,
-        validation_mode=validation,
-        target_url=url,
-        force=force,
-    )
-    console.print(
-        "[green]Tailoring finished:[/green] "
-        f"{result.get('approved', 0)} approved, "
-        f"{result.get('failed', 0)} failed, "
-        f"{result.get('errors', 0)} errors."
-    )
-
-
-@app.command()
-def analyze(
-    url: Optional[str] = typer.Option(None, "--url", help="Analyze a job already stored in the database by URL."),
-    job_id: Optional[int] = typer.Option(None, "--job-id", help="Analyze a job already stored in the database by row id."),
-    text_file: Optional[Path] = typer.Option(None, "--text-file", help="Analyze a job description from a local text file."),
-    resume_file: Optional[Path] = typer.Option(None, "--resume-file", help="Override the resume text used for match analysis."),
-) -> None:
-    """Analyze a job description and optional resume match."""
-    _bootstrap()
-
-    provided_sources = sum(1 for value in (url, job_id, text_file) if value is not None)
-    if provided_sources != 1:
-        console.print("[red]Provide exactly one of --url, --job-id, or --text-file.[/red]")
-        raise typer.Exit(code=1)
-
-    if text_file is not None:
-        if not text_file.exists():
-            console.print(f"[red]File not found:[/red] {text_file}")
-            raise typer.Exit(code=1)
-        job = {
-            "title": text_file.stem.replace("_", " "),
-            "company": "Unknown",
-            "description": text_file.read_text(encoding="utf-8"),
-        }
-    else:
-        row = _load_job_for_analysis(url, job_id)
-        description = row.get("full_description") or ""
-        if not description.strip():
-            console.print("[red]Job has no full_description yet. Run `applypilot run enrich` first.[/red]")
-            raise typer.Exit(code=1)
-        job = {
-            "title": row.get("title") or "Unknown",
-            "company": row.get("site") or "Unknown",
-            "description": description,
-        }
-
-    from applypilot.intelligence.jd_parser import JobDescriptionParser
-    from applypilot.intelligence.resume_matcher import ResumeMatcher
-
-    parser = JobDescriptionParser()
-    job_intel = parser.parse(job)
-    analysis_output = {
-        "title": job_intel.title,
-        "company": job_intel.company,
-        "seniority": job_intel.seniority.value,
-        "requirements": [req.__dict__ for req in job_intel.requirements],
-        "skills": [skill.__dict__ for skill in job_intel.skills],
-        "key_responsibilities": job_intel.key_responsibilities,
-        "red_flags": job_intel.red_flags,
-        "company_context": job_intel.company_context,
-    }
-
-    try:
-        resume_text = load_resume_text(resume_file)
-    except FileNotFoundError:
-        resume_text = None
-    except ResumeJsonError as exc:
-        console.print(f"[red]Resume load failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
-
-    if resume_text is not None:
-        matcher = ResumeMatcher()
-        match = matcher.analyze(resume_text, job_intel)
-        analysis_output["match"] = {
-            "overall_score": match.overall_score,
-            "strengths": match.strengths,
-            "gaps": [gap.__dict__ for gap in match.gaps],
-            "recommendations": match.recommendations,
-            "bullet_priorities": match.bullet_priorities,
-        }
-
-    console.print_json(json.dumps(analysis_output))
-
-
-@resume_app.command("render")
-def render_resume(
-    theme: Optional[str] = typer.Option(None, "--theme", help="Theme package name, e.g. jsonresume-theme-even."),
-    format: str = typer.Option("html", "--format", help="Output format: html or pdf."),
-    output: Optional[Path] = typer.Option(None, "--output", help="Optional output path."),
-) -> None:
-    """Render the canonical resume.json with a JSON Resume theme."""
-    _bootstrap()
-
-    if format not in {"html", "pdf"}:
-        console.print("[red]Invalid --format value.[/red] Choose 'html' or 'pdf'.")
-        raise typer.Exit(code=1)
-
-    if not RESUME_JSON_PATH.exists():
-        console.print(f"[red]Canonical resume not found:[/red] {RESUME_JSON_PATH}")
-        raise typer.Exit(code=1)
-
-    from applypilot.resume_render import render_resume_html, render_resume_pdf
-
-    try:
-        if format == "html":
-            rendered_path, resolved_theme = render_resume_html(theme=theme, output_path=output)
-        else:
-            rendered_path, resolved_theme = render_resume_pdf(theme=theme, output_path=output)
-    except Exception as exc:
-        console.print(f"[red]Resume render failed:[/red] {exc}")
-        raise typer.Exit(code=1) from exc
-
-    console.print(
-        f"[green]Rendered {format.upper()}[/green] using [bold]{resolved_theme}[/bold] -> {rendered_path}"
+        fresh_sessions=fresh_sessions,
+        no_hitl=no_hitl,
+        no_focus=no_focus,
     )
 
 
@@ -667,6 +387,8 @@ def status() -> None:
     summary.add_row("Ready to apply", str(stats["ready_to_apply"]))
     summary.add_row("Applied", str(stats["applied"]))
     summary.add_row("Apply errors", str(stats["apply_errors"]))
+    if stats.get("needs_human", 0) > 0:
+        summary.add_row("Needs human review", str(stats["needs_human"]))
 
     console.print(summary)
 
@@ -691,14 +413,127 @@ def status() -> None:
 
         console.print(dist_table)
 
-    # By site
+    # Score funnel: per-score breakdown of pipeline stages
+    funnel = stats.get("score_funnel", [])
+    if funnel:
+        funnel_table = Table(
+            title="\nPipeline Funnel by Score",
+            show_header=True,
+            header_style="bold magenta",
+        )
+        funnel_table.add_column("Score",        justify="center", style="bold")
+        funnel_table.add_column("Cover Ready",  justify="right", style="green")
+        funnel_table.add_column("Tailored",     justify="right", style="cyan")
+        funnel_table.add_column("Needs Tailor", justify="right", style="yellow")
+        funnel_table.add_column("Applied",      justify="right", style="dim green")
+        funnel_table.add_column("Errors",       justify="right", style="red")
+
+        for row in funnel:
+            score = row["score"]
+            score_str = f"[bold {'green' if score >= 9 else 'yellow' if score >= 7 else 'white'}]{score}[/]"
+            funnel_table.add_row(
+                score_str,
+                str(row["cover_ready"])  if row["cover_ready"]  else "[dim]—[/]",
+                str(row["tailored"])     if row["tailored"]     else "[dim]—[/]",
+                str(row["needs_tailor"]) if row["needs_tailor"] else "[dim]—[/]",
+                str(row["applied"])      if row["applied"]      else "[dim]—[/]",
+                str(row["errors"])       if row["errors"]       else "[dim]—[/]",
+            )
+
+        console.print(funnel_table)
+
+    # Apply categories with per-score breakdown
+    by_cat = stats.get("by_category", {})
+    if by_cat:
+        cat_table = Table(title="\nApply Categories", show_header=True, header_style="bold blue")
+        cat_table.add_column("Category", style="bold")
+        cat_table.add_column("Total", justify="right")
+        cat_table.add_column("10",  justify="right", style="bold green")
+        cat_table.add_column("9",   justify="right", style="green")
+        cat_table.add_column("8",   justify="right", style="yellow")
+        cat_table.add_column("7",   justify="right", style="yellow")
+        cat_table.add_column("6",   justify="right", style="dim")
+        cat_table.add_column("<6",  justify="right", style="dim")
+        cat_table.add_column("Action")
+
+        cat_display = {
+            "applied":             ("green",   "Done"),
+            "pending":             ("white",   "In queue"),
+            "in_progress":         ("cyan",    "Running now"),
+            "needs_human":         ("magenta", "applypilot human-review"),
+            "blocked_auth":        ("yellow",  "Needs persistent sessions / HITL"),
+            "blocked_technical":   ("yellow",  "Retryable: applypilot reset-category blocked_technical"),
+            "archived_ineligible": ("dim",     "Location/salary/type mismatch"),
+            "archived_expired":    ("dim",     "Job no longer available"),
+            "archived_platform":   ("red",     "Unsupported platform"),
+            "archived_no_url":     ("dim",     "No application URL"),
+            "manual_only":         ("dim",     "Manual ATS (no automation)"),
+        }
+
+        def _score_cell(d: dict, key: str) -> str:
+            """Format a score count cell — blank if zero."""
+            v = d.get(key, 0) if isinstance(d, dict) else 0
+            return str(v) if v else "[dim]—[/dim]"
+
+        order = ["applied", "pending", "in_progress", "needs_human",
+                 "blocked_auth", "blocked_technical",
+                 "archived_ineligible", "archived_expired",
+                 "archived_platform", "archived_no_url", "manual_only"]
+        for cat in order:
+            d = by_cat.get(cat)
+            if not d:
+                continue
+            total = d["total"] if isinstance(d, dict) else d
+            color, action = cat_display.get(cat, ("white", ""))
+            cat_table.add_row(
+                f"[{color}]{cat}[/{color}]",
+                str(total),
+                _score_cell(d, "10"),
+                _score_cell(d, "9"),
+                _score_cell(d, "8"),
+                _score_cell(d, "7"),
+                _score_cell(d, "6"),
+                _score_cell(d, "<6"),
+                action,
+            )
+
+        # Any unknown categories
+        for cat, d in sorted(by_cat.items(), key=lambda x: -(x[1]["total"] if isinstance(x[1], dict) else x[1])):
+            if cat not in cat_display:
+                total = d["total"] if isinstance(d, dict) else d
+                if total > 0:
+                    cat_table.add_row(
+                        cat, str(total),
+                        _score_cell(d, "10"), _score_cell(d, "9"),
+                        _score_cell(d, "8"),  _score_cell(d, "7"),
+                        _score_cell(d, "6"),  _score_cell(d, "<6"),
+                        "",
+                    )
+
+        console.print(cat_table)
+
+        # Retry hint for high-score retryable jobs
+        retryable_tech = by_cat.get("blocked_technical", {})
+        if isinstance(retryable_tech, dict):
+            high_score_retryable = retryable_tech.get("10", 0) + retryable_tech.get("9", 0)
+            if high_score_retryable > 0:
+                console.print(
+                    f"[bold yellow]  ↳ {high_score_retryable} score 9-10 jobs in blocked_technical are retryable.[/bold yellow]"
+                    f" Run: [bold]applypilot reset-category blocked_technical[/bold]"
+                )
+
+    # By site (group all HN: * sites under "HackerNews")
     if stats["by_site"]:
         site_table = Table(title="\nJobs by Source", show_header=True, header_style="bold magenta")
         site_table.add_column("Site")
         site_table.add_column("Count", justify="right")
 
+        grouped: dict[str, int] = {}
         for site, count in stats["by_site"]:
-            site_table.add_row(site or "Unknown", str(count))
+            key = "HackerNews" if (site or "").startswith("HN:") else (site or "Unknown")
+            grouped[key] = grouped.get(key, 0) + count
+        for site, count in sorted(grouped.items(), key=lambda x: -x[1]):
+            site_table.add_row(site, str(count))
 
         console.print(site_table)
 
@@ -760,6 +595,70 @@ def status() -> None:
 
 
 @app.command()
+def track(
+    days: int = typer.Option(14, "--days", "-d", help="Email look-back period in days."),
+    setup: bool = typer.Option(False, "--setup", help="Verify Gmail MCP connectivity."),
+    actions: bool = typer.Option(False, "--actions", "-a", help="Show pending action items."),
+    ghosted_days: int = typer.Option(7, "--ghosted-days", help="Days before marking as ghosted."),
+    limit: int = typer.Option(100, "--limit", "-l", help="Max emails to fetch."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fetch + classify but don't write DB/files."),
+    relabel: bool = typer.Option(False, "--relabel", help="Apply 'ap-track' label to all emails already in the DB (backfill)."),
+    remap_stubs: bool = typer.Option(False, "--remap-stubs", help="Re-match emails under multi-company stubs to correct per-company jobs."),
+) -> None:
+    """Track application responses from Gmail."""
+    _bootstrap()
+
+    from applypilot.config import check_tier
+    check_tier(2, "application tracking")
+
+    if setup:
+        import asyncio
+        from applypilot.tracking.gmail_client import check_gmail_setup, verify_connection
+
+        ok, msg = check_gmail_setup()
+        if not ok:
+            console.print(f"[red]{msg}[/red]")
+            raise typer.Exit(code=1)
+
+        console.print("[dim]Testing Gmail MCP connection...[/dim]")
+        connected = asyncio.run(verify_connection())
+        if connected:
+            console.print("[green]Gmail MCP connected successfully.[/green]")
+        else:
+            console.print("[red]Gmail MCP connection failed.[/red]")
+            console.print("[dim]Check that gcp-oauth.keys.json is valid and OAuth is authorized.[/dim]")
+            raise typer.Exit(code=1)
+        return
+
+    if actions:
+        from applypilot.tracking import show_action_items
+        show_action_items()
+        return
+
+    if relabel:
+        from applypilot.tracking import relabel_all_tracked
+        relabel_all_tracked()
+        return
+
+    if remap_stubs:
+        from applypilot.tracking import remap_stubs as _remap_stubs
+        _remap_stubs()
+        return
+
+    from applypilot.tracking import run_tracking
+
+    result = run_tracking(
+        days=days,
+        ghosted_days=ghosted_days,
+        limit=limit,
+        dry_run=dry_run,
+    )
+
+    if result.get("errors", 0) > 0:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def dashboard() -> None:
     """Generate and open the HTML dashboard in your browser."""
     _bootstrap()
@@ -775,156 +674,372 @@ def dashboard() -> None:
 # `needs_human` are now picked up automatically by the next
 # `applypilot apply` run via _run_hitl's launcher-restart path.
 
-    if resume_source.mode == "canonical":
-        results.append(("resume.json", ok_mark, str(RESUME_JSON_PATH)))
-    elif resume_source.mode == "canonical_invalid":
-        results.append(("resume.json", fail_mark, resume_source.detail))
-    else:
-        results.append(("resume.json", warn_mark, "Optional, but required for JSON Resume import/render flows"))
 
-    if resume_source.mode == "canonical":
-        if RESUME_PATH.exists():
-            results.append(("resume.txt", warn_mark, f"{RESUME_PATH} (legacy fallback still present)"))
-        else:
-            results.append(("resume.txt", ok_mark, "Not required when resume.json is present"))
-    elif resume_source.mode == "canonical_invalid":
-        if RESUME_PATH.exists():
-            results.append(("resume.txt", warn_mark, f"{RESUME_PATH} (present, but resume.json must be fixed first)"))
-        elif RESUME_PDF_PATH.exists():
-            results.append(("resume.txt", warn_mark, "Only PDF found - plain-text needed for AI stages"))
-        else:
-            results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
-    elif RESUME_PATH.exists():
-        results.append(("resume.txt", ok_mark, str(RESUME_PATH)))
-    elif RESUME_PDF_PATH.exists():
-        results.append(("resume.txt", warn_mark, "Only PDF found - plain-text needed for AI stages"))
-    else:
-        results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
+# ---------------------------------------------------------------------------
+# Q&A knowledge base commands
+# ---------------------------------------------------------------------------
 
-    # Search config
-    if SEARCH_CONFIG_PATH.exists():
-        results.append(("searches.yaml", ok_mark, str(SEARCH_CONFIG_PATH)))
-    else:
-        results.append(("searches.yaml", warn_mark, "Will use example config - run 'applypilot init'"))
+qa_app = typer.Typer(name="qa", help="Manage the Q&A knowledge base for screening questions.")
+app.add_typer(qa_app)
 
-    # jobspy (discovery dep installed separately)
-    jobspy_version, jobspy_params, jobspy_missing = _jobspy_runtime_capabilities()
-    if jobspy_version is None:
-        results.append(("python-jobspy", warn_mark,
-                        "pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex"))
-    else:
-        results.append(("python-jobspy", ok_mark, f"version {jobspy_version}"))
-        if jobspy_missing:
-            results.append(
-                (
-                    "JobSpy capability mode",
-                    warn_mark,
-                    f"compatibility mode active (missing args: {', '.join(jobspy_missing)})",
-                )
+
+@qa_app.command("list")
+def qa_list(
+    limit: int = typer.Option(50, "--limit", "-l", help="Max Q&A pairs to show."),
+) -> None:
+    """Show stored Q&A pairs from past applications."""
+    _bootstrap()
+
+    from applypilot.database import get_all_qa
+
+    pairs = get_all_qa()
+    if not pairs:
+        console.print("[dim]No Q&A pairs stored yet. Apply to jobs to build the knowledge base.[/dim]")
+        return
+
+    t = Table(title=f"Q&A Knowledge Base ({len(pairs)} total)", show_header=True, header_style="bold cyan")
+    t.add_column("Question", max_width=50)
+    t.add_column("Answer", max_width=30)
+    t.add_column("Source")
+    t.add_column("Outcome")
+    t.add_column("Type")
+
+    for qa in pairs[:limit]:
+        outcome_color = {"accepted": "green", "rejected": "red"}.get(qa["outcome"], "dim")
+        t.add_row(
+            qa["question_text"][:50],
+            qa["answer_text"][:30],
+            qa["answer_source"],
+            f"[{outcome_color}]{qa['outcome']}[/{outcome_color}]",
+            qa.get("field_type") or "",
+        )
+
+    console.print(t)
+
+
+@qa_app.command("stats")
+def qa_stats() -> None:
+    """Show Q&A knowledge base statistics."""
+    _bootstrap()
+
+    from applypilot.database import get_qa_stats
+
+    stats = get_qa_stats()
+    if stats["total"] == 0:
+        console.print("[dim]No Q&A pairs stored yet.[/dim]")
+        return
+
+    console.print("\n[bold]Q&A Knowledge Base Stats[/bold]\n")
+    console.print(f"  Total pairs:    {stats['total']}")
+    console.print(f"  Unique Qs:      {stats['unique_questions']}")
+
+    if stats["by_source"]:
+        console.print("\n  [bold]By source:[/bold]")
+        for src, cnt in stats["by_source"].items():
+            console.print(f"    {src}: {cnt}")
+
+    if stats["by_outcome"]:
+        console.print("\n  [bold]By outcome:[/bold]")
+        for out, cnt in stats["by_outcome"].items():
+            color = {"accepted": "green", "rejected": "red"}.get(out, "dim")
+            console.print(f"    [{color}]{out}[/{color}]: {cnt}")
+
+    if stats.get("by_ats"):
+        console.print("\n  [bold]By ATS:[/bold]")
+        for ats, cnt in stats["by_ats"].items():
+            console.print(f"    {ats or 'unknown'}: {cnt}")
+
+    console.print()
+
+
+@qa_app.command("export")
+def qa_export(
+    output: str = typer.Option("qa_export.yaml", "--output", "-o", help="Output YAML file path."),
+) -> None:
+    """Export Q&A pairs to YAML for review and editing."""
+    _bootstrap()
+
+    from applypilot.database import export_qa_yaml
+
+    content = export_qa_yaml()
+    if not content:
+        console.print("[dim]No Q&A pairs to export.[/dim]")
+        return
+
+    from pathlib import Path
+    out_path = Path(output)
+    out_path.write_text(content, encoding="utf-8")
+    console.print(f"[green]Exported Q&A to:[/green] {out_path.resolve()}")
+
+
+@qa_app.command("import")
+def qa_import(
+    file: str = typer.Argument(..., help="YAML file with Q&A pairs to import."),
+) -> None:
+    """Import Q&A pairs from a YAML file."""
+    _bootstrap()
+
+    from pathlib import Path
+    import yaml
+    from applypilot.database import store_qa
+
+    path = Path(file)
+    if not path.exists():
+        console.print(f"[red]File not found: {file}[/red]")
+        raise typer.Exit(code=1)
+
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list):
+        console.print("[red]Expected a YAML list of Q&A objects.[/red]")
+        raise typer.Exit(code=1)
+
+    count = 0
+    for item in data:
+        q = item.get("question", "").strip()
+        a = item.get("answer", "").strip()
+        if q and a:
+            store_qa(
+                q, a,
+                source=item.get("source", "human"),
+                field_type=item.get("field_type"),
+                ats_slug=item.get("ats"),
             )
-        else:
-            results.append(("JobSpy capability mode", ok_mark, "full feature signature detected"))
-        if jobspy_params:
-            results.append(("JobSpy scrape_jobs args", "[dim]info[/dim]", ", ".join(jobspy_params)))
+            count += 1
 
-    # --- Tier 2 checks (built-in LLM layer) ---
-    llm_status = format_llm_provider_status()
-    if llm_status:
-        results.append(("Built-in LLM", ok_mark, llm_status))
-    else:
-        results.append(("Built-in LLM", fail_mark, llm_config_hint()))
+    console.print(f"[green]Imported {count} Q&A pair(s).[/green]")
 
-    # --- Tier 3 checks (auto-apply agent layer) ---
-    requested_agent = get_auto_apply_agent_setting()
-    resolved_agent = resolve_auto_apply_agent()
-    if resolved_agent.resolved:
-        note = f"{requested_agent} -> {resolved_agent.resolved}"
-    else:
-        note = requested_agent
-    if resolved_agent.model:
-        note += f" ({resolved_agent.model})"
-    results.append(("Auto-apply agent", ok_mark if resolved_agent.resolved else warn_mark, note))
 
-    agent_statuses = get_auto_apply_agent_statuses()
+# ---------------------------------------------------------------------------
+# creds — site credential CRUD
+# ---------------------------------------------------------------------------
 
-    codex_status = agent_statuses["codex"]
-    if codex_status.binary_path:
-        results.append(("Codex CLI", ok_mark, codex_status.binary_path))
-        results.append(("Codex login", ok_mark if codex_status.available else fail_mark, codex_status.note))
-    else:
-        results.append(("Codex CLI", fail_mark, codex_status.note))
+creds_app = typer.Typer(name="creds", help="Manage saved site credentials (usernames / passwords).")
+app.add_typer(creds_app)
 
-    claude_status = agent_statuses["claude"]
-    if claude_status.binary_path:
-        results.append(("Claude Code CLI", ok_mark, claude_status.binary_path))
-    else:
-        results.append(("Claude Code CLI", "[dim]optional[/dim]", claude_status.note))
 
-    opencode_status = agent_statuses.get("opencode")
-    if opencode_status:
-        if opencode_status.binary_path:
-            results.append(("OpenCode CLI", ok_mark if opencode_status.available else warn_mark, opencode_status.note))
-        else:
-            results.append(("OpenCode CLI", "[dim]optional[/dim]", opencode_status.note))
+@creds_app.command("list")
+def creds_list(
+    show: bool = typer.Option(False, "--show", "-s", help="Show passwords in plaintext."),
+) -> None:
+    """List all saved site credentials."""
+    _bootstrap()
 
-    # Chrome
-    try:
-        chrome_path = get_chrome_path()
-        results.append(("Chrome/Chromium", ok_mark, chrome_path))
-    except FileNotFoundError:
-        results.append(("Chrome/Chromium", fail_mark,
-                        "Install Chrome or set CHROME_PATH env var (needed for auto-apply)"))
+    from applypilot.database import get_all_accounts
 
-    # Node.js / npx (for Playwright MCP)
-    npx_bin = shutil.which("npx")
-    if npx_bin:
-        results.append(("Node.js (npx)", ok_mark, npx_bin))
-    else:
-        results.append(("Node.js (npx)", fail_mark,
-                        "Install Node.js 20+ from nodejs.org (needed for auto-apply and resume render)"))
+    rows = get_all_accounts()
+    if not rows:
+        console.print("[dim]No credentials saved yet. Use [bold]applypilot creds add[/bold] to add one.[/dim]")
+        return
 
-    if LOCAL_RESUMED.exists():
-        results.append(("Resume theme renderer", ok_mark, str(LOCAL_RESUMED)))
-    else:
-        results.append(("Resume theme renderer", warn_mark, "Run `npm install` to enable `applypilot resume render`"))
+    t = Table(title=f"Site Credentials ({len(rows)} entries)", show_header=True, header_style="bold cyan")
+    t.add_column("Domain",   min_width=28)
+    t.add_column("Site",     min_width=12)
+    t.add_column("Email",    min_width=24)
+    t.add_column("Password", min_width=16)
+    t.add_column("Notes",    max_width=30)
+    t.add_column("Saved",    min_width=10)
 
-    # CapSolver (optional)
-    capsolver = os.environ.get("CAPSOLVER_API_KEY")
-    if capsolver:
-        results.append(("CapSolver API key", ok_mark, "CAPTCHA solving enabled"))
-    else:
-        results.append(("CapSolver API key", "[dim]optional[/dim]",
-                        "Set CAPSOLVER_API_KEY in .env for CAPTCHA solving"))
-
-    # --- Render results ---
-    console.print()
-    console.print("[bold]ApplyPilot Doctor[/bold]\n")
-
-    col_w = max(len(r[0]) for r in results) + 2
-    for check, status, note in results:
-        pad = " " * (col_w - len(check))
-        console.print(f"  {check}{pad}{status}  [dim]{note}[/dim]")
-
-    console.print()
-
-    # Tier summary
-    from applypilot.config import get_tier, TIER_LABELS
-    tier = get_tier()
-    console.print(f"[bold]Current tier: Tier {tier} - {TIER_LABELS[tier]}[/bold]")
-
-    if tier == 1:
-        console.print("[dim]  -> Tier 2 unlocks: scoring, tailoring, cover letters (needs an LLM provider)[/dim]")
-        console.print(
-            "[dim]  -> Tier 3 unlocks: auto-apply "
-            "(needs Codex logged in, Claude installed, or OpenCode MCP-ready, plus Chrome + Node.js)[/dim]"
-        )
-    elif tier == 2:
-        console.print(
-            "[dim]  -> Tier 3 unlocks: auto-apply "
-            "(needs Codex logged in, Claude installed, or OpenCode MCP-ready, plus Chrome + Node.js)[/dim]"
+    for row in rows:
+        pwd = row["password"] or ""
+        pwd_display = pwd if show else (("*" * min(len(pwd), 8)) if pwd else "[dim]—[/dim]")
+        saved_date = (row["created_at"] or "")[:10]
+        t.add_row(
+            row["domain"],
+            row["site"] or "",
+            row["email"],
+            pwd_display,
+            row["notes"] or "",
+            saved_date,
         )
 
-    console.print()
+    console.print(t)
+    if not show:
+        console.print("[dim]Passwords are masked. Use [bold]--show[/bold] to reveal them.[/dim]")
+
+
+@creds_app.command("show")
+def creds_show(
+    domain: str = typer.Argument(..., help="Domain to show credentials for (e.g. linkedin.com)."),
+) -> None:
+    """Show full (unmasked) credentials for a single domain."""
+    _bootstrap()
+
+    from applypilot.database import get_all_accounts
+
+    rows = [r for r in get_all_accounts() if r["domain"] == domain]
+    if not rows:
+        console.print(f"[red]No credentials found for domain:[/red] {domain}")
+        raise typer.Exit(code=1)
+
+    row = rows[0]
+    console.print(f"\n  [bold]Domain:[/bold]   {row['domain']}")
+    console.print(f"  [bold]Site:[/bold]     {row['site'] or ''}")
+    console.print(f"  [bold]Email:[/bold]    {row['email']}")
+    console.print(f"  [bold]Password:[/bold] {row['password'] or '[dim](none)[/dim]'}")
+    if row["notes"]:
+        console.print(f"  [bold]Notes:[/bold]    {row['notes']}")
+    if row["job_url"]:
+        console.print(f"  [bold]Job URL:[/bold]  {row['job_url']}")
+    console.print(f"  [bold]Saved:[/bold]    {(row['created_at'] or '')[:19]}\n")
+
+
+@creds_app.command("add")
+def creds_add(
+    domain:   str = typer.Argument(..., help="Domain key (e.g. linkedin.com, myworkdayjobs.com)."),
+    email:    str = typer.Option(...,  "--email",    "-e", help="Login email / username."),
+    password: str = typer.Option(None, "--password", "-p", help="Password (prompted if omitted)."),
+    site:     str = typer.Option(None, "--site",     "-s", help="Human-readable site name."),
+    notes:    str = typer.Option(None, "--notes",    "-n", help="Optional notes."),
+) -> None:
+    """Add or update credentials for a site."""
+    _bootstrap()
+
+    from applypilot.database import upsert_account
+
+    if password is None:
+        password = typer.prompt(f"Password for {domain}", hide_input=True, confirmation_prompt=True)
+
+    action = upsert_account(domain, email, password, site=site, notes=notes)
+    verb = "[green]Created[/green]" if action == "created" else "[yellow]Updated[/yellow]"
+    console.print(f"{verb} credentials for [bold]{domain}[/bold] ({email})")
+
+
+@creds_app.command("set")
+def creds_set(
+    domain:   str = typer.Argument(..., help="Domain to update."),
+    email:    str = typer.Option(None, "--email",    "-e", help="New email / username."),
+    password: str = typer.Option(None, "--password", "-p", help="New password (prompted if --email not given either)."),
+    notes:    str = typer.Option(None, "--notes",    "-n", help="Update notes."),
+) -> None:
+    """Update one or more fields for an existing credential entry."""
+    _bootstrap()
+
+    from applypilot.database import get_all_accounts, upsert_account
+
+    existing = next((r for r in get_all_accounts() if r["domain"] == domain), None)
+    if not existing:
+        console.print(f"[red]No credentials found for:[/red] {domain}  (use [bold]add[/bold] to create one)")
+        raise typer.Exit(code=1)
+
+    new_email    = email    or existing["email"]
+    new_password = password or existing["password"]
+    new_notes    = notes    if notes is not None else existing["notes"]
+
+    if not email and not password and notes is None:
+        # Nothing specified — prompt for password at minimum
+        new_password = typer.prompt(f"New password for {domain}", hide_input=True, confirmation_prompt=True)
+
+    upsert_account(domain, new_email, new_password, site=existing["site"], notes=new_notes)
+    console.print(f"[green]Updated[/green] credentials for [bold]{domain}[/bold]")
+
+
+@creds_app.command("import-logs")
+def creds_import_logs(
+    log_dir: str = typer.Option(None, "--log-dir", help="Directory of apply logs. Defaults to ~/.applypilot/logs/."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be imported without writing."),
+    yes:     bool = typer.Option(False, "--yes", "-y", help="Skip per-entry confirmation for free-form entries."),
+) -> None:
+    """Scan apply logs for account credentials and import into the DB.
+
+    Handles both structured ACCOUNT_CREATED: lines (current format) and
+    older free-form log entries where the agent wrote the password as prose.
+    Already-known domains are skipped unless --yes is passed.
+    """
+    _bootstrap()
+
+    import os
+    from applypilot.database import mine_accounts_from_logs, upsert_account, get_all_accounts
+
+    if log_dir is None:
+        log_dir = os.path.expanduser("~/.applypilot/logs")
+
+    console.print(f"[dim]Scanning logs in {log_dir}…[/dim]")
+    found = mine_accounts_from_logs(log_dir)
+
+    if not found:
+        console.print("[dim]No credential hints found in logs.[/dim]")
+        return
+
+    existing_domains = {r["domain"] for r in get_all_accounts()}
+
+    imported = skipped = already = 0
+    for entry in found:
+        domain   = entry["domain"]
+        email    = entry["email"]
+        password = entry.get("password", "")
+        site     = entry.get("site", "")
+        source   = entry.get("source", "")
+        src_file = entry.get("source_file", "")
+        is_new   = domain not in existing_domains
+
+        status_tag = "[green]NEW[/green]" if is_new else "[dim]EXISTS[/dim]"
+        src_tag    = "[cyan]structured[/cyan]" if source == "structured" else "[yellow]free-form[/yellow]"
+        console.print(
+            f"  {status_tag} {src_tag}  {domain}  {email or '[dim](no email)[/dim]'}"
+            f"  pw={'***' if password else '[dim]none[/dim]'}  ({src_file})"
+        )
+
+        if not is_new:
+            already += 1
+            continue
+
+        if dry_run:
+            imported += 1
+            continue
+
+        # Free-form entries ask for confirmation (may be less reliable)
+        if source == "free-form" and not yes:
+            if not email or not password:
+                console.print(f"    [dim]Skipping — missing email or password. Add manually with: "
+                              f"applypilot creds add {domain}[/dim]")
+                skipped += 1
+                continue
+            confirmed = typer.confirm(f"    Import {domain} ({email} / {password[:4]}***)?")
+            if not confirmed:
+                skipped += 1
+                continue
+
+        if email and password:
+            upsert_account(domain, email, password, site=site or None,
+                           notes=f"auto-imported from log: {src_file}")
+            existing_domains.add(domain)
+            imported += 1
+        else:
+            console.print(f"    [dim]Skipping — missing {'email' if not email else 'password'}. "
+                          f"Add manually: applypilot creds add {domain}[/dim]")
+            skipped += 1
+
+    suffix = " [dim](dry run — nothing written)[/dim]" if dry_run else ""
+    console.print(
+        f"\n[green]Imported {imported}[/green]  "
+        f"[dim]already-known {already}  skipped {skipped}[/dim]{suffix}"
+    )
+
+
+@creds_app.command("delete")
+def creds_delete(
+    domain: str = typer.Argument(..., help="Domain whose credentials to delete."),
+    yes:    bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+) -> None:
+    """Delete all saved credentials for a domain."""
+    _bootstrap()
+
+    from applypilot.database import delete_account, get_all_accounts
+
+    existing = [r for r in get_all_accounts() if r["domain"] == domain]
+    if not existing:
+        console.print(f"[red]No credentials found for:[/red] {domain}")
+        raise typer.Exit(code=1)
+
+    row = existing[0]
+    if not yes:
+        confirmed = typer.confirm(f"Delete credentials for {domain} ({row['email']})?")
+        if not confirmed:
+            console.print("[dim]Cancelled.[/dim]")
+            raise typer.Exit()
+
+    deleted = delete_account(domain)
+    console.print(f"[green]Deleted {deleted} credential row(s) for[/green] [bold]{domain}[/bold]")
 
 
 if __name__ == "__main__":

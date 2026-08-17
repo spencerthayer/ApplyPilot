@@ -3,30 +3,10 @@
 All validation is profile-driven -- no hardcoded personal data. The validator receives
 a profile dict (from applypilot.config.load_profile()) and validates against the user's
 actual skills, companies, projects, and school.
-
-Validation modes
-----------------
-strict  -- banned words = hard errors that trigger retries (original behavior)
-normal  -- banned words = warnings only; requires at least one real company in experience
-lenient -- banned words ignored; only fabrication and required structure checked
 """
 
-from __future__ import annotations
-
-import logging
 import re
-from typing import Optional
-
-from applypilot.resume_json import (
-    get_profile_company_names,
-    get_profile_project_names,
-    get_profile_school_names,
-    get_profile_skill_keywords,
-)
-from applypilot.scoring.tailoring_config import (
-    check_banned_phrases,
-    check_required_patterns,
-)
+import logging
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +14,7 @@ log = logging.getLogger(__name__)
 # ── Universal Constants (not personal data) ───────────────────────────────
 
 BANNED_WORDS: list[str] = [
-    "passionate", "dedicated", "committed to",
+    "passionate", "committed to",
     "utilizing", "utilize", "harnessing",
     "spearheaded", "spearhead", "orchestrated", "championed", "pioneered",
     "robust", "scalable solutions", "cutting-edge", "state-of-the-art", "best-in-class",
@@ -86,39 +66,32 @@ LLM_LEAK_PHRASES: list[str] = [
 # Reasonable stretches (K8s, Terraform, Redis, Kafka etc.) are ALLOWED.
 FABRICATION_WATCHLIST: set[str] = {
     # Languages with zero relation to the candidate's stack
-    "c#", "c++", "golang", "rust", "ruby",
-    "kotlin", "swift", "scala", "matlab",
+    # NOTE: "golang" removed — synonym for Go (in profile). "c#" skipped by len<=2 guard.
+    "c#", "c++", "rust", "ruby",
+    "swift", "scala", "matlab",
     # Frameworks for wrong languages
-    # NOTE: django, spring, angular, vue removed — may be in candidate's skills_boundary.
+    # NOTE: kotlin, django, spring, angular, vue removed — all in candidate's skills_boundary.
     # The skip logic cross-references against profile, but keeping them out avoids edge cases.
     "rails", "svelte",
-    # Hard lies: certifications can't be stretched
-    "certif", "certified", "pmp", "scrum master", "aws certified",
+    # Hard lies: certifications not in profile (real certs are checked via skills_boundary)
+    "pmp", "scrum master",
 }
 
 REQUIRED_SECTIONS: set[str] = {"SUMMARY", "TECHNICAL SKILLS", "EXPERIENCE", "PROJECTS", "EDUCATION"}
-MECHANISM_VERBS: set[str] = {
-    "built",
-    "designed",
-    "implemented",
-    "architected",
-    "developed",
-    "created",
-    "engineered",
-    "constructed",
-    "automated",
-    "optimized",
-    "improved",
-    "reduced",
-}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
 def _build_skills_set(profile: dict) -> set[str]:
-    """Build the set of allowed skills from the normalized profile skills."""
-
-    return {skill.lower().strip() for skill in get_profile_skill_keywords(profile)}
+    """Build the set of allowed skills from the profile's skills_boundary."""
+    boundary = profile.get("skills_boundary", {})
+    allowed: set[str] = set()
+    for category in boundary.values():
+        if isinstance(category, list):
+            allowed.update(s.lower().strip() for s in category)
+        elif isinstance(category, set):
+            allowed.update(s.lower().strip() for s in category)
+    return allowed
 
 
 def _missing_schools(preserved_school: str, haystack: str) -> list[str]:
@@ -143,73 +116,14 @@ def sanitize_text(text: str) -> str:
     return text.strip()
 
 
-def _get_role_constraints(role_type: str, config: dict) -> dict:
-    """Get role-specific validation constraints from tailoring_config."""
-
-    if not config or not role_type:
-        return {}
-    role_config = config.get("role_types", {}).get(role_type, {})
-    return role_config.get("constraints", {})
-
-
-def _check_banned_phrases(text: str, role_type: str, config: dict) -> list[str]:
-    if not config or not role_type:
-        return []
-    return check_banned_phrases(text, role_type, config)
-
-
-def _check_required_patterns(text: str, role_type: str, config: dict) -> tuple[list[str], list[str]]:
-    if not config or not role_type:
-        return [], []
-    return check_required_patterns(text, role_type, config)
-
-
-def _check_mechanism_required(text: str, role_type: str, config: dict) -> bool:
-    if not config or not role_type:
-        return True
-    constraints = _get_role_constraints(role_type, config)
-    if not constraints.get("mechanism_required", False):
-        return True
-    pattern = r"\b(" + "|".join(map(re.escape, MECHANISM_VERBS)) + r")\b"
-    return bool(re.search(pattern, text.lower()))
-
-
-def _company_is_present(experience_entry: dict, company: str) -> bool:
-    """Return whether a profile company appears in an experience entry."""
-
-    def _normalize(value: str) -> str:
-        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-
-    company_norm = _normalize(company)
-    if not company_norm:
-        return False
-
-    entry_text = " ".join(
-        str(experience_entry.get(key, ""))
-        for key in ("header", "company", "subtitle")
-    )
-    entry_norm = _normalize(entry_text)
-    return company_norm in entry_norm
-
-
 # ── JSON Field Validation ─────────────────────────────────────────────────
 
-def validate_json_fields(
-    data: dict,
-    profile: dict,
-    mode: str = "normal",
-    role_type: Optional[str] = None,
-    config: Optional[dict] = None,
-) -> dict:
+def validate_json_fields(data: dict, profile: dict) -> dict:
     """Validate individual JSON fields from an LLM-generated tailored resume.
 
     Args:
-        data:    Parsed JSON from the LLM (title, summary, skills, experience, projects, education).
+        data: Parsed JSON from the LLM (title, summary, skills, experience, projects, education).
         profile: User profile dict from load_profile().
-        mode:    Validation strictness — "strict", "normal", or "lenient".
-                 strict  → banned words are errors (trigger retries)
-                 normal  → banned words are warnings (no retry), at least one real company required
-                 lenient → banned words ignored entirely, company retention not enforced
 
     Returns:
         {"passed": bool, "errors": list[str], "warnings": list[str]}
@@ -217,91 +131,56 @@ def validate_json_fields(
     errors: list[str] = []
     warnings: list[str] = []
 
-    # Required keys — always checked regardless of mode.
-    # "projects" may be an empty list; only the field itself is required.
+    # Required keys (projects is optional — 1-page resumes may omit them)
     for key in ("title", "summary", "skills", "experience", "education"):
         if key not in data or not data[key]:
             errors.append(f"Missing required field: {key}")
-    if "projects" not in data:
-        errors.append("Missing required field: projects")
+    if "projects" not in data or not data.get("projects"):
+        warnings.append("Missing field: projects (optional, LLM may have folded into experience)")
     if errors:
         return {"passed": False, "errors": errors, "warnings": warnings}
 
-    sanitized_title = sanitize_text(str(data.get("title", "")))
-    sanitized_summary = sanitize_text(str(data.get("summary", "")))
+    # Collect all text for bulk checks
+    all_text_parts: list[str] = [data["summary"]]
 
-    skills_val = data.get("skills", "")
-    if isinstance(skills_val, dict):
-        skills_joined = " ".join(str(v) for v in skills_val.values())
-    elif isinstance(skills_val, list):
-        skills_joined = " ".join(str(v) for v in skills_val)
-    else:
-        skills_joined = str(skills_val)
-    sanitized_skills = sanitize_text(skills_joined)
-
-    edu_val = data.get("education", "")
-    if isinstance(edu_val, list):
-        edu_joined = " ".join(str(e) for e in edu_val)
-    elif isinstance(edu_val, dict):
-        edu_joined = " ".join(str(v) for v in edu_val.values())
-    else:
-        edu_joined = str(edu_val)
-    sanitized_education = sanitize_text(edu_joined)
-
-    all_text_parts: list[str] = [sanitized_title, sanitized_summary, sanitized_skills, sanitized_education]
-
-    # Generated titles must stay aligned with the target job title when provided.
-    job_context = profile.get("job_context", {}) or {}
-    target_title = str(job_context.get("title", "")).strip()
-    generated_title = str(data.get("title", "")).strip()
-    if target_title and generated_title:
-        def _norm(text: str) -> str:
-            return re.sub(r"[^a-z0-9 ]", "", text.lower())
-
-        target_words = [word for word in _norm(target_title).split() if len(word) > 2]
-        generated_words = [word for word in _norm(generated_title).split() if len(word) > 2]
-        shared = set(target_words) & set(generated_words)
-        odd_modifiers = {"partner", "alliances", "evangelist", "advocate", "champion", "ambassador", "specialist"}
-        generated_has_odd = any(word in generated_words for word in odd_modifiers)
-        if not shared or (generated_has_odd and not any(word in target_words for word in odd_modifiers)):
-            errors.append(f"Generated title '{generated_title}' is not aligned with target '{target_title}'")
-
+    # Skills: check for fabrication (exclude items that are in user's actual profile)
+    allowed_skills = _build_skills_set(profile)
     if isinstance(data["skills"], dict):
         skills_text = " ".join(str(v) for v in data["skills"].values()).lower()
         for fake in FABRICATION_WATCHLIST:
             if len(fake) <= 2:
                 continue
+            # Skip if this "fabrication" is actually a real skill in the profile
+            if any(fake in skill for skill in allowed_skills):
+                continue
             if fake in skills_text:
                 errors.append(f"Fabricated skill: '{fake}'")
 
-    work_companies = get_profile_company_names(profile)
+    # Experience: check preserved companies (warn for missing, don't hard-fail
+    # since 1-page resumes may legitimately omit early-career roles)
+    resume_facts = profile.get("resume_facts", {})
+    preserved_companies = resume_facts.get("preserved_companies", [])
 
     if isinstance(data["experience"], list):
-        matched_companies: set[str] = set()
-        for company in work_companies:
-            if any(_company_is_present(entry, company) for entry in data["experience"]):
-                matched_companies.add(company)
-
-        if mode == "strict":
-            for company in work_companies:
-                if company not in matched_companies:
-                    errors.append(f"Company '{company}' missing from experience")
-        elif mode == "normal":
-            if work_companies and not matched_companies:
-                errors.append("No profile companies found in experience")
-            for company in work_companies:
-                if company not in matched_companies:
-                    warnings.append(f"Company '{company}' missing from experience")
-        # lenient mode intentionally skips company-retention checks
-
+        exp_and_proj_text = " ".join(
+            str(e.get("header", "")) for e in data["experience"]
+        )
+        if isinstance(data.get("projects"), list):
+            exp_and_proj_text += " " + " ".join(
+                str(e.get("header", "")) for e in data["projects"]
+            )
+        for company in preserved_companies:
+            if company.lower() not in exp_and_proj_text.lower():
+                warnings.append(f"Company '{company}' not in experience or projects")
         for entry in data["experience"]:
-            for bullet in entry.get("bullets", []):
-                all_text_parts.append(sanitize_text(str(bullet)))
+            for b in entry.get("bullets", []):
+                all_text_parts.append(b)
 
-    if isinstance(data["projects"], list):
+    # Projects: collect bullets
+    if isinstance(data.get("projects"), list):
         for entry in data["projects"]:
-            for bullet in entry.get("bullets", []):
-                all_text_parts.append(sanitize_text(str(bullet)))
+            for b in entry.get("bullets", []):
+                all_text_parts.append(b)
 
     # Education: each preserved school must be present (education may be a
     # structured list of per-school entries or a legacy single string).
@@ -312,53 +191,16 @@ def validate_json_fields(
         if missing:
             errors.append(f"Education missing school(s): {', '.join(missing)}")
 
+    # Bulk checks on all text (word-boundary matching)
     all_text = " ".join(all_text_parts).lower()
 
-    found_leaks = [phrase for phrase in LLM_LEAK_PHRASES if phrase in all_text]
+    found_banned = [w for w in BANNED_WORDS if re.search(r"\b" + re.escape(w) + r"\b", all_text)]
+    if found_banned:
+        warnings.append(f"Banned words (style): {', '.join(found_banned[:3])}")
+
+    found_leaks = [p for p in LLM_LEAK_PHRASES if p in all_text]
     if found_leaks:
         errors.append(f"LLM self-talk: '{found_leaks[0]}'")
-
-    if mode != "lenient":
-        found_banned = [word for word in BANNED_WORDS if re.search(r"\b" + re.escape(word) + r"\b", all_text)]
-        if found_banned:
-            msg = f"Banned words: {', '.join(found_banned[:5])}"
-            if mode == "strict":
-                errors.append(msg)
-            else:
-                warnings.append(msg)
-
-    if config and role_type:
-        if mode != "lenient":
-            try:
-                found_role_banned = _check_banned_phrases(all_text, role_type, config)
-            except Exception as exc:
-                log.warning("Role-specific banned phrase check failed: %s", exc)
-                found_role_banned = []
-            if found_role_banned:
-                msg = f"Role-specific banned phrases: {', '.join(found_role_banned[:5])}"
-                if mode == "strict":
-                    errors.append(msg)
-                else:
-                    warnings.append(msg)
-
-        try:
-            _, missing_patterns = _check_required_patterns(all_text, role_type, config)
-        except Exception as exc:
-            log.warning("Required pattern check failed: %s", exc)
-            missing_patterns = []
-        if missing_patterns:
-            msg = f"Missing required patterns: {', '.join(missing_patterns[:5])}"
-            if mode == "strict":
-                errors.append(msg)
-            else:
-                warnings.append(msg)
-
-        if not _check_mechanism_required(all_text, role_type, config):
-            msg = "Missing mechanism verb (e.g., built, designed, implemented, architected)"
-            if mode == "strict":
-                errors.append(msg)
-            else:
-                warnings.append(msg)
 
     return {"passed": len(errors) == 0, "errors": errors, "warnings": warnings}
 
@@ -381,6 +223,9 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
     text_lower = text.lower()
 
     personal = profile.get("personal", {})
+    resume_facts = profile.get("resume_facts", {})
+    allowed_skills = _build_skills_set(profile)
+
     # 1. Check required sections exist (flexible matching)
     section_variants: dict[str, list[str]] = {
         "SUMMARY": ["summary", "professional summary", "profile"],
@@ -398,13 +243,13 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
     if full_name and full_name.lower() not in text_lower:
         warnings.append(f"Name '{full_name}' missing -- will be injected")
 
-    # 3. Check companies preserved
-    for company in get_profile_company_names(profile):
+    # 3. Check companies preserved (warning, not error — 1-page resumes may drop early-career roles)
+    for company in resume_facts.get("preserved_companies", []):
         if company.lower() not in text_lower:
-            errors.append(f"Company '{company}' missing -- cannot remove real experience")
+            warnings.append(f"Company '{company}' not in resume (may be omitted for space)")
 
     # 4. Check projects preserved
-    for project in get_profile_project_names(profile):
+    for project in resume_facts.get("preserved_projects", []):
         if project.lower() not in text_lower:
             warnings.append(f"Project '{project}' not found -- may have been renamed")
 
@@ -432,6 +277,8 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
         for fake in FABRICATION_WATCHLIST:
             if len(fake) <= 2:
                 continue
+            if any(fake in skill for skill in allowed_skills):
+                continue
             if fake in skills_block:
                 errors.append(f"FABRICATED SKILL in Technical Skills: '{fake}'")
 
@@ -448,10 +295,10 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
     if "\u2014" in text or "\u2013" in text:
         errors.append("Contains em dash or en dash.")
 
-    # 10. Banned words (word-boundary matching)
+    # 10. Banned words (style warning, not hard error — judge layer evaluates tone)
     found_banned = [w for w in BANNED_WORDS if re.search(r"\b" + re.escape(w) + r"\b", text_lower)]
     if found_banned:
-        errors.append(f"Banned words: {', '.join(found_banned[:5])}")
+        warnings.append(f"Banned words (style): {', '.join(found_banned[:5])}")
 
     # 11. LLM self-talk leak detection
     found_leaks = [p for p in LLM_LEAK_PHRASES if p in text_lower]
@@ -475,36 +322,27 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
 
 # ── Cover Letter Validation ──────────────────────────────────────────────
 
-def validate_cover_letter(text: str, mode: str = "normal") -> dict:
+def validate_cover_letter(text: str) -> dict:
     """Programmatic validation of a cover letter.
 
     Args:
         text: The cover letter text to validate.
-        mode: Validation strictness — "strict", "normal", or "lenient".
-              strict  → banned words are errors (trigger retries); word limit enforced
-              normal  → banned words are warnings; word limit is soft (+25 words)
-              lenient → banned words ignored; word count not checked
 
     Returns:
-        {"passed": bool, "errors": list[str], "warnings": list[str]}
+        {"passed": bool, "errors": list[str]}
     """
     errors: list[str] = []
     warnings: list[str] = []
     text_lower = text.lower()
 
-    # 1. Em dashes — always an error (sanitize_text should have caught these)
+    # 1. Em dashes
     if "\u2014" in text or "\u2013" in text:
         errors.append("Contains em dash or en dash.")
 
-    # 2. Banned words — severity depends on mode
-    if mode != "lenient":
-        found = [w for w in BANNED_WORDS if re.search(r"\b" + re.escape(w) + r"\b", text_lower)]
-        if found:
-            msg = f"Banned words: {', '.join(found[:5])}"
-            if mode == "strict":
-                errors.append(msg)
-            else:  # normal
-                warnings.append(msg)
+    # 2. Banned words (style warning, not hard error — judge layer evaluates tone)
+    found = [w for w in BANNED_WORDS if re.search(r"\b" + re.escape(w) + r"\b", text_lower)]
+    if found:
+        warnings.append(f"Banned words (style): {', '.join(found[:5])}")
 
     # 2b. Hard-reject phrase patterns (error tier — these force a retry).
     hits = [label for label, pat in CL_BANNED_PATTERNS if re.search(pat, text_lower)]
@@ -523,12 +361,12 @@ def validate_cover_letter(text: str, mode: str = "normal") -> dict:
     elif words < 250:
         warnings.append(f"Below Jobscan ideal ({words} words, target 250-400) — passes but flagged.")
 
-    # 4. LLM self-talk — always an error regardless of mode
+    # 4. LLM self-talk
     found_leaks = [p for p in LLM_LEAK_PHRASES if p in text_lower]
     if found_leaks:
         errors.append(f"LLM self-talk: '{found_leaks[0]}'")
 
-    # 5. Must start with "Dear" — always checked (preamble should have been stripped)
+    # 5. Must start with "Dear"
     stripped = text.strip()
     if not stripped.lower().startswith("dear"):
         errors.append("Must start with 'Dear Hiring Manager,'")

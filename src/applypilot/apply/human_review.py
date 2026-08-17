@@ -23,26 +23,8 @@ import subprocess
 logger = logging.getLogger(__name__)
 
 
-
 def _job_hash(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:12]
-
-
-def _latest_worker_job_log(worker_id: int, started_at: float) -> str | None:
-    """Return the newest per-job log file for the worker started after started_at."""
-    pattern = f"agent_*_w{worker_id}_*.txt"
-    try:
-        candidates = sorted(config.LOG_DIR.glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)
-    except OSError:
-        return None
-    for path in candidates:
-        try:
-            if path.stat().st_mtime + 2 < started_at:
-                continue
-        except OSError:
-            continue
-        return str(path)
-    return None
 
 
 def _cdp_list_targets(port: int) -> list[dict]:

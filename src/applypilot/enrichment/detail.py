@@ -27,7 +27,6 @@ from patchright.sync_api import sync_playwright
 
 from applypilot.database import commit_with_retry, init_db, transition_state
 from applypilot.llm import get_client
-from applypilot.url_safety import is_algolia_queries_url
 
 log = logging.getLogger(__name__)
 
@@ -75,17 +74,14 @@ def set_proxy(proxy_str: str | None):
     global _PROXY_CONFIG
     if proxy_str:
         from applypilot.discovery.jobspy import parse_proxy
-
         _PROXY_CONFIG = parse_proxy(proxy_str)
 
 
 # -- URL resolution ----------------------------------------------------------
 
-
 def _load_base_urls() -> dict[str, str | None]:
     """Load site base URLs from config/sites.yaml."""
     from applypilot.config import load_base_urls
-
     return load_base_urls()
 
 
@@ -162,7 +158,9 @@ def resolve_all_urls(conn: sqlite3.Connection) -> dict:
 def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
     """Re-fetch WTTJ Algolia API to get proper detail URLs and fix slug-as-title.
     Returns count of URLs updated."""
-    wttj_jobs = conn.execute("SELECT url, title FROM jobs WHERE site = 'WelcomeToTheJungle'").fetchall()
+    wttj_jobs = conn.execute(
+        "SELECT url, title FROM jobs WHERE site = 'WelcomeToTheJungle'"
+    ).fetchall()
 
     if not wttj_jobs:
         return 0
@@ -170,7 +168,7 @@ def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
     algolia_data: dict = {}
 
     def capture_algolia(response):
-        if is_algolia_queries_url(response.url):
+        if "algolia.net" in response.url and "/queries" in response.url:
             try:
                 algolia_data["response"] = json.loads(response.text())
             except Exception:
@@ -244,7 +242,6 @@ def resolve_wttj_urls(conn: sqlite3.Connection) -> int:
 
 # -- Detail page intelligence ------------------------------------------------
 
-
 def collect_detail_intelligence(page) -> dict:
     """Collect signals from a detail page. Lighter than discovery -- no API interception."""
     intel: dict = {"json_ld": [], "page_title": "", "final_url": ""}
@@ -263,7 +260,6 @@ def collect_detail_intelligence(page) -> dict:
 
 
 # -- Tier 1: JSON-LD extraction -----------------------------------------------
-
 
 def extract_from_json_ld(intel: dict) -> dict | None:
     """Extract description and apply URL from JSON-LD JobPosting.
@@ -324,9 +320,9 @@ APPLY_SELECTORS = [
     'a[class*="apply"]',
     'a[aria-label*="pply"]',
     'button[data-testid*="apply"]',
-    "a#apply_button",
-    ".postings-btn-wrapper a",
-    "a.ashby-job-posting-apply-button",
+    'a#apply_button',
+    '.postings-btn-wrapper a',
+    'a.ashby-job-posting-apply-button',
     '#grnhse_app a[href*="apply"]',
     'a[data-qa="btn-apply"]',
     'a[class*="btn-apply"]',
@@ -335,29 +331,29 @@ APPLY_SELECTORS = [
 ]
 
 DESCRIPTION_SELECTORS = [
-    "#job-description",
-    "#job_description",
-    "#jobDescriptionText",
-    ".job-description",
-    ".job_description",
+    '#job-description',
+    '#job_description',
+    '#jobDescriptionText',
+    '.job-description',
+    '.job_description',
     '[class*="job-description"]',
     '[class*="jobDescription"]',
     '[data-testid*="description"]',
     '[data-testid="job-description"]',
-    ".posting-page .posting-categories + div",
-    "#content .posting-page",
-    "#app_body .content",
-    "#grnhse_app .content",
-    ".ashby-job-posting-description",
+    '.posting-page .posting-categories + div',
+    '#content .posting-page',
+    '#app_body .content',
+    '#grnhse_app .content',
+    '.ashby-job-posting-description',
     '[class*="posting-description"]',
     '[class*="job-detail"]',
     '[class*="jobDetail"]',
     '[class*="job-content"]',
     '[class*="job-body"]',
     '[role="main"] article',
-    "main article",
+    'main article',
     'article[class*="job"]',
-    ".job-posting-content",
+    '.job-posting-content',
 ]
 
 
@@ -513,12 +509,11 @@ def extract_with_llm(page, url: str) -> dict:
     try:
         client = get_client()
         t0 = time.time()
-        raw = client.chat([{"role": "user", "content": prompt}], max_output_tokens=4096)
+        raw = client.ask(prompt, temperature=0.0, max_tokens=4096)
         elapsed = time.time() - t0
         log.info("LLM: %d chars in, %.1fs", len(prompt), elapsed)
 
         from applypilot.discovery.smartextract import extract_json
-
         result = extract_json(raw)
         desc = result.get("full_description")
         apply_url = result.get("application_url")
@@ -539,7 +534,6 @@ def extract_with_llm(page, url: str) -> dict:
 
 
 # -- Description cleaning ---------------------------------------------------
-
 
 def clean_description(text: str) -> str:
     """Convert HTML description to clean readable text."""
@@ -882,15 +876,8 @@ def scrape_site_batch(
                 apply_str = "yes" if result.get("application_url") else "no"
                 err_str = f" | err={result.get('error')}" if result.get("error") else ""
 
-                log.info(
-                    "  %s | %s | desc=%s chars | apply=%s | %.1fs%s",
-                    status,
-                    tier_str,
-                    f"{desc_len:,}",
-                    apply_str,
-                    elapsed,
-                    err_str,
-                )
+                log.info("  %s | %s | desc=%s chars | apply=%s | %.1fs%s",
+                         status, tier_str, f"{desc_len:,}", apply_str, elapsed, err_str)
 
                 if status in ("ok", "partial"):
                     stats[status] += 1
@@ -957,16 +944,16 @@ def _run_detail_scraper(
 
     Returns aggregate stats dict.
     """
-    placeholders = ",".join("?" * len(SKIP_DETAIL_SITES))
-    rows = conn.execute(
-        "SELECT url, title, site FROM jobs "
-        f"WHERE site NOT IN ({placeholders}) AND ("
+    skip_filter = " AND ".join(f"site != '{s}'" for s in SKIP_DETAIL_SITES)
+    where = (
+        f"WHERE ({skip_filter}) AND ("
         "  detail_scraped_at IS NULL "
         "  OR (detail_error_category = 'retriable' "
         "      AND (enrich_next_retry_at IS NULL OR enrich_next_retry_at <= datetime('now')))"
-        ") "
-        "ORDER BY site, discovered_at DESC",
-        list(SKIP_DETAIL_SITES),
+        ")"
+    )
+    rows = conn.execute(
+        f"SELECT url, title, site FROM jobs {where} ORDER BY site, discovered_at DESC"
     ).fetchall()
 
     if not rows:
@@ -990,12 +977,8 @@ def _run_detail_scraper(
         log.info("  %s: %d jobs", site, len(jobs))
 
     known_order = [
-        "RemoteOK",
-        "Job Bank Canada",
-        "BuiltIn Remote",
-        "WelcomeToTheJungle",
-        "CareerJet Canada",
-        "Hacker News Jobs",
+        "RemoteOK", "Job Bank Canada", "BuiltIn Remote",
+        "WelcomeToTheJungle", "CareerJet Canada", "Hacker News Jobs",
     ]
     order = [s for s in known_order if s in site_jobs]
     order += [s for s in sorted(site_jobs.keys()) if s not in order]
@@ -1016,16 +999,9 @@ def _run_detail_scraper(
             delay = SITE_DELAYS.get(site, 2.0)
             log.info("%s -- %d jobs (delay=%.1fs)", site, len(jobs), delay)
             stats = scrape_site_batch(None, site, jobs, delay=delay, max_jobs=max_per_site)
-            log.info(
-                "%s summary: %d ok, %d partial, %d error | T1=%d T2=%d T3=%d",
-                site,
-                stats["ok"],
-                stats["partial"],
-                stats["error"],
-                stats["tiers"].get(1, 0),
-                stats["tiers"].get(2, 0),
-                stats["tiers"].get(3, 0),
-            )
+            log.info("%s summary: %d ok, %d partial, %d error | T1=%d T2=%d T3=%d",
+                     site, stats["ok"], stats["partial"], stats["error"],
+                     stats["tiers"].get(1, 0), stats["tiers"].get(2, 0), stats["tiers"].get(3, 0))
             return stats
 
         with ThreadPoolExecutor(max_workers=min(workers, len(order))) as pool:
@@ -1042,29 +1018,14 @@ def _run_detail_scraper(
             stats = scrape_site_batch(conn, site, jobs, delay=delay, max_jobs=max_per_site)
             _merge_stats(stats)
 
-            log.info(
-                "Site summary: %d ok, %d partial, %d error | T1=%d T2=%d T3=%d",
-                stats["ok"],
-                stats["partial"],
-                stats["error"],
-                stats["tiers"].get(1, 0),
-                stats["tiers"].get(2, 0),
-                stats["tiers"].get(3, 0),
-            )
+            log.info("Site summary: %d ok, %d partial, %d error | T1=%d T2=%d T3=%d",
+                     stats["ok"], stats["partial"], stats["error"],
+                     stats["tiers"].get(1, 0), stats["tiers"].get(2, 0), stats["tiers"].get(3, 0))
 
-    log.info(
-        "TOTAL: %d processed | %d ok | %d partial | %d error",
-        total_stats["processed"],
-        total_stats["ok"],
-        total_stats["partial"],
-        total_stats["error"],
-    )
-    log.info(
-        "Tier distribution: T1=%d T2=%d T3=%d",
-        total_stats["tiers"].get(1, 0),
-        total_stats["tiers"].get(2, 0),
-        total_stats["tiers"].get(3, 0),
-    )
+    log.info("TOTAL: %d processed | %d ok | %d partial | %d error",
+             total_stats["processed"], total_stats["ok"], total_stats["partial"], total_stats["error"])
+    log.info("Tier distribution: T1=%d T2=%d T3=%d",
+             total_stats["tiers"].get(1, 0), total_stats["tiers"].get(2, 0), total_stats["tiers"].get(3, 0))
 
     llm_calls = total_stats["tiers"].get(3, 0)
     total = total_stats["processed"]
@@ -1076,7 +1037,6 @@ def _run_detail_scraper(
 
 
 # -- Streaming detail scraper (for sequential pipeline) ----------------------
-
 
 def stream_detail(
     upstream_done,
@@ -1098,7 +1058,8 @@ def stream_detail(
     conn = init_db()
 
     url_stats = resolve_all_urls(conn)
-    log.info("URL resolution: %d resolved, %d absolute", url_stats["resolved"], url_stats["already_absolute"])
+    log.info("URL resolution: %d resolved, %d absolute",
+             url_stats['resolved'], url_stats['already_absolute'])
 
     total_ok = 0
     total_err = 0
@@ -1106,16 +1067,15 @@ def stream_detail(
 
     try:
         while True:
-            placeholders = ",".join("?" * len(SKIP_DETAIL_SITES))
+            skip_filter = " AND ".join(f"site != '{s}'" for s in SKIP_DETAIL_SITES)
             rows = conn.execute(
                 "SELECT url, title, site FROM jobs "
-                f"WHERE site NOT IN ({placeholders}) AND ("
+                f"WHERE ({skip_filter}) AND ("
                 "  detail_scraped_at IS NULL "
                 "  OR (detail_error_category = 'retriable' "
                 "      AND (enrich_next_retry_at IS NULL OR enrich_next_retry_at <= datetime('now')))"
                 ") "
-                "ORDER BY site, discovered_at DESC LIMIT 200",
-                list(SKIP_DETAIL_SITES),
+                "ORDER BY site, discovered_at DESC LIMIT 200"
             ).fetchall()
 
             if rows:
@@ -1136,7 +1096,8 @@ def stream_detail(
                         stats = scrape_site_batch(conn, site, jobs, delay=delay)
                         total_ok += stats["ok"] + stats["partial"]
                         total_err += stats["error"]
-                        log.info("%s: %d ok, %d partial, %d error", site, stats["ok"], stats["partial"], stats["error"])
+                        log.info("%s: %d ok, %d partial, %d error",
+                                 site, stats['ok'], stats['partial'], stats['error'])
                     except Exception as e:
                         log.error("%s: CRASHED: %s", site, e)
 
@@ -1154,7 +1115,6 @@ def stream_detail(
 
 
 # -- Public entry point ------------------------------------------------------
-
 
 def run_enrichment(limit: int = 100, workers: int = 1) -> dict:
     """Main entry point for detail page enrichment.
@@ -1174,17 +1134,17 @@ def run_enrichment(limit: int = 100, workers: int = 1) -> dict:
 
     # URL resolution first
     url_stats = resolve_all_urls(conn)
-    log.info(
-        "URL resolution: %d resolved, %d absolute, %d failed",
-        url_stats["resolved"],
-        url_stats["already_absolute"],
-        url_stats["failed"],
-    )
+    log.info("URL resolution: %d resolved, %d absolute, %d failed",
+             url_stats["resolved"], url_stats["already_absolute"], url_stats["failed"])
 
     # WTTJ special handling
-    wttj_count = conn.execute("SELECT COUNT(*) FROM jobs WHERE site = 'WelcomeToTheJungle'").fetchone()[0]
+    wttj_count = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE site = 'WelcomeToTheJungle'"
+    ).fetchone()[0]
     if wttj_count > 0:
-        sample = conn.execute("SELECT url FROM jobs WHERE site = 'WelcomeToTheJungle' LIMIT 1").fetchone()
+        sample = conn.execute(
+            "SELECT url FROM jobs WHERE site = 'WelcomeToTheJungle' LIMIT 1"
+        ).fetchone()
         if sample and not sample[0].startswith("http"):
             updated = resolve_wttj_urls(conn)
             log.info("WTTJ: %d URLs updated", updated)

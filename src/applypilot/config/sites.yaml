@@ -2,7 +2,6 @@
 # Users can add their own sites following this pattern.
 # Use {location_encoded} placeholder for location (URL-encoded).
 # Use {query_encoded} placeholder for search terms (URL-encoded).
-# Use {distance} / {distance_encoded} for searches.yaml defaults.distance (miles).
 
 # ── Manual-Only ATS Domains ──────────────────────────────────────────────
 # These ATS platforms have unsolvable CAPTCHAs. Jobs routing through them

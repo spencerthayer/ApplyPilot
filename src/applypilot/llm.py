@@ -1,569 +1,500 @@
-"""Unified LLM client for ApplyPilot using LiteLLM internally.
+"""
+Unified LLM client for ApplyPilot.
 
-Public contract:
-  - Provider detection stays anchored in applypilot.llm_provider.
-  - OpenRouter remains a first-class user-facing provider.
-  - LLMClient.chat() accepts both max_tokens and max_output_tokens.
+Auto-detects provider from environment:
+  GEMINI_API_KEY    -> Google Gemini (primary)
+  OPENAI_API_KEY    -> OpenAI (fallback)
+  ANTHROPIC_API_KEY -> Anthropic (fallback)
+  LLM_URL           -> Local llama.cpp / Ollama compatible endpoint
+
+LLM_MODEL env var overrides the default (fast) model for any provider.
+LLM_MODEL_QUALITY env var sets a higher-quality model for critical steps
+(resume tailoring, cover letters). Falls back to LLM_MODEL if not set.
+
+When a model hits a 429 rate limit, the client automatically tries the
+next model in the fallback chain — including cross-provider fallback to
+OpenAI and Anthropic if their API keys are configured.
 """
 
-from __future__ import annotations
-
-import atexit
 import logging
 import os
-import threading
 import time
-import warnings
-from collections.abc import Mapping
 from dataclasses import dataclass
-from types import SimpleNamespace
-from typing import Any, Literal, TypedDict
 
-try:
-    import litellm
-except ModuleNotFoundError:  # pragma: no cover - exercised only in minimal environments
-    def _missing_litellm(**_: Any) -> Any:
-        raise RuntimeError("litellm is required for ApplyPilot LLM requests. Install project dependencies first.")
-
-    litellm = SimpleNamespace(completion=_missing_litellm, suppress_debug_info=False)
-
-from applypilot.llm_provider import detect_llm_provider, llm_config_hint
-
-warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
+import httpx
 
 log = logging.getLogger(__name__)
 
-_MAX_RETRIES = 5
-_TIMEOUT = 120
-_DEFAULT_MAX_TOKENS = 4096
-_EXHAUSTION_COOLDOWN_SECONDS = 300
-_STREAMING_TRUE_VALUES = {"1", "true", "yes"}
-_OPENROUTER_FREE_MIN_INTERVAL_SECONDS = 3.5
-_OPENROUTER_RATE_LIMIT_COOLDOWN_SECONDS = 20.0
-_PROVIDER_API_KEYS = {
-    "gemini": "GEMINI_API_KEY",
-    "openrouter": "OPENROUTER_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-}
-_PROVIDER_BASE_URLS = {
-    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
-    "openrouter": "https://openrouter.ai/api/v1",
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com/v1",
-}
-_KNOWN_PROVIDER_PREFIXES = frozenset(
-    {
-        "anthropic",
-        "azure",
-        "deepseek",
-        "gemini",
-        "local",
-        "ollama",
-        "openai",
-        "openai_compat",
-        "openrouter",
-        "vertex_ai",
-    }
-)
-@dataclass(frozen=True)
-class LLMConfig:
-    """LLM configuration consumed by LLMClient."""
-
-    provider: str
-    api_base: str | None
-    model: str
-    api_key: str
-    base_url: str | None = None
-    use_streaming: bool = False
-
+# ---------------------------------------------------------------------------
+# Model registry — each entry knows its provider, endpoint, and API key
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class ModelEntry:
-    """A fallback-capable model target."""
-
+    """A model with everything needed to call it."""
     name: str
-    provider: str
+    provider: str           # "gemini", "openai", "anthropic", "local"
     base_url: str
     api_key: str
 
 
-class ChatMessage(TypedDict):
-    role: Literal["system", "user", "assistant", "tool"]
-    content: str
-
-
-class LiteLLMExtra(TypedDict, total=False):
-    stop: str | list[str]
-    top_p: float
-    seed: int
-    stream: bool
-    response_format: dict[str, Any]
-    tools: list[dict[str, Any]]
-    tool_choice: str | dict[str, Any]
-    fallbacks: list[str]
-
-
-def _env_get(env: Mapping[str, str], key: str) -> str:
-    value = env.get(key, "")
-    if value is None:
-        return ""
-    return str(value).strip()
-
-
-def _normalize_model(provider: str, model: str) -> str:
-    if provider == "local":
-        provider = "openai"
-    if provider == "openrouter":
-        return model if model.startswith("openrouter/") else f"openrouter/{model}"
-    return model if "/" in model else f"{provider}/{model}"
-
-
-def _provider_from_model(model: str) -> str:
-    provider, _, remainder = model.partition("/")
-    if not provider or not remainder:
-        raise RuntimeError("LLM_MODEL must include a provider prefix (for example 'openai/gpt-4o-mini').")
-    return provider
-
-
-def _raw_model_name(model: str) -> str:
-    _, sep, remainder = model.partition("/")
-    return remainder if sep else model
-
-
-def _is_provider_qualified_model(model: str) -> bool:
-    prefix, sep, remainder = model.partition("/")
-    return bool(prefix and sep and remainder and prefix in _KNOWN_PROVIDER_PREFIXES)
-
-
 def _build_fallback_chain(primary_model: str, quality: bool = False) -> list[ModelEntry]:
-    """Build a best-effort fallback chain using configured provider keys."""
+    """Build a cross-provider fallback chain starting from the primary model.
 
-    primary_name = _raw_model_name(primary_model)
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    Gemini models come first (free tier), then OpenAI (cheap), then Anthropic.
+    Only includes providers whose API keys are configured.
+    """
+    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "")
+    gemini_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+    openai_url = "https://api.openai.com/v1"
+    anthropic_url = "https://api.anthropic.com"
+    deepseek_url = "https://api.deepseek.com/v1"
 
-    gemini_models = (
-        ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
-        if quality
-        else ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
-    )
-    openai_models = ["gpt-4.1-mini", "gpt-4.1-nano"] if quality else ["gpt-4.1-nano", "gpt-4.1-mini"]
-    anthropic_models = (
-        ["claude-sonnet-4-5-20250514", "claude-haiku-4-5-20251001"]
-        if quality
-        else ["claude-haiku-4-5-20251001"]
-    )
-    deepseek_models = ["deepseek-chat"]
+    # Gemini chains — use verified model IDs only
+    if quality:
+        gemini_models = [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+        ]
+    else:
+        gemini_models = [
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+        ]
+
+    # OpenAI fallbacks (cost-efficient)
+    if quality:
+        openai_models = ["gpt-4.1-mini", "gpt-4.1-nano"]
+    else:
+        openai_models = ["gpt-4.1-nano", "gpt-4.1-mini"]
+
+    # Anthropic fallbacks (cost-efficient)
+    if quality:
+        anthropic_models = ["claude-sonnet-4-5-20250514", "claude-haiku-4-5-20251001"]
+    else:
+        anthropic_models = ["claude-haiku-4-5-20251001"]
 
     chain: list[ModelEntry] = []
 
-    def _append(models: list[str], provider: str, api_key: str, base_url: str) -> None:
-        for model_name in models:
-            chain.append(ModelEntry(model_name, provider, base_url, api_key))
-
+    # Start from the primary model in the Gemini chain
     if gemini_key:
-        if primary_name in gemini_models:
-            start = gemini_models.index(primary_name)
-            _append(gemini_models[start:], "gemini", gemini_key, _PROVIDER_BASE_URLS["gemini"])
-            _append(gemini_models[:start], "gemini", gemini_key, _PROVIDER_BASE_URLS["gemini"])
-        else:
-            chain.append(ModelEntry(primary_name, "gemini", _PROVIDER_BASE_URLS["gemini"], gemini_key))
-            _append([name for name in gemini_models if name != primary_name], "gemini", gemini_key, _PROVIDER_BASE_URLS["gemini"])
+        started = False
+        for m in gemini_models:
+            if m == primary_model:
+                started = True
+            if started:
+                chain.append(ModelEntry(m, "gemini", gemini_url, gemini_key))
+        # If primary wasn't found in chain, add full chain
+        if not started:
+            chain.append(ModelEntry(primary_model, "gemini", gemini_url, gemini_key))
+            for m in gemini_models:
+                if m != primary_model:
+                    chain.append(ModelEntry(m, "gemini", gemini_url, gemini_key))
 
+    # DeepSeek fallbacks (cheap, OpenAI-compatible)
+    if quality:
+        deepseek_models = ["deepseek-chat"]
+    else:
+        deepseek_models = ["deepseek-chat"]
+
+    # OpenAI fallbacks
     if openai_key:
-        _append(openai_models, "openai", openai_key, _PROVIDER_BASE_URLS["openai"])
+        for m in openai_models:
+            chain.append(ModelEntry(m, "openai", openai_url, openai_key))
 
+    # DeepSeek fallbacks
     if deepseek_key:
-        _append(deepseek_models, "deepseek", deepseek_key, "https://api.deepseek.com/v1")
+        for m in deepseek_models:
+            chain.append(ModelEntry(m, "deepseek", deepseek_url, deepseek_key))
 
+    # Anthropic fallbacks
     if anthropic_key:
-        _append(anthropic_models, "anthropic", anthropic_key, _PROVIDER_BASE_URLS["anthropic"])
+        for m in anthropic_models:
+            chain.append(ModelEntry(m, "anthropic", anthropic_url, anthropic_key))
 
+    # If nothing was added (no keys), raise
     if not chain:
         raise RuntimeError(
             "No LLM provider configured. "
             "Set GEMINI_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, or ANTHROPIC_API_KEY."
         )
 
-    deduped: list[ModelEntry] = []
-    seen: set[tuple[str, str]] = set()
-    for entry in chain:
-        key = (entry.provider, entry.name)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(entry)
-    return deduped
+    return chain
 
 
-def _detect_provider() -> tuple[str, str, str]:
-    """Return the canonical provider tuple expected by main-branch callers."""
+# ---------------------------------------------------------------------------
+# Provider detection (for primary model selection)
+# ---------------------------------------------------------------------------
 
-    selection = detect_llm_provider()
-    if selection is not None:
-        return selection.base_url, selection.model, selection.api_key
-    raise RuntimeError(f"No LLM provider configured. {llm_config_hint()}")
+def _detect_provider(quality: bool = False) -> tuple[str, str, str]:
+    """Return (base_url, model, api_key) for the primary provider."""
+    gemini_key = os.environ.get("GEMINI_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+    local_url = os.environ.get("LLM_URL", "")
 
+    model_override = os.environ.get("LLM_MODEL", "")
+    quality_model = os.environ.get("LLM_MODEL_QUALITY", "")
 
-def resolve_llm_config(env: Mapping[str, str] | None = None, quality: bool = False) -> LLMConfig:
-    """Resolve runtime LLM configuration while preserving main's provider contract."""
+    if quality and quality_model:
+        chosen_model = quality_model
+    else:
+        chosen_model = model_override
 
-    env_map = os.environ if env is None else env
-    selection = detect_llm_provider(env_map)
-    configured_model = _env_get(env_map, "LLM_MODEL_QUALITY") if quality else ""
-    if not configured_model:
-        configured_model = _env_get(env_map, "LLM_MODEL")
-    local_url = _env_get(env_map, "LLM_URL").rstrip("/")
-    use_streaming = _env_get(env_map, "LLM_STREAMING_MODE").lower() in _STREAMING_TRUE_VALUES
-
-    if selection is not None:
-        selected_provider = selection.spec.key
-        raw_model = configured_model or selection.model
-        model = _normalize_model(selected_provider, raw_model)
-        api_base = local_url if selected_provider == "local" else None
-        provider = "openai" if selected_provider == "local" else selected_provider
-        return LLMConfig(
-            provider=provider,
-            api_base=api_base,
-            model=model,
-            api_key=selection.api_key,
-            base_url=selection.base_url,
-            use_streaming=use_streaming,
+    if gemini_key and not local_url:
+        return (
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            chosen_model or "gemini-2.5-flash",
+            gemini_key,
         )
-
-    if not configured_model:
-        raise RuntimeError(f"No LLM provider configured. {llm_config_hint()}")
-
-    provider = _provider_from_model(configured_model)
-    api_key = _env_get(env_map, _PROVIDER_API_KEYS.get(provider, "")) or _env_get(env_map, "LLM_API_KEY")
-    api_base = local_url or None
-    if not api_key and not api_base:
-        env_hint = _PROVIDER_API_KEYS.get(provider, "LLM_API_KEY")
-        raise RuntimeError(
-            f"Missing credentials for LLM_MODEL '{configured_model}'. "
-            f"Set {env_hint} or LLM_API_KEY, or provide LLM_URL for a local endpoint."
+    if openai_key and not local_url:
+        return (
+            "https://api.openai.com/v1",
+            chosen_model or "gpt-4.1-nano",
+            openai_key,
         )
-
-    return LLMConfig(
-        provider=provider,
-        api_base=api_base,
-        model=configured_model,
-        api_key=api_key,
-        base_url=api_base or _PROVIDER_BASE_URLS.get(provider),
-        use_streaming=use_streaming,
+    if local_url:
+        return (
+            local_url.rstrip("/"),
+            chosen_model or "local-model",
+            os.environ.get("LLM_API_KEY", ""),
+        )
+    raise RuntimeError(
+        "No LLM provider configured. "
+        "Set GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL."
     )
 
 
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
+
+_MAX_RETRIES = 3
+_TIMEOUT = 300  # seconds
+
+
 class LLMClient:
-    """Thin wrapper around LiteLLM completion()."""
+    """Multi-provider LLM client with automatic model fallback."""
 
-    def __init__(
-        self,
-        config_or_base_url: LLMConfig | str | None = None,
-        model: str | None = None,
-        api_key: str | None = None,
-        quality: bool = False,
-        *,
-        base_url: str | None = None,
-    ) -> None:
-        config_source = base_url if base_url is not None else config_or_base_url
-        if isinstance(config_source, LLMConfig):
-            self.config = config_source
-        else:
-            if config_source is None:
-                raise TypeError("base_url or LLMConfig is required when constructing LLMClient")
-            resolved_base_url = str(config_source)
-            if model is None:
-                raise TypeError("model is required when constructing LLMClient with base_url")
-            self.config = LLMConfig(
-                provider="openai" if resolved_base_url.startswith("http") else "unknown",
-                api_base=resolved_base_url.rstrip("/"),
-                model=model,
-                api_key=api_key or "",
-                base_url=resolved_base_url.rstrip("/"),
-            )
-
-        self.provider = self.config.provider
-        self.model = self.config.model
-        self.api_key = self.config.api_key
-        self.base_url = self.config.base_url or self.config.api_base or _PROVIDER_BASE_URLS.get(self.provider, "")
-        self._use_streaming = self.config.use_streaming
+    def __init__(self, base_url: str, model: str, api_key: str,
+                 quality: bool = False) -> None:
+        self.base_url = base_url
+        self.model = model
+        self.api_key = api_key
         self.quality = quality
-        self._request_options: dict[str, Any] = {}
+        self._fallback_chain = _build_fallback_chain(model, quality=quality)
+        self._client = httpx.Client(timeout=_TIMEOUT)
+        # Track which models are temporarily exhausted (daily limit)
         self._exhausted: dict[str, float] = {}
-        litellm.suppress_debug_info = True
 
-        self._fallback_chain = [self._primary_entry()]
-        try:
-            for entry in _build_fallback_chain(_raw_model_name(self.model), quality=self.quality):
-                if any(existing.name == entry.name for existing in self._fallback_chain):
-                    continue
-                self._fallback_chain.append(entry)
-        except RuntimeError:
-            pass
+        chain_names = [f"{e.name} ({e.provider})" for e in self._fallback_chain]
+        log.info("Fallback chain (%s): %s",
+                 "quality" if quality else "fast", " -> ".join(chain_names))
 
     def chat(
         self,
-        messages: list[dict[str, Any]] | list[ChatMessage],
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        max_output_tokens: int | None = None,
-        timeout: int = _TIMEOUT,
-        num_retries: int = _MAX_RETRIES,
-        drop_params: bool = True,
-        **extra: Any,
+        messages: list[dict],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
     ) -> str:
-        """Send a completion request and return plain text content."""
+        """Send a chat completion request with automatic cross-provider fallback."""
+        # Qwen3 optimization
+        if "qwen" in self.model.lower() and messages:
+            first = messages[0]
+            if first.get("role") == "user" and not first["content"].startswith("/no_think"):
+                messages = [{"role": first["role"], "content": f"/no_think\n{first['content']}"}] + messages[1:]
 
-        effective_max_tokens = (
-            max_output_tokens
-            if max_output_tokens is not None
-            else max_tokens
-            if max_tokens is not None
-            else _DEFAULT_MAX_TOKENS
-        )
-        payload_messages = [dict(message) for message in messages]
+        # Build list of models to try: skip recently exhausted ones
+        now = time.time()
+        entries_to_try = [
+            e for e in self._fallback_chain
+            if e.name not in self._exhausted or (now - self._exhausted[e.name]) > 300
+        ]
+        if not entries_to_try:
+            self._exhausted.clear()
+            entries_to_try = list(self._fallback_chain)
 
-        self._request_options = {
-            "timeout": timeout,
-            "num_retries": num_retries,
-            "drop_params": drop_params,
-            "extra": dict(extra),
-        }
-        try:
-            entries_to_try = self._active_entries()
-            for index, entry in enumerate(entries_to_try):
-                result = self._try_entry(
-                    entry,
-                    payload_messages,
-                    temperature,
-                    effective_max_tokens,
-                    index == len(entries_to_try) - 1,
-                )
-                if result is not None:
-                    return result
-        finally:
-            self._request_options = {}
+        for idx, entry in enumerate(entries_to_try):
+            is_last = (idx == len(entries_to_try) - 1)
+            result = self._try_entry(entry, messages, temperature, max_tokens, is_last)
+            if result is not None:
+                return result
 
         raise RuntimeError(
-            "All configured LLM models are temporarily exhausted. "
+            f"All models exhausted after trying: "
+            f"{[e.name for e in entries_to_try]}. "
             "Wait a few minutes for rate limits to reset."
         )
 
-    def ask(self, prompt: str, **kwargs: Any) -> str:
-        """Convenience helper for a single user message."""
+    def _try_entry(self, entry: ModelEntry, messages: list[dict],
+                   temperature: float, max_tokens: int,
+                   is_last: bool = False) -> str | None:
+        """Try a single model entry. Dispatches to the right provider."""
+        if entry.provider == "anthropic":
+            return self._try_anthropic(entry, messages, temperature, max_tokens, is_last)
+        else:
+            return self._try_openai_compat(entry, messages, temperature, max_tokens, is_last)
 
-        return self.chat([{"role": "user", "content": prompt}], **kwargs)
+    def _try_openai_compat(self, entry: ModelEntry, messages: list[dict],
+                           temperature: float, max_tokens: int,
+                           is_last: bool = False) -> str | None:
+        """Try an OpenAI-compatible endpoint (Gemini, OpenAI, local)."""
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {entry.api_key}",
+        }
+        # DeepSeek deepseek-chat has an 8192 max output token limit
+        if entry.provider == "deepseek":
+            max_tokens = min(max_tokens, 8192)
+        payload = {
+            "model": entry.name,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
 
-    def close(self) -> None:
-        """LiteLLM completion() is stateless, so close() is a no-op."""
+        for attempt in range(_MAX_RETRIES):
+            try:
+                resp = self._client.post(
+                    f"{entry.base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                )
+                if resp.status_code == 402:
+                    # Payment Required — account out of credits; mark exhausted for 1 hour
+                    log.warning("%s/%s payment required (402), marking exhausted for 1h",
+                                entry.provider, entry.name)
+                    self._exhausted[entry.name] = time.time() + 3600 - 300  # 1h from now
+                    return None
+
+                if resp.status_code == 400:
+                    body = resp.text.lower()
+                    if "api_key_invalid" in body or "api key expired" in body:
+                        log.warning("%s/%s API key invalid/expired, trying next",
+                                    entry.provider, entry.name)
+                        self._exhausted[entry.name] = time.time()
+                        return None
+                    # Any other 400 (content safety, model not found, malformed prompt)
+                    # — don't mark exhausted (it's per-request, not a quota), just skip
+                    if not is_last:
+                        log.warning("%s/%s 400 Bad Request, trying next: %.120s",
+                                    entry.provider, entry.name, resp.text)
+                        return None
+
+                if resp.status_code == 404:
+                    log.warning("%s/%s model not found (404), trying next",
+                                entry.provider, entry.name)
+                    self._exhausted[entry.name] = time.time()
+                    return None
+
+                if resp.status_code == 429:
+                    body = resp.text.lower()
+                    if "resource has been exhausted" in body or "quota" in body or "rate_limit" in body:
+                        log.warning("%s/%s hit quota limit, trying next",
+                                    entry.provider, entry.name)
+                        self._exhausted[entry.name] = time.time()
+                        return None
+
+                    if attempt < _MAX_RETRIES - 1:
+                        wait = 2 ** attempt + 1
+                        log.warning("%s/%s 429 (RPM), retry in %ds (%d/%d)",
+                                    entry.provider, entry.name, wait,
+                                    attempt + 1, _MAX_RETRIES)
+                        time.sleep(wait)
+                        continue
+                    elif not is_last:
+                        log.warning("%s/%s still 429, trying next model",
+                                    entry.provider, entry.name)
+                        return None
+                    else:
+                        resp.raise_for_status()
+
+                if resp.status_code == 503 and attempt < _MAX_RETRIES - 1:
+                    wait = 2 ** attempt
+                    log.warning("%s/%s 503, retry in %ds", entry.provider, entry.name, wait)
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+                # Guard against malformed responses (null body, null choices, null content)
+                if not isinstance(data, dict) or not data.get("choices"):
+                    if not is_last:
+                        log.warning("%s/%s: malformed response (no choices), trying next",
+                                    entry.provider, entry.name)
+                        return None
+                    raise RuntimeError(
+                        f"Malformed response from {entry.provider}/{entry.name}: "
+                        f"no choices in {type(data).__name__}"
+                    )
+                text = data["choices"][0]["message"]["content"]
+                if text is None:
+                    # Model returned null content (refusal, tool_call, etc.)
+                    if not is_last:
+                        log.warning("%s/%s: null content in response, trying next",
+                                    entry.provider, entry.name)
+                        return None
+                    raise RuntimeError(
+                        f"Null content from {entry.provider}/{entry.name} "
+                        f"(refusal: {data['choices'][0]['message'].get('refusal', 'none')})"
+                    )
+
+                if entry.name != self.model:
+                    log.info("Used fallback %s/%s (primary: %s)",
+                             entry.provider, entry.name, self.model)
+                return text
+
+            except httpx.TimeoutException:
+                if attempt < _MAX_RETRIES - 1:
+                    wait = 2 ** attempt
+                    log.warning("%s/%s timeout, retry in %ds",
+                                entry.provider, entry.name, wait)
+                    time.sleep(wait)
+                    continue
+                if not is_last:
+                    log.warning("%s/%s timeout after retries, trying next",
+                                entry.provider, entry.name)
+                    return None
+                raise
 
         return None
 
-    def _primary_entry(self) -> ModelEntry:
-        # OpenRouter model IDs often include nested slashes (vendor/model), so
-        # keep the provider-qualified model string for the primary entry.
-        primary_name = self.model if self.provider == "openrouter" else _raw_model_name(self.model)
-        return ModelEntry(
-            name=primary_name,
-            provider=self.provider,
-            base_url=self.config.base_url or self.config.api_base or "",
-            api_key=self.api_key,
-        )
-
-    def _active_entries(self) -> list[ModelEntry]:
-        now = time.time()
-        active = [
-            entry
-            for entry in self._fallback_chain
-            if entry.name not in self._exhausted
-            or (now - self._exhausted[entry.name]) > _EXHAUSTION_COOLDOWN_SECONDS
-        ]
-        if active:
-            return active
-        self._exhausted.clear()
-        return list(self._fallback_chain)
-
-    def _entry_model(self, entry: ModelEntry) -> str:
-        if entry.provider == "unknown":
-            return self.model
-        if _is_provider_qualified_model(entry.name):
-            return entry.name
-        return _normalize_model(entry.provider, entry.name)
-
-    def _try_entry(
-        self,
-        entry: ModelEntry,
-        messages: list[dict[str, Any]] | list[ChatMessage],
-        temperature: float | None,
-        max_tokens: int,
-        is_last: bool,
-    ) -> str | None:
-        options = self._request_options
-        kwargs: dict[str, Any] = {
-            "model": self._entry_model(entry),
-            "messages": [dict(message) for message in messages],
-            "max_tokens": max_tokens,
-            "timeout": options.get("timeout", _TIMEOUT),
-            "num_retries": options.get("num_retries", _MAX_RETRIES),
-            "drop_params": options.get("drop_params", True),
-            "api_key": entry.api_key or None,
-            "api_base": entry.base_url or None,
-            "base_url": entry.base_url or None,
+    def _try_anthropic(self, entry: ModelEntry, messages: list[dict],
+                       temperature: float, max_tokens: int,
+                       is_last: bool = False) -> str | None:
+        """Try the Anthropic Messages API (different format from OpenAI)."""
+        headers = {
+            "Content-Type": "application/json",
+            "x-api-key": entry.api_key,
+            "anthropic-version": "2023-06-01",
         }
-        if temperature is not None:
-            kwargs["temperature"] = temperature
-        kwargs.update(options.get("extra", {}))
 
-        try:
-            model_name = self._entry_model(entry)
-            _respect_openrouter_cooldown(model_name)
-            _apply_openrouter_pacing(model_name)
-            if self._use_streaming:
-                kwargs["stream"] = True
-                response = litellm.completion(**kwargs)
-                text = self._consume_stream(response)
+        # Convert OpenAI message format to Anthropic format
+        # Extract system message if present
+        system_text = ""
+        api_messages = []
+        for msg in messages:
+            if msg["role"] == "system":
+                system_text = msg["content"]
             else:
-                response = litellm.completion(**kwargs)
-                text = self._extract_text(response)
-        except Exception as exc:
-            message = str(exc).lower()
-            if any(token in message for token in ("429", "rate limit", "quota", "resource has been exhausted", "payment required")):
-                _note_openrouter_rate_limit(self._entry_model(entry))
-                self._exhausted[entry.name] = time.time()
+                api_messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"],
+                })
+
+        # Anthropic requires at least one user message
+        if not api_messages:
+            return None
+
+        payload: dict = {
+            "model": entry.name,
+            "messages": api_messages,
+            "max_tokens": max_tokens,
+        }
+        if system_text:
+            payload["system"] = system_text
+        if temperature > 0:
+            payload["temperature"] = temperature
+
+        for attempt in range(_MAX_RETRIES):
+            try:
+                resp = self._client.post(
+                    f"{entry.base_url}/v1/messages",
+                    json=payload,
+                    headers=headers,
+                )
+                if resp.status_code == 429:
+                    body = resp.text.lower()
+                    if "rate_limit" in body or "quota" in body:
+                        log.warning("anthropic/%s hit rate limit, trying next", entry.name)
+                        self._exhausted[entry.name] = time.time()
+                        return None
+
+                    if attempt < _MAX_RETRIES - 1:
+                        wait = 2 ** attempt + 1
+                        log.warning("anthropic/%s 429, retry in %ds (%d/%d)",
+                                    entry.name, wait, attempt + 1, _MAX_RETRIES)
+                        time.sleep(wait)
+                        continue
+                    elif not is_last:
+                        return None
+                    else:
+                        resp.raise_for_status()
+
+                if resp.status_code == 529 and attempt < _MAX_RETRIES - 1:
+                    # Anthropic overloaded
+                    wait = 2 ** attempt + 2
+                    log.warning("anthropic/%s overloaded (529), retry in %ds",
+                                entry.name, wait)
+                    time.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+
+                # Extract text from Anthropic response format
+                text_parts = []
+                for block in data.get("content", []):
+                    if block.get("type") == "text":
+                        text_parts.append(block["text"])
+                text = "\n".join(text_parts)
+
+                if entry.name != self.model:
+                    log.info("Used fallback anthropic/%s (primary: %s)",
+                             entry.name, self.model)
+                return text
+
+            except httpx.TimeoutException:
+                if attempt < _MAX_RETRIES - 1:
+                    wait = 2 ** attempt
+                    log.warning("anthropic/%s timeout, retry in %ds",
+                                entry.name, wait)
+                    time.sleep(wait)
+                    continue
                 if not is_last:
                     return None
-            raise RuntimeError(f"LLM request failed ({entry.provider}/{entry.name}): {exc}") from exc
+                raise
 
-        if not text:
-            if not is_last:
-                return None
-            raise RuntimeError("LLM response contained no text content.")
-        return text
+        return None
 
-    @staticmethod
-    def _extract_text(response: Any) -> str:
-        choices = getattr(response, "choices", None)
-        if not choices:
-            return ""
-        message = choices[0].message
-        content = getattr(message, "content", None)
-        text = LLMClient._coerce_text(content)
-        if text:
-            return text
-        reasoning_content = getattr(message, "reasoning_content", None)
-        text = LLMClient._coerce_text(reasoning_content)
-        if text:
-            return text
-        return ""
+    def ask(self, prompt: str, **kwargs) -> str:
+        """Convenience: single user prompt -> assistant response."""
+        return self.chat([{"role": "user", "content": prompt}], **kwargs)
 
-    @staticmethod
-    def _consume_stream(response: Any) -> str:
-        parts: list[str] = []
-        for chunk in response:
-            choices = getattr(chunk, "choices", None)
-            if not choices:
-                continue
-            delta = getattr(choices[0], "delta", None)
-            if delta is None:
-                continue
-            content = getattr(delta, "content", None)
-            text = LLMClient._coerce_text(content)
-            if text:
-                parts.append(text)
-            reasoning_content = getattr(delta, "reasoning_content", None)
-            text = LLMClient._coerce_text(reasoning_content)
-            if text:
-                parts.append(text)
-        return "".join(parts).strip()
+    def close(self) -> None:
+        self._client.close()
 
-    @staticmethod
-    def _coerce_text(value: Any) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, str):
-            return value.strip()
-        if isinstance(value, list):
-            text_parts: list[str] = []
-            for part in value:
-                if isinstance(part, str):
-                    text_parts.append(part)
-                elif isinstance(part, dict):
-                    text = part.get("text")
-                    if text is not None:
-                        text_parts.append(str(text))
-            return "".join(text_parts).strip()
-        return str(value).strip()
 
+# ---------------------------------------------------------------------------
+# Singleton
+# ---------------------------------------------------------------------------
 
 _instance: LLMClient | None = None
 _quality_instance: LLMClient | None = None
-_instance_lock = threading.Lock()
-_openrouter_lock = threading.Lock()
-_openrouter_next_allowed_at = 0.0
-_openrouter_last_call_at = 0.0
 
 
 def get_client(quality: bool = False) -> LLMClient:
-    """Return the module-level client singleton."""
+    """Return (or create) the module-level LLMClient singleton.
 
+    Args:
+        quality: If True, return a client configured with LLM_MODEL_QUALITY
+                 for critical steps like resume tailoring and cover letters.
+    """
     global _instance, _quality_instance
-    target = _quality_instance if quality else _instance
-    if target is None:
-        with _instance_lock:
-            target = _quality_instance if quality else _instance
-            if target is None:
-                try:
-                    from applypilot.config import load_env
 
-                    load_env()
-                except ModuleNotFoundError:
-                    log.debug("python-dotenv not installed; skipping .env auto-load in llm.get_client().")
-                config = resolve_llm_config(quality=True) if quality else resolve_llm_config()
-                log.info("LLM provider: %s  model: %s", config.provider, config.model)
-                target = LLMClient(config, quality=quality) if quality else LLMClient(config)
-                atexit.register(target.close)
-                if quality:
-                    _quality_instance = target
-                else:
-                    _instance = target
-    return target
+    if quality and os.environ.get("LLM_MODEL_QUALITY"):
+        if _quality_instance is None:
+            base_url, model, api_key = _detect_provider(quality=True)
+            log.info("LLM quality provider: %s  model: %s", base_url, model)
+            _quality_instance = LLMClient(base_url, model, api_key, quality=True)
+        return _quality_instance
 
-
-def _is_openrouter_free_model(model_name: str) -> bool:
-    return model_name.startswith("openrouter/") and model_name.endswith(":free")
-
-
-def _apply_openrouter_pacing(model_name: str) -> None:
-    """Serialize free-tier OpenRouter calls to avoid per-minute bursts."""
-    global _openrouter_last_call_at
-    if not _is_openrouter_free_model(model_name):
-        return
-    with _openrouter_lock:
-        now = time.time()
-        wait_seconds = max(0.0, _openrouter_last_call_at + _OPENROUTER_FREE_MIN_INTERVAL_SECONDS - now)
-        if wait_seconds > 0:
-            time.sleep(wait_seconds)
-        _openrouter_last_call_at = time.time()
-
-
-def _respect_openrouter_cooldown(model_name: str) -> None:
-    """Block until shared cooldown expires after a free-tier 429 burst."""
-    if not _is_openrouter_free_model(model_name):
-        return
-    with _openrouter_lock:
-        now = time.time()
-        if now < _openrouter_next_allowed_at:
-            time.sleep(_openrouter_next_allowed_at - now)
-
-
-def _note_openrouter_rate_limit(model_name: str) -> None:
-    """Move all free-tier OpenRouter callers into a short cooldown window."""
-    global _openrouter_next_allowed_at
-    if not _is_openrouter_free_model(model_name):
-        return
-    with _openrouter_lock:
-        _openrouter_next_allowed_at = max(_openrouter_next_allowed_at, time.time() + _OPENROUTER_RATE_LIMIT_COOLDOWN_SECONDS)
+    if _instance is None:
+        base_url, model, api_key = _detect_provider()
+        log.info("LLM provider: %s  model: %s", base_url, model)
+        _instance = LLMClient(base_url, model, api_key, quality=False)
+    return _instance

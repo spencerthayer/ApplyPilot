@@ -5,8 +5,6 @@ pipeline stage are created up front so any stage can run independently
 without migration ordering issues.
 """
 
-from __future__ import annotations
-
 import hashlib
 import json
 import logging
@@ -19,7 +17,6 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 from applypilot.config import DB_PATH
-from applypilot.url_safety import host_matches, host_matches_any, path_segments, subdomain_prefix
 
 _log = logging.getLogger(__name__)
 
@@ -103,7 +100,7 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     """
     path = str(db_path or DB_PATH)
 
-    if not hasattr(_local, "connections"):
+    if not hasattr(_local, 'connections'):
         _local.connections = {}
 
     conn = _local.connections.get(path)
@@ -125,25 +122,10 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
 def close_connection(db_path: Path | str | None = None) -> None:
     """Close the cached connection for the current thread."""
     path = str(db_path or DB_PATH)
-    if hasattr(_local, "connections"):
+    if hasattr(_local, 'connections'):
         conn = _local.connections.pop(path, None)
         if conn is not None:
             conn.close()
-
-
-def close_all_connections() -> None:
-    """Close all cached connections for the current thread.
-
-    Call this in thread cleanup (e.g. ThreadPoolExecutor workers) to ensure
-    SQLite connections are properly released.
-    """
-    if hasattr(_local, "connections"):
-        for _path, conn in list(_local.connections.items()):
-            try:
-                conn.close()
-            except Exception:
-                pass
-        _local.connections.clear()
 
 
 def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
@@ -199,11 +181,6 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             fit_score             INTEGER,
             score_reasoning       TEXT,
             scored_at             TEXT,
-
-            -- Exclusion audit (deterministic gate)
-            exclusion_reason_code TEXT,
-            exclusion_rule_id     TEXT,
-            excluded_at           TEXT,
 
             -- Tailoring stage (resume tailor)
             tailored_resume_path  TEXT,
@@ -332,10 +309,6 @@ _ALL_COLUMNS: dict[str, str] = {
     "fit_score": "INTEGER",
     "score_reasoning": "TEXT",
     "scored_at": "TEXT",
-    # Exclusion audit
-    "exclusion_reason_code": "TEXT",
-    "exclusion_rule_id": "TEXT",
-    "excluded_at": "TEXT",
     "score_error": "TEXT",                 # set when all LLM providers failed; fit_score stays NULL
     # 2026-04-30: terminal eligibility tag set by scorer.
     # Values: NULL (not yet evaluated) | 'eligible' | 'non_us_only'.
@@ -904,23 +877,32 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     stats["total"] = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
 
     # By site breakdown
-    rows = conn.execute("SELECT site, COUNT(*) as cnt FROM jobs GROUP BY site ORDER BY cnt DESC").fetchall()
+    rows = conn.execute(
+        "SELECT site, COUNT(*) as cnt FROM jobs GROUP BY site ORDER BY cnt DESC"
+    ).fetchall()
     stats["by_site"] = [(row[0], row[1]) for row in rows]
 
     # Enrichment stage
-    stats["pending_detail"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL").fetchone()[0]
+    stats["pending_detail"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE detail_scraped_at IS NULL"
+    ).fetchone()[0]
 
-    stats["with_description"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL").fetchone()[
-        0
-    ]
+    stats["with_description"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL"
+    ).fetchone()[0]
 
-    stats["detail_errors"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE detail_error IS NOT NULL").fetchone()[0]
+    stats["detail_errors"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE detail_error IS NOT NULL"
+    ).fetchone()[0]
 
     # Scoring stage
-    stats["scored"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL").fetchone()[0]
+    stats["scored"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE fit_score IS NOT NULL"
+    ).fetchone()[0]
 
     stats["unscored"] = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE full_description IS NOT NULL AND fit_score IS NULL"
+        "SELECT COUNT(*) FROM jobs "
+        "WHERE full_description IS NOT NULL AND fit_score IS NULL"
     ).fetchone()[0]
 
     # Score distribution
@@ -932,7 +914,9 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     stats["score_distribution"] = [(row[0], row[1]) for row in dist_rows]
 
     # Tailoring stage
-    stats["tailored"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL").fetchone()[0]
+    stats["tailored"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL"
+    ).fetchone()[0]
 
     from applypilot.config import DEFAULTS as _DEFAULTS
     stats["untailored_eligible"] = conn.execute(
@@ -944,7 +928,9 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     ).fetchone()[0]
 
     stats["tailor_exhausted"] = conn.execute(
-        "SELECT COUNT(*) FROM jobs WHERE COALESCE(tailor_attempts, 0) >= 5 AND tailored_resume_path IS NULL"
+        "SELECT COUNT(*) FROM jobs "
+        "WHERE COALESCE(tailor_attempts, 0) >= 5 "
+        "AND tailored_resume_path IS NULL"
     ).fetchone()[0]
 
     # Cover letter stage
@@ -959,9 +945,13 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
     ).fetchone()[0]
 
     # Application stage
-    stats["applied"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL").fetchone()[0]
+    stats["applied"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL"
+    ).fetchone()[0]
 
-    stats["apply_errors"] = conn.execute("SELECT COUNT(*) FROM jobs WHERE apply_error IS NOT NULL").fetchone()[0]
+    stats["apply_errors"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_error IS NOT NULL"
+    ).fetchone()[0]
 
     stats["ready_to_apply"] = conn.execute(
         "SELECT COUNT(*) FROM jobs "
@@ -1080,73 +1070,79 @@ def extract_company(application_url: str | None) -> str | None:
     if not application_url:
         return None
     try:
-        from urllib.parse import parse_qs, unquote, urlparse
-
+        from urllib.parse import urlparse
         parsed = urlparse(application_url)
         host = parsed.hostname or ""
         path = parsed.path or ""
-        segments = path_segments(path)
 
         # Workday: workiva.wd503.myworkdayjobs.com → workiva
-        workday_match = _re.match(r"^(?P<company>[^.]+)(?:\.wd[^.]*)?\.myworkdayjobs\.com$", host, _re.IGNORECASE)
-        if workday_match:
-            return workday_match.group("company").lower()
+        if "myworkdayjobs.com" in host:
+            return host.split(".")[0].lower()
 
         # Greenhouse job boards: job-boards.greenhouse.io/hudl/... → hudl
         # Greenhouse embed:     job-boards.greenhouse.io/embed/job_app?for=coinbase → coinbase
-        if host in {"job-boards.greenhouse.io", "boards.greenhouse.io"}:
-            qs = parse_qs(parsed.query)
+        if "greenhouse.io" in host:
+            from urllib.parse import parse_qs, urlparse as _urlparse
+            qs = parse_qs(_urlparse(application_url).query)
             if "for" in qs:
                 return qs["for"][0].lower()
             if "/job_boards/" not in path:
-                parts = [p for p in segments if p not in ("embed", "job_app")]
+                parts = [p for p in path.split("/") if p and p not in ("embed", "job_app")]
                 if parts:
                     return parts[0].lower()
 
         # Lever: jobs.lever.co/LuminDigital/... → lumindigital
-        if host_matches(host, "lever.co") and segments:
-            return segments[0].lower()
+        if "lever.co" in host:
+            parts = [p for p in path.split("/") if p]
+            if parts:
+                return parts[0].lower()
 
         # iCIMS: careers-mercuryinsurance.icims.com → mercuryinsurance
-        if host_matches(host, "icims.com"):
-            prefix = subdomain_prefix(host, "icims.com")
+        if "icims.com" in host:
+            prefix = host.split(".icims.com")[0]
             prefix = prefix.replace("careers-", "").replace("careers.", "")
             return prefix.lower() if prefix else None
 
         # Jobvite: jobs.jobvite.com/en/company/... → company
-        if host_matches(host, "jobvite.com"):
-            parts = [p for p in segments if p != "en"]
+        if "jobvite.com" in host:
+            parts = [p for p in path.split("/") if p and p != "en"]
             if parts:
                 return parts[0].lower()
 
         # Ashby: jobs.ashbyhq.com/{company-slug}/... → company-slug
-        if host_matches(host, "ashbyhq.com"):
-            if segments:
-                return unquote(segments[0]).lower()
+        if "ashbyhq.com" in host:
+            from urllib.parse import unquote
+            parts = [p for p in path.split("/") if p]
+            if parts:
+                return unquote(parts[0]).lower()
 
         # Rippling ATS: ats.rippling.com/{company-slug}/jobs/... → company-slug
-        if host_matches(host, "ats.rippling.com") and segments:
-            return segments[0].lower()
+        if "rippling.com" in host and host.startswith("ats."):
+            parts = [p for p in path.split("/") if p]
+            if parts:
+                return parts[0].lower()
 
         # Workable: apply.workable.com/{company}/j/... → company
         # (short-form apply.workable.com/j/CODE has no company name — skip those)
-        if host_matches(host, "workable.com"):
-            parts = segments
+        if "workable.com" in host:
+            parts = [p for p in path.split("/") if p]
             if parts and parts[0] != "j":
                 return parts[0].lower()
 
         # Recruitee: {company}.recruitee.com/... → company
-        if host_matches(host, "recruitee.com"):
-            sub = subdomain_prefix(host, "recruitee.com")
+        if "recruitee.com" in host:
+            sub = host.split(".recruitee.com")[0]
             if sub and sub not in ("www", "app", "jobs"):
                 return sub.lower()
 
         # SmartRecruiters: careers.smartrecruiters.com/{Company}/... → company
-        if host_matches(host, "smartrecruiters.com") and segments:
-            return segments[0].lower()
+        if "smartrecruiters.com" in host:
+            parts = [p for p in path.split("/") if p]
+            if parts:
+                return parts[0].lower()
 
         # Oracle Cloud ATS: skip (company not in URL)
-        if host_matches(host, "oraclecloud.com"):
+        if "oraclecloud.com" in host:
             return None
 
         # Greenhouse short URLs: grnh.se → skip
@@ -1162,7 +1158,7 @@ def extract_company(application_url: str | None) -> str | None:
             "dice.com", "simplyhired.com", "monster.com", "careerjet.ca",
             "talent.com", "jobbank.gc.ca", "wellfound.com",
         }
-        if host_matches_any(host, skip_domains):
+        if any(host.endswith(d) for d in skip_domains):
             return None
 
         # Strip common subdomains

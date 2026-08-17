@@ -16,15 +16,17 @@ employers:
   # ── US Tech ─────────────────────────────────────────────────────────────
 
   workday:
-    name: Workday
-    tenant: workday
-    site_id: Workday
-    base_url: https://workday.wd5.myworkdayjobs.com
+    name: "Workday"
+    tenant: "workday"
+    site_id: "Workday"
+    base_url: "https://workday.wd5.myworkdayjobs.com"
+
   salesforce:
-    name: Salesforce
-    tenant: salesforce
-    site_id: External_Career_Site
-    base_url: https://salesforce.wd12.myworkdayjobs.com
+    name: "Salesforce"
+    tenant: "salesforce"
+    site_id: "External_Career_Site"
+    base_url: "https://salesforce.wd12.myworkdayjobs.com"
+
   nvidia:
     name: "NVIDIA"
     tenant: "nvidia"
@@ -38,20 +40,23 @@ employers:
   # → future-scraper candidate, see CLAUDE.md Future Work.
 
   cisco:
-    name: Cisco
-    tenant: cisco
-    site_id: Cisco_Careers
-    base_url: https://cisco.wd5.myworkdayjobs.com
+    name: "Cisco"
+    tenant: "cisco"
+    site_id: "Cisco_Careers"
+    base_url: "https://cisco.wd5.myworkdayjobs.com"
+
   intel:
-    name: Intel
-    tenant: intel
-    site_id: External
-    base_url: https://intel.wd1.myworkdayjobs.com
+    name: "Intel"
+    tenant: "intel"
+    site_id: "External"
+    base_url: "https://intel.wd1.myworkdayjobs.com"
+
   adobe:
-    name: Adobe
-    tenant: adobe
-    site_id: external_experienced
-    base_url: https://adobe.wd5.myworkdayjobs.com
+    name: "Adobe"
+    tenant: "adobe"
+    site_id: "external_experienced"
+    base_url: "https://adobe.wd5.myworkdayjobs.com"
+
   motorola:
     name: "Motorola Solutions"
     tenant: "motorolasolutions"

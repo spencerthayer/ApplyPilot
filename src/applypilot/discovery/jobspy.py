@@ -8,19 +8,10 @@ search configuration YAML (searches.yaml) rather than being hardcoded.
 """
 
 import logging
-import inspect
-import json
-import os
 import sqlite3
 import time
-import warnings
-from importlib import metadata as importlib_metadata
-from datetime import date, datetime, time as dtime, timedelta, timezone
-from pathlib import Path
-from urllib.parse import urlencode
-from uuid import uuid4
+from datetime import datetime, timezone
 
-import pandas as pd
 from jobspy import scrape_jobs
 
 # Patch TLSRotating to always specify a client_identifier.
@@ -62,74 +53,9 @@ from applypilot import config
 from applypilot.database import get_connection, init_db, write_with_retry
 
 log = logging.getLogger(__name__)
-_SCRAPE_JOBS_PARAMS = set(inspect.signature(scrape_jobs).parameters)
-_HOURS_OLD_SUPPORTED = "hours_old" in _SCRAPE_JOBS_PARAMS
-_HOURS_OLD_WARNING_EMITTED = False
-_DEBUG_JOBSPY_ENABLED = os.getenv("APPLYPILOT_DEBUG_JOBSPY") == "1"
-_DEBUG_LOG_PATH = Path(os.getenv("APPLYPILOT_DEBUG_LOG_PATH", ".cursor/debug-e0a421.log")).expanduser()
-_DEBUG_SESSION_ID = os.getenv("APPLYPILOT_DEBUG_SESSION_ID", "e0a421")
-_DEBUG_RUN_ID = os.getenv("APPLYPILOT_DEBUG_RUN_ID", "default")
-_JOBSPY_SITE_QUARANTINE_PATH = config.APP_DIR / "jobspy_site_quarantine.json"
-_JOBSPY_SITE_QUARANTINE_HOURS = 12
-
-
-def _resolve_debug_log_path() -> Path:
-    path = _DEBUG_LOG_PATH
-    if not path.is_absolute():
-        path = Path.cwd() / path
-    return path
-
-
-def _emit_debug_log(
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict,
-    run_id: str = _DEBUG_RUN_ID,
-) -> None:
-    if not _DEBUG_JOBSPY_ENABLED:
-        return
-    log_path = _resolve_debug_log_path()
-    payload = {
-        "sessionId": _DEBUG_SESSION_ID,
-        "id": f"log_{int(time.time() * 1000)}_{uuid4().hex[:8]}",
-        "timestamp": int(time.time() * 1000),
-        "runId": run_id,
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-    }
-    try:
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=True) + "\n")
-    except Exception:
-        pass
-
-
-def _jobspy_debug_compat_snapshot() -> dict:
-    try:
-        version = importlib_metadata.version("python-jobspy")
-    except importlib_metadata.PackageNotFoundError:
-        version = "unknown"
-    return {
-        "python_jobspy_version": version,
-        "scrape_jobs_signature_params": sorted(_SCRAPE_JOBS_PARAMS),
-        "hours_old_supported": _HOURS_OLD_SUPPORTED,
-        "site_by_site_fallback_enabled": True,
-    }
-
-
-def _clean(val) -> str | None:
-    if val is None:
-        return None
-    s = str(val)
-    return s if s and s != "nan" else None
 
 
 # -- Proxy parsing -----------------------------------------------------------
-
 
 def parse_proxy(proxy_str: str) -> dict:
     """Parse host:port:user:pass into components."""
@@ -159,44 +85,22 @@ def parse_proxy(proxy_str: str) -> dict:
             "playwright": {"server": f"http://{host}:{port}"},
         }
     else:
-        raise ValueError(f"Proxy format not recognized: {proxy_str}. Expected: host:port:user:pass or host:port")
+        raise ValueError(
+            f"Proxy format not recognized: {proxy_str}. "
+            f"Expected: host:port:user:pass or host:port"
+        )
 
 
 # -- Retry wrapper -----------------------------------------------------------
 
-
 def _scrape_with_retry(kwargs: dict, max_retries: int = 2, backoff: float = 5.0):
     """Call scrape_jobs with retry on transient failures."""
-    normalized_kwargs = _normalize_scrape_kwargs(kwargs)
     for attempt in range(max_retries + 1):
         try:
-            _emit_debug_log(
-                hypothesis_id="H4",
-                location="jobspy.py:_scrape_with_retry",
-                message="scrape attempt start",
-                data={
-                    "attempt": attempt,
-                    "max_retries": max_retries,
-                    "site_name": normalized_kwargs.get("site_name"),
-                },
-            )
-            return scrape_jobs(**normalized_kwargs)
+            return scrape_jobs(**kwargs)
         except Exception as e:
             err = str(e).lower()
             transient = any(k in err for k in ("timeout", "429", "proxy", "connection", "reset", "refused"))
-            _emit_debug_log(
-                hypothesis_id="H4",
-                location="jobspy.py:_scrape_with_retry",
-                message="scrape attempt failed",
-                data={
-                    "attempt": attempt,
-                    "max_retries": max_retries,
-                    "site_name": normalized_kwargs.get("site_name"),
-                    "exception_class": e.__class__.__name__,
-                    "exception_message": str(e),
-                    "classified_transient": transient,
-                },
-            )
             if transient and attempt < max_retries:
                 wait = backoff * (attempt + 1)
                 log.warning("Retry %d/%d in %.0fs: %s", attempt + 1, max_retries, wait, e)
@@ -205,126 +109,7 @@ def _scrape_with_retry(kwargs: dict, max_retries: int = 2, backoff: float = 5.0)
                 raise
 
 
-def _normalize_scrape_kwargs(kwargs: dict) -> dict:
-    """Adapt ApplyPilot kwargs to the installed JobSpy signature."""
-    normalized: dict = {}
-
-    for key, value in kwargs.items():
-        if key == "proxies":
-            if "proxies" in _SCRAPE_JOBS_PARAMS:
-                normalized["proxies"] = value
-            elif "proxy" in _SCRAPE_JOBS_PARAMS:
-                if isinstance(value, list):
-                    normalized["proxy"] = value[0] if value else None
-                else:
-                    normalized["proxy"] = value
-            continue
-
-        if key in _SCRAPE_JOBS_PARAMS:
-            normalized[key] = value
-
-    if "hours_old" in kwargs and not _HOURS_OLD_SUPPORTED:
-        _warn_hours_old_fallback()
-
-    _emit_debug_log(
-        hypothesis_id="H2",
-        location="jobspy.py:_normalize_scrape_kwargs",
-        message="normalized scrape kwargs",
-        data={
-            "input_site_name": kwargs.get("site_name"),
-            "normalized_site_name": normalized.get("site_name"),
-            "input_keys": sorted(kwargs.keys()),
-            "normalized_keys": sorted(normalized.keys()),
-        },
-    )
-
-    _emit_debug_log(
-        hypothesis_id="H3",
-        location="jobspy.py:_normalize_scrape_kwargs",
-        message="jobspy compatibility status",
-        data={
-            "hours_old_supported": _HOURS_OLD_SUPPORTED,
-            "signature_has_hours_old": "hours_old" in _SCRAPE_JOBS_PARAMS,
-            "signature_params": sorted(_SCRAPE_JOBS_PARAMS),
-        },
-    )
-
-    return normalized
-
-
-def _warn_hours_old_fallback() -> None:
-    global _HOURS_OLD_WARNING_EMITTED
-    if _HOURS_OLD_WARNING_EMITTED:
-        return
-    _HOURS_OLD_WARNING_EMITTED = True
-    log.warning(
-        "Installed JobSpy does not support server-side hours_old filtering; applying best-effort local recency checks."
-    )
-
-
-def _coerce_posted_datetime(value) -> datetime | None:
-    """Convert a JobSpy date_posted cell into a timezone-aware datetime."""
-    if value is None:
-        return None
-
-    try:
-        if hasattr(value, "to_pydatetime"):
-            value = value.to_pydatetime()
-    except Exception:
-        pass
-
-    if isinstance(value, datetime):
-        dt = value
-    elif isinstance(value, date):
-        dt = datetime.combine(value, dtime.min)
-    else:
-        raw = str(value).strip()
-        if not raw or raw == "nan":
-            return None
-        try:
-            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        except ValueError:
-            for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y"):
-                try:
-                    dt = datetime.strptime(raw, fmt)
-                    break
-                except ValueError:
-                    continue
-            else:
-                return None
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
-def _apply_local_hours_filter(df, hours_old: int) -> tuple[object, int, bool]:
-    """Apply a best-effort local recency filter using the date_posted column."""
-    if hours_old <= 0 or "date_posted" not in df.columns:
-        return df, 0, False
-
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_old)
-    kept_rows: list[bool] = []
-    seen_posted_value = False
-
-    for value in df["date_posted"]:
-        posted_dt = _coerce_posted_datetime(value)
-        if posted_dt is None:
-            kept_rows.append(True)
-            continue
-        seen_posted_value = True
-        kept_rows.append(posted_dt >= cutoff)
-
-    if not seen_posted_value:
-        return df, 0, False
-
-    filtered_df = df[kept_rows]
-    removed = len(df) - len(filtered_df)
-    return filtered_df, removed, True
-
-
 # -- Location filtering ------------------------------------------------------
-
 
 def _load_location_config(search_cfg: dict) -> tuple[list[str], list[str]]:
     """Extract accept/reject location lists from search config.
@@ -365,548 +150,7 @@ def _location_ok(location: str | None, accept: list[str], reject: list[str]) -> 
     return False
 
 
-def _coerce_distance(value: object) -> int | None:
-    """Parse a search distance (miles) value from config or CLI."""
-    if value is None:
-        return None
-    try:
-        miles = int(value)
-    except (TypeError, ValueError):
-        return None
-    return miles if miles > 0 else None
-
-
-def _resolve_search_distance(search: dict, defaults: dict | None = None) -> int | None:
-    """Resolve effective search distance (miles) for one query/location combo."""
-    if search.get("remote"):
-        return None
-    if "distance" in search:
-        return _coerce_distance(search.get("distance"))
-    defaults = defaults or {}
-    return _coerce_distance(defaults.get("distance"))
-
-
-def _resolve_jobspy_sites(sites: list[str], remote_only: bool) -> tuple[list[str], bool]:
-    """Return non-Glassdoor sites after ApplyPilot's remote-only adjustments."""
-    has_glassdoor = "glassdoor" in sites
-    effective_sites = [site for site in sites if site != "glassdoor"]
-    if remote_only and "indeed" in effective_sites:
-        effective_sites = [site for site in effective_sites if site != "indeed"]
-    return effective_sites, has_glassdoor
-
-
-def _load_site_quarantines() -> dict[str, dict]:
-    """Load active JobSpy site quarantines from user state."""
-    if not _JOBSPY_SITE_QUARANTINE_PATH.exists():
-        return {}
-
-    try:
-        payload = json.loads(_JOBSPY_SITE_QUARANTINE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-    now = datetime.now(timezone.utc)
-    active: dict[str, dict] = {}
-    for site, info in payload.items():
-        try:
-            until = datetime.fromisoformat(info["until"])
-        except (KeyError, TypeError, ValueError):
-            continue
-        if until.tzinfo is None:
-            until = until.replace(tzinfo=timezone.utc)
-        until = until.astimezone(timezone.utc)
-        if until > now:
-            active[site] = {
-                "until": until,
-                "reason": info.get("reason", "unknown"),
-            }
-    return active
-
-
-def _save_site_quarantines(quarantines: dict[str, dict]) -> None:
-    serializable = {
-        site: {
-            "until": info["until"].astimezone(timezone.utc).isoformat(),
-            "reason": info.get("reason", "unknown"),
-        }
-        for site, info in quarantines.items()
-    }
-    try:
-        _JOBSPY_SITE_QUARANTINE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _JOBSPY_SITE_QUARANTINE_PATH.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
-    except OSError:
-        return
-
-
-def _quarantine_site(site: str, reason: str) -> dict:
-    active = _load_site_quarantines()
-    existing = active.get(site)
-    if existing is not None:
-        return existing
-
-    info = {
-        "until": datetime.now(timezone.utc) + timedelta(hours=_JOBSPY_SITE_QUARANTINE_HOURS),
-        "reason": reason,
-    }
-    active[site] = info
-    _save_site_quarantines(active)
-    return info
-
-
-def _quarantine_reason_for_exception(site: str, exc: Exception) -> str | None:
-    text = f"{exc.__class__.__name__}: {exc}".lower()
-    if site == "zip_recruiter" and (
-        "403" in text or "cloudflare" in text or "challenge" in text or "forbidden" in text
-    ):
-        return "cloudflare_403"
-    return None
-
-
-def _ziprecruiter_search_url(
-    search_term: str,
-    location: str,
-    remote_only: bool,
-    page_number: int,
-    distance: int | None = None,
-) -> str:
-    params = {
-        "search": search_term,
-        "location": location,
-        "form": "jobs-landing",
-    }
-    if remote_only:
-        params["refine_by_location_type"] = "only_remote"
-    elif distance is not None:
-        params["radius"] = distance
-    base = "https://www.ziprecruiter.com/jobs-search"
-    if page_number > 1:
-        base += f"/{page_number}"
-    return f"{base}?{urlencode(params)}"
-
-
-def _merge_ziprecruiter_page_data(item_list: list[dict], cards: list[dict]) -> list[dict]:
-    merged: list[dict] = []
-    row_count = max(len(item_list), len(cards))
-    for idx in range(row_count):
-        item = item_list[idx] if idx < len(item_list) else {}
-        card = cards[idx] if idx < len(cards) else {}
-        job_url = item.get("url") or card.get("url") or ""
-        title = item.get("name") or card.get("title") or ""
-        if not job_url and not title:
-            continue
-        location = card.get("location") or ""
-        merged.append(
-            {
-                "job_url": job_url,
-                "title": title,
-                "company": card.get("company") or "",
-                "location": location,
-                "salary": card.get("salary") or None,
-                "description": None,
-                "date_posted": None,
-                "site": "zip_recruiter",
-                "is_remote": "remote" in location.lower(),
-            }
-        )
-    return merged
-
-
-def _classify_ziprecruiter_page(payload: dict) -> dict[str, object]:
-    item_list = payload.get("itemList") or []
-    cards = payload.get("cards") or []
-    markers = payload.get("markers") or {}
-    if item_list or cards:
-        state = "results"
-    elif markers.get("challenge_or_block"):
-        state = "challenge_or_block"
-    elif markers.get("empty"):
-        state = "empty"
-    else:
-        state = "unexpected_layout"
-    return {
-        "state": state,
-        "itemList": item_list,
-        "cards": cards,
-        "item_list_count": len(item_list),
-        "card_count": len(cards),
-        "text_sample": str(payload.get("textSample") or "")[:240],
-    }
-
-
-def _inspect_ziprecruiter_page(page) -> dict[str, object]:
-    payload = page.evaluate(
-        """
-        () => {
-            const itemList = [];
-            for (const script of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
-                try {
-                    const parsed = JSON.parse(script.textContent || 'null');
-                    if (parsed && parsed['@type'] === 'ItemList' && Array.isArray(parsed.itemListElement)) {
-                        for (const item of parsed.itemListElement) {
-                            itemList.push({
-                                name: item?.name || '',
-                                url: item?.url || '',
-                            });
-                        }
-                        break;
-                    }
-                } catch (_) {}
-            }
-
-            const seen = new Set();
-            const cards = [];
-            for (const article of Array.from(document.querySelectorAll('article[id^="job-card-"]'))) {
-                const id = article.id || '';
-                if (!id || seen.has(id)) continue;
-                const title = article.querySelector('h2')?.textContent?.trim() || '';
-                if (!title) continue;
-                seen.add(id);
-                const paragraphs = Array.from(article.querySelectorAll('p'))
-                    .map((p) => (p.textContent || '').trim())
-                    .filter(Boolean);
-                const hrefs = Array.from(article.querySelectorAll('a[href]'))
-                    .map((a) => a.getAttribute('href') || '')
-                    .filter(Boolean);
-                const preferredHref = hrefs.find((href) => {
-                    const lowered = href.toLowerCase();
-                    return /\\/jobs?\\//i.test(href) || /\\/c\\/.+\\/job\\//i.test(lowered) || lowered.includes('jid=');
-                }) || hrefs.find((href) => !href.startsWith('/co/') && !href.startsWith('#')) || '';
-                let jobUrl = '';
-                if (preferredHref) {
-                    try {
-                        jobUrl = new URL(preferredHref, window.location.origin).href;
-                    } catch (_) {
-                        jobUrl = preferredHref;
-                    }
-                }
-                cards.push({
-                    id,
-                    url: jobUrl,
-                    title,
-                    company: article.querySelector('a[href^="/co/"]')?.textContent?.trim() || '',
-                    location: paragraphs.find((text) => text.includes('·')) || '',
-                    salary: paragraphs.find((text) => /\\$|\\/hr|\\/yr/.test(text)) || '',
-                });
-            }
-
-            const textSample = [document.title || '', document.body?.innerText || '']
-                .filter(Boolean)
-                .join('\\n')
-                .slice(0, 4000);
-            const loweredText = textSample.toLowerCase();
-            const challengeSignals = [
-                'cloudflare',
-                'verify you are human',
-                'verify that you are human',
-                'access denied',
-                'forbidden',
-                'security check',
-                'unusual traffic',
-                'complete the security check',
-                'checking your browser',
-                'challenge',
-            ];
-            const emptySignals = [
-                'no jobs found',
-                'no matching jobs',
-                'no matching job',
-                'no results found',
-                '0 jobs',
-                'try another search',
-            ];
-
-            return {
-                itemList,
-                cards,
-                markers: {
-                    challenge_or_block: challengeSignals.some((token) => loweredText.includes(token)),
-                    empty: emptySignals.some((token) => loweredText.includes(token))
-                        || Boolean(
-                            document.querySelector(
-                                '[data-testid*="no-results"], [class*="no-results"], [id*="no-results"]'
-                            )
-                        ),
-                },
-                textSample,
-            };
-        }
-        """
-    )
-    return _classify_ziprecruiter_page(payload)
-
-
-def _scrape_ziprecruiter_browser(
-    *,
-    search_term: str,
-    location: str,
-    results_wanted: int,
-    remote_only: bool,
-    distance: int | None = None,
-    proxy_config: dict | None = None,
-):
-    """Scrape ZipRecruiter with a real browser to clear Cloudflare and parse rendered results."""
-    from playwright.sync_api import sync_playwright
-
-    from applypilot.apply.chrome import _get_real_user_agent
-    from applypilot.enrichment.detail import _STEALTH_INIT_SCRIPT
-
-    launch_opts: dict = {"headless": True}
-    try:
-        chrome_path = config.get_chrome_path()
-    except FileNotFoundError:
-        chrome_path = None
-    if chrome_path:
-        launch_opts["executable_path"] = chrome_path
-    if proxy_config:
-        launch_opts["proxy"] = proxy_config["playwright"]
-
-    per_page = 20
-    page_count = max(1, min(5, (results_wanted + per_page - 1) // per_page))
-    collected: list[dict] = []
-    seen_urls: set[str] = set()
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(**launch_opts)
-        try:
-            context = browser.new_context(user_agent=_get_real_user_agent())
-            context.add_init_script(_STEALTH_INIT_SCRIPT)
-            page = context.new_page()
-
-            for page_number in range(1, page_count + 1):
-                page.goto(
-                    _ziprecruiter_search_url(
-                        search_term,
-                        location,
-                        remote_only,
-                        page_number,
-                        distance,
-                    ),
-                    timeout=60000,
-                    wait_until="domcontentloaded",
-                )
-                selector_ready = True
-                try:
-                    page.wait_for_selector(
-                        "article[id^='job-card-'], script[type='application/ld+json']",
-                        state="attached",
-                        timeout=30000,
-                    )
-                except Exception:
-                    selector_ready = False
-                try:
-                    page.wait_for_load_state("networkidle", timeout=8000)
-                except Exception:
-                    pass
-
-                page_info = _inspect_ziprecruiter_page(page)
-                _emit_debug_log(
-                    hypothesis_id="H4",
-                    location="jobspy.py:_scrape_ziprecruiter_browser",
-                    message="ziprecruiter page classified",
-                    data={
-                        "query": search_term,
-                        "page_number": page_number,
-                        "selector_ready": selector_ready,
-                        "state": page_info["state"],
-                        "item_list_count": page_info["item_list_count"],
-                        "card_count": page_info["card_count"],
-                        "text_sample": page_info["text_sample"],
-                    },
-                )
-                if page_info["state"] == "challenge_or_block":
-                    break
-                if page_info["state"] == "empty":
-                    break
-                if page_info["state"] == "unexpected_layout":
-                    raise RuntimeError(
-                        "ziprecruiter unexpected_layout"
-                        + (f": {page_info['text_sample']}" if page_info["text_sample"] else "")
-                    )
-
-                merged = _merge_ziprecruiter_page_data(page_info["itemList"], page_info["cards"])
-                page_new = 0
-                for row in merged:
-                    url = row.get("job_url") or ""
-                    if not url or url in seen_urls:
-                        continue
-                    seen_urls.add(url)
-                    collected.append(row)
-                    page_new += 1
-                    if len(collected) >= results_wanted:
-                        break
-
-                if page_new == 0 or len(collected) >= results_wanted:
-                    break
-        finally:
-            browser.close()
-
-    return pd.DataFrame(collected)
-
-
-def _build_site_scrape_kwargs(
-    *,
-    site: str,
-    search_term: str,
-    location: str,
-    results_per_site: int,
-    hours_old: int,
-    proxy_config: dict | None,
-    remote_only: bool,
-    distance: int | None,
-    country_indeed: str,
-    verbose: int,
-) -> dict:
-    kwargs = {
-        "site_name": [site],
-        "search_term": search_term,
-        "location": location,
-        "results_wanted": results_per_site,
-        "hours_old": hours_old,
-        "description_format": "markdown",
-        "verbose": verbose,
-    }
-    if distance is not None:
-        kwargs["distance"] = distance
-    if site == "indeed":
-        kwargs["country_indeed"] = country_indeed
-    if remote_only:
-        kwargs["is_remote"] = True
-    if proxy_config:
-        kwargs["proxies"] = [proxy_config["jobspy"]]
-    if site == "linkedin":
-        kwargs["linkedin_fetch_description"] = True
-    return kwargs
-
-
-def _scrape_sites_independently(
-    *,
-    label: str,
-    search_term: str,
-    location: str,
-    sites: list[str],
-    results_per_site: int,
-    hours_old: int,
-    proxy_config: dict | None,
-    remote_only: bool,
-    distance: int | None,
-    country_indeed: str,
-    max_retries: int,
-    verbose: int = 0,
-    hypothesis_id: str = "H1",
-    quarantined_sites: dict[str, dict] | None = None,
-) -> tuple[list[object], list[dict], dict[str, dict]]:
-    dataframes: list[object] = []
-    failures: list[dict] = []
-    newly_quarantined: dict[str, dict] = {}
-    active_quarantines = quarantined_sites or {}
-
-    for site in sites:
-        existing_quarantine = active_quarantines.get(site)
-        if existing_quarantine is not None:
-            until = existing_quarantine["until"].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            log.warning("[%s] (site=%s): skipped while quarantined until %s", label, site, until)
-            continue
-
-        started = time.time()
-        try:
-            if site == "zip_recruiter":
-                df = _scrape_ziprecruiter_browser(
-                    search_term=search_term,
-                    location=location,
-                    results_wanted=results_per_site,
-                    remote_only=remote_only,
-                    distance=distance,
-                    proxy_config=proxy_config,
-                )
-            else:
-                kwargs = _build_site_scrape_kwargs(
-                    site=site,
-                    search_term=search_term,
-                    location=location,
-                    results_per_site=results_per_site,
-                    hours_old=hours_old,
-                    proxy_config=proxy_config,
-                    remote_only=remote_only,
-                    distance=distance,
-                    country_indeed=country_indeed,
-                    verbose=verbose,
-                )
-                df = _scrape_with_retry(kwargs, max_retries=max_retries)
-            dataframes.append(df)
-            _emit_debug_log(
-                hypothesis_id=hypothesis_id,
-                location="jobspy.py:_scrape_sites_independently",
-                message="site scrape completed",
-                data={
-                    "query": search_term,
-                    "site": site,
-                    "elapsed_ms": int((time.time() - started) * 1000),
-                    "rows": len(df) if hasattr(df, "__len__") else None,
-                },
-            )
-        except Exception as e:
-            elapsed_ms = int((time.time() - started) * 1000)
-            if site == "zip_recruiter":
-                normalized_kwargs = {
-                    "site_name": [site],
-                    "search_term": search_term,
-                    "location": location,
-                    "results_wanted": results_per_site,
-                    "is_remote": remote_only,
-                    "distance": distance,
-                    "strategy": "browser",
-                }
-            else:
-                normalized_kwargs = _normalize_scrape_kwargs(kwargs)
-            failure = {
-                "site": site,
-                "exception_class": e.__class__.__name__,
-                "exception_message": str(e),
-                "normalized_kwargs": normalized_kwargs,
-                "elapsed_ms": elapsed_ms,
-            }
-            failures.append(failure)
-            log.error(
-                "[%s] (site=%s): %s: %s | kwargs=%s | elapsed_ms=%d",
-                label,
-                site,
-                e.__class__.__name__,
-                e,
-                normalized_kwargs,
-                elapsed_ms,
-            )
-            _emit_debug_log(
-                hypothesis_id=hypothesis_id,
-                location="jobspy.py:_scrape_sites_independently",
-                message="site scrape failed",
-                data={"query": search_term, **failure},
-            )
-            quarantine_reason = _quarantine_reason_for_exception(site, e)
-            if quarantine_reason is not None:
-                info = _quarantine_site(site, quarantine_reason)
-                newly_quarantined[site] = info
-                until = info["until"].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-                log.warning(
-                    "[%s] (site=%s): quarantined until %s after %s",
-                    label,
-                    site,
-                    until,
-                    quarantine_reason,
-                )
-
-    return dataframes, failures, newly_quarantined
-
-
-def _concat_site_results(dataframes: list[object]):
-    if not dataframes:
-        return pd.DataFrame()
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", FutureWarning)
-        return pd.concat(dataframes, ignore_index=True) if len(dataframes) > 1 else dataframes[0]
-
-
 # -- DB storage (JobSpy DataFrame -> SQLite) ---------------------------------
-
 
 def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tuple[int, int]:
     """Store JobSpy DataFrame results into the DB. Returns (new, existing)."""
@@ -1000,7 +244,6 @@ def store_jobspy_results(conn: sqlite3.Connection, df, source_label: str) -> tup
 
 # -- Single search execution -------------------------------------------------
 
-
 def _run_one_search(
     search: dict,
     sites: list[str],
@@ -1012,65 +255,52 @@ def _run_one_search(
     accept_locs: list[str],
     reject_locs: list[str],
     glassdoor_map: dict,
-    quarantined_sites: dict[str, dict] | None = None,
 ) -> dict:
     """Run a single search query and store results in DB."""
     s = search
-    label = f'"{s["query"]}" in {s["location"]} {"(remote)" if s.get("remote") else ""}'
+    label = f"\"{s['query']}\" in {s['location']} {'(remote)' if s.get('remote') else ''}"
     if "tier" in s:
         label += f" [tier {s['tier']}]"
-    distance = _resolve_search_distance(s, defaults)
-    if distance is not None:
-        label += f" [{distance}mi]"
 
     # Split sites: Glassdoor needs simplified location, others use original
     gd_location = glassdoor_map.get(s["location"], s["location"].split(",")[0])
-    other_sites, has_glassdoor = _resolve_jobspy_sites(sites, bool(s.get("remote")))
+    has_glassdoor = "glassdoor" in sites
+    # Indeed auto-detects country from IP for remote searches, causing failures
+    # when the network exits through a non-USA IP. Skip Indeed for remote-only.
+    effective_sites = [si for si in sites if si != "glassdoor"]
+    if s.get("remote") and "indeed" in effective_sites:
+        effective_sites = [si for si in effective_sites if si != "indeed"]
+    other_sites = effective_sites
 
-    _emit_debug_log(
-        hypothesis_id="H2",
-        location="jobspy.py:_run_one_search",
-        message="resolved site list for query",
-        data={
-            "query": s["query"],
-            "location": s["location"],
-            "remote": bool(s.get("remote")),
-            "distance": distance,
-            "configured_sites": sites,
-            "resolved_non_glassdoor_sites": other_sites,
-            "glassdoor_enabled": has_glassdoor,
-        },
-    )
+    all_dfs = []
 
-    all_dfs: list[object] = []
-
-    # Run non-Glassdoor sites independently to preserve partial success when one board fails.
-    newly_quarantined: dict[str, dict] = {}
+    # Run non-Glassdoor sites with original location
     if other_sites:
-        site_dfs, non_gd_failures, newly_quarantined = _scrape_sites_independently(
-            label=label,
-            search_term=s["query"],
-            location=s["location"],
-            sites=other_sites,
-            results_per_site=results_per_site,
-            hours_old=hours_old,
-            proxy_config=proxy_config,
-            remote_only=bool(s.get("remote")),
-            distance=distance,
-            country_indeed=defaults.get("country_indeed", "usa"),
-            max_retries=max_retries,
-            verbose=0,
-            hypothesis_id="H1",
-            quarantined_sites=quarantined_sites,
-        )
-        all_dfs.extend(site_dfs)
-        if non_gd_failures and all_dfs:
-            log.warning(
-                '[%s]: partial site success (%d/%d sites failed)',
-                label,
-                len(non_gd_failures),
-                len(other_sites),
-            )
+        kwargs = {
+            "site_name": other_sites,
+            "search_term": s["query"],
+            "location": s["location"],
+            "results_wanted": results_per_site,
+            "hours_old": hours_old,
+            "description_format": "markdown",
+            "verbose": 0,
+        }
+        # Only pass country_indeed when Indeed is actually in the site list;
+        # jobspy validates this param even if Indeed isn't being used, and
+        # may auto-detect a non-US country from the exit IP causing failures.
+        if "indeed" in other_sites:
+            kwargs["country_indeed"] = defaults.get("country_indeed", "usa")
+        if s.get("remote"):
+            kwargs["is_remote"] = True
+        if proxy_config:
+            kwargs["proxies"] = [proxy_config["jobspy"]]
+        if "linkedin" in other_sites:
+            kwargs["linkedin_fetch_description"] = True
+        try:
+            df = _scrape_with_retry(kwargs, max_retries=max_retries)
+            all_dfs.append(df)
+        except Exception as e:
+            log.error("[%s] (non-gd): %s", label, e)
 
     # Run Glassdoor separately with simplified location
     if has_glassdoor:
@@ -1083,8 +313,6 @@ def _run_one_search(
             "description_format": "markdown",
             "verbose": 0,
         }
-        if distance is not None:
-            gd_kwargs["distance"] = distance
         if s.get("remote"):
             gd_kwargs["is_remote"] = True
         if proxy_config:
@@ -1095,57 +323,26 @@ def _run_one_search(
         except Exception as e:
             log.error("[%s] (glassdoor): %s", label, e)
 
-    attempted_sites = [
-        site for site in other_sites if not quarantined_sites or site not in quarantined_sites
-    ]
-    if has_glassdoor:
-        attempted_sites.append("glassdoor")
-    if not attempted_sites and not all_dfs:
-        log.warning("[%s]: all sites skipped because they are quarantined", label)
-        return {
-            "new": 0,
-            "existing": 0,
-            "errors": 0,
-            "filtered": 0,
-            "total": 0,
-            "label": label,
-            "quarantined_sites": newly_quarantined,
-        }
-
     if not all_dfs:
         log.error("[%s]: all sites failed", label)
-        return {
-            "new": 0,
-            "existing": 0,
-            "errors": 1,
-            "filtered": 0,
-            "total": 0,
-            "label": label,
-            "quarantined_sites": newly_quarantined,
-        }
+        return {"new": 0, "existing": 0, "errors": 1, "filtered": 0, "total": 0, "label": label}
 
-    df = _concat_site_results(all_dfs)
+    import pandas as pd
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        df = pd.concat(all_dfs, ignore_index=True) if len(all_dfs) > 1 else all_dfs[0]
 
     if len(df) == 0:
         log.info("[%s] 0 results", label)
         return {"new": 0, "existing": 0, "errors": 0, "filtered": 0, "total": 0, "label": label}
 
-    recency_filtered = 0
-    if not _HOURS_OLD_SUPPORTED:
-        df, recency_filtered, _ = _apply_local_hours_filter(df, hours_old)
-
     # Filter by location before storing
     before = len(df)
-    df = df[
-        df.apply(
-            lambda row: _location_ok(
-                str(row.get("location", "")) if str(row.get("location", "")) != "nan" else None,
-                accept_locs,
-                reject_locs,
-            ),
-            axis=1,
-        )
-    ]
+    df = df[df.apply(lambda row: _location_ok(
+        str(row.get("location", "")) if str(row.get("location", "")) != "nan" else None,
+        accept_locs, reject_locs,
+    ), axis=1)]
     filtered = before - len(df)
 
     conn = get_connection()
@@ -1154,23 +351,12 @@ def _run_one_search(
     msg = f"[{label}] {before} results -> {new} new, {existing} dupes"
     if filtered:
         msg += f", {filtered} filtered (location)"
-    if recency_filtered:
-        msg += f", {recency_filtered} filtered (recency)"
     log.info(msg)
 
-    return {
-        "new": new,
-        "existing": existing,
-        "errors": 0,
-        "filtered": filtered + recency_filtered,
-        "total": before,
-        "label": label,
-        "quarantined_sites": newly_quarantined,
-    }
+    return {"new": new, "existing": existing, "errors": 0, "filtered": filtered, "total": before, "label": label}
 
 
 # -- Single query search -----------------------------------------------------
-
 
 def search_jobs(
     query: str,
@@ -1181,7 +367,6 @@ def search_jobs(
     hours_old: int = 72,
     proxy: str | None = None,
     country_indeed: str = "usa",
-    distance: int | None = None,
 ) -> dict:
     """Run a single job search via JobSpy and store results in DB."""
     if sites is None:
@@ -1191,114 +376,34 @@ def search_jobs(
         sites = ["indeed", "linkedin"]
 
     proxy_config = parse_proxy(proxy) if proxy else None
-    effective_distance = _resolve_search_distance(
-        {"remote": remote_only, "distance": distance},
-        defaults=None,
-    )
-    effective_sites, has_glassdoor = _resolve_jobspy_sites(sites, remote_only)
-    active_quarantines = _load_site_quarantines()
-    preexisting_quarantines = dict(active_quarantines)
 
-    log.info(
-        'Search: "%s" in %s | sites=%s | remote=%s | distance=%s',
-        query,
-        location,
-        sites,
-        remote_only,
-        effective_distance if effective_distance is not None else "default",
-    )
-    _emit_debug_log(
-        hypothesis_id="H5",
-        location="jobspy.py:search_jobs",
-        message="single-search invocation",
-        data={
-            "query": query,
-            "location": location,
-            "sites": sites,
-            "remote_only": remote_only,
-            "distance": effective_distance,
-        },
-    )
-    _emit_debug_log(
-        hypothesis_id="H2",
-        location="jobspy.py:search_jobs",
-        message="resolved site list for single search",
-        data={
-            "query": query,
-            "location": location,
-            "remote_only": remote_only,
-            "distance": effective_distance,
-            "configured_sites": sites,
-            "resolved_non_glassdoor_sites": effective_sites,
-            "glassdoor_enabled": has_glassdoor,
-        },
-    )
+    log.info("Search: \"%s\" in %s | sites=%s | remote=%s", query, location, sites, remote_only)
 
-    all_dfs: list[object] = []
-    site_dfs, failures, newly_quarantined = _scrape_sites_independently(
-        label=f'"{query}" in {location} {"(remote)" if remote_only else ""}',
-        search_term=query,
-        location=location,
-        sites=effective_sites,
-        results_per_site=results_per_site,
-        hours_old=hours_old,
-        proxy_config=proxy_config,
-        remote_only=remote_only,
-        distance=effective_distance,
-        country_indeed=country_indeed,
-        max_retries=2,
-        verbose=2,
-        hypothesis_id="H5",
-        quarantined_sites=active_quarantines,
-    )
-    all_dfs.extend(site_dfs)
-    active_quarantines.update(newly_quarantined)
+    kwargs = {
+        "site_name": sites,
+        "search_term": query,
+        "location": location,
+        "results_wanted": results_per_site,
+        "hours_old": hours_old,
+        "description_format": "markdown",
+        "country_indeed": country_indeed,
+        "verbose": 2,
+    }
 
-    if has_glassdoor:
-        gd_kwargs = _build_site_scrape_kwargs(
-            site="glassdoor",
-            search_term=query,
-            location=location,
-            results_per_site=results_per_site,
-            hours_old=hours_old,
-            proxy_config=proxy_config,
-            remote_only=remote_only,
-            distance=effective_distance,
-            country_indeed=country_indeed,
-            verbose=2,
-        )
-        try:
-            all_dfs.append(_scrape_with_retry(gd_kwargs, max_retries=2))
-        except Exception as e:
-            failures.append({"site": "glassdoor", "exception_message": str(e)})
-            log.error('["%s" in %s] (glassdoor): %s', query, location, e)
+    if remote_only:
+        kwargs["is_remote"] = True
 
-    attempted_sites = [site for site in effective_sites if site not in preexisting_quarantines]
-    if has_glassdoor:
-        attempted_sites.append("glassdoor")
-    if not attempted_sites and not all_dfs:
-        log.warning('JobSpy search skipped: all sites are quarantined for "%s" in %s', query, location)
-        return {"total": 0, "new": 0, "existing": 0}
-    if not all_dfs:
-        log.error('JobSpy search failed: all sites failed for "%s" in %s', query, location)
-        return {"error": "all sites failed", "total": 0, "new": 0, "existing": 0}
-    attempted_sites = len(effective_sites) + (1 if has_glassdoor else 0)
-    if failures and all_dfs:
-        log.warning(
-            '["%s" in %s]: partial site success (%d/%d sites failed)',
-            query,
-            location,
-            len(failures),
-            attempted_sites,
-        )
+    if proxy_config:
+        kwargs["proxies"] = [proxy_config["jobspy"]]
 
-    df = _concat_site_results(all_dfs)
+    if "linkedin" in sites:
+        kwargs["linkedin_fetch_description"] = True
 
-    recency_filtered = 0
-    if not _HOURS_OLD_SUPPORTED:
-        df, recency_filtered, _ = _apply_local_hours_filter(df, hours_old)
-        if recency_filtered:
-            log.info("JobSpy recency filter removed %d stale results locally", recency_filtered)
+    try:
+        df = scrape_jobs(**kwargs)
+    except Exception as e:
+        log.error("JobSpy search failed: %s", e)
+        return {"error": str(e), "total": 0, "new": 0, "existing": 0}
 
     total = len(df)
     log.info("JobSpy returned %d results", total)
@@ -1323,7 +428,6 @@ def search_jobs(
 
 
 # -- Full crawl (all queries x all locations) --------------------------------
-
 
 def _full_crawl(
     search_cfg: dict,
@@ -1357,39 +461,18 @@ def _full_crawl(
     searches = []
     for q in queries:
         for loc in locs:
-            searches.append(
-                {
-                    "query": q["query"],
-                    "location": loc["location"],
-                    "remote": loc.get("remote", False),
-                    "distance": loc.get("distance", defaults.get("distance")),
-                    "tier": q.get("tier", 0),
-                }
-            )
+            searches.append({
+                "query": q["query"],
+                "location": loc["location"],
+                "remote": loc.get("remote", False),
+                "tier": q.get("tier", 0),
+            })
 
     proxy_config = parse_proxy(proxy) if proxy else None
-    active_quarantines = _load_site_quarantines()
 
     log.info("Full crawl: %d search combinations", len(searches))
-    log.info("Sites: %s | Results/site: %d | Hours old: %d", ", ".join(sites), results_per_site, hours_old)
-    if active_quarantines:
-        for site, info in active_quarantines.items():
-            until = info["until"].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            log.warning("JobSpy site quarantine active: %s skipped until %s (%s)", site, until, info["reason"])
-    if _DEBUG_JOBSPY_ENABLED:
-        compat = _jobspy_debug_compat_snapshot()
-        log.info(
-            "JobSpy debug mode: version=%s | hours_old_supported=%s | site_by_site_fallback=%s",
-            compat["python_jobspy_version"],
-            compat["hours_old_supported"],
-            compat["site_by_site_fallback_enabled"],
-        )
-        _emit_debug_log(
-            hypothesis_id="H3",
-            location="jobspy.py:_full_crawl",
-            message="jobspy runtime compatibility snapshot",
-            data=compat,
-        )
+    log.info("Sites: %s | Results/site: %d | Hours old: %d",
+             ", ".join(sites), results_per_site, hours_old)
 
     # Ensure DB schema is ready
     init_db()
@@ -1401,45 +484,25 @@ def _full_crawl(
 
     for s in searches:
         result = _run_one_search(
-            s,
-            sites,
-            results_per_site,
-            hours_old,
-            proxy_config,
-            defaults,
-            max_retries,
-            accept_locs,
-            reject_locs,
-            glassdoor_map,
-            active_quarantines,
+            s, sites, results_per_site, hours_old,
+            proxy_config, defaults, max_retries,
+            accept_locs, reject_locs, glassdoor_map,
         )
         completed += 1
         total_new += result["new"]
         total_existing += result["existing"]
         total_errors += result["errors"]
-        active_quarantines.update(result.get("quarantined_sites", {}))
 
         if completed % 5 == 0 or completed == len(searches):
-            log.info(
-                "Progress: %d/%d queries done (%d new, %d dupes, %d errors)",
-                completed,
-                len(searches),
-                total_new,
-                total_existing,
-                total_errors,
-            )
+            log.info("Progress: %d/%d queries done (%d new, %d dupes, %d errors)",
+                     completed, len(searches), total_new, total_existing, total_errors)
 
     # Final stats
     conn = get_connection()
     db_total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
 
-    log.info(
-        "Full crawl complete: %d new | %d dupes | %d errors | %d total in DB",
-        total_new,
-        total_existing,
-        total_errors,
-        db_total,
-    )
+    log.info("Full crawl complete: %d new | %d dupes | %d errors | %d total in DB",
+             total_new, total_existing, total_errors, db_total)
 
     return {
         "new": total_new,

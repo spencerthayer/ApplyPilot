@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from collections.abc import Callable
 from datetime import datetime
 
 from rich.console import Console
@@ -58,23 +57,23 @@ def _setup_file_logging(stages: list[str]) -> logging.FileHandler | None:
 STAGE_ORDER = ("discover", "enrich", "score", "tailor", "cover", "pdf")
 
 STAGE_META: dict[str, dict] = {
-    "discover": {"desc": "Job discovery (JobSpy + Workday + Greenhouse + smart extract + HN)"},
-    "enrich": {"desc": "Detail enrichment (full descriptions + apply URLs)"},
-    "score": {"desc": "LLM scoring (fit 1-10)"},
-    "tailor": {"desc": "Resume tailoring (LLM + validation)"},
-    "cover": {"desc": "Cover letter generation"},
-    "pdf": {"desc": "PDF conversion (tailored resumes + cover letters)"},
+    "discover": {"desc": "Job discovery (JobSpy + Workday + smart extract + HN)"},
+    "enrich":   {"desc": "Detail enrichment (full descriptions + apply URLs)"},
+    "score":    {"desc": "LLM scoring (fit 1-10)"},
+    "tailor":   {"desc": "Resume tailoring (LLM + validation)"},
+    "cover":    {"desc": "Cover letter generation"},
+    "pdf":      {"desc": "PDF conversion (tailored resumes + cover letters)"},
 }
 
 # Upstream dependency: a stage only finishes when its upstream is done AND
 # it has no remaining pending work.
 _UPSTREAM: dict[str, str | None] = {
     "discover": None,
-    "enrich": "discover",
-    "score": "enrich",
-    "tailor": "score",
-    "cover": "tailor",
-    "pdf": "cover",
+    "enrich":   "discover",
+    "score":    "enrich",
+    "tailor":   "score",
+    "cover":    "tailor",
+    "pdf":      "cover",
 }
 
 
@@ -87,7 +86,6 @@ DISCOVERY_SOURCES: dict[str, str] = {
     "jobspy":       "JobSpy aggregator (LinkedIn, Indeed, ZipRecruiter)",
     "linkedin":     "LinkedIn only (via JobSpy)",
     "indeed":       "Indeed only (via JobSpy)",
-    "ziprecruiter": "ZipRecruiter only (via JobSpy)",
     "workday":      "Workday corporate career sites",
     "greenhouse":   "Greenhouse ATS public board API",
     "lever":        "Lever ATS public postings API",
@@ -101,17 +99,15 @@ DISCOVERY_SOURCES: dict[str, str] = {
 
 # Alias → canonical name for CLI convenience
 _SOURCE_ALIASES: dict[str, str] = {
-    "hn":            "hackernews",
-    "smart":         "smartextract",
-    "dice":          "smartextract",   # dice is scraped via smartextract + sites.yaml
-    "zip_recruiter": "ziprecruiter",
+    "hn":    "hackernews",
+    "smart": "smartextract",
+    "dice":  "smartextract",  # dice is scraped via smartextract + sites.yaml
 }
 
 # Sources that are jobspy with a specific site filter
 _JOBSPY_SITE_SOURCES: dict[str, list[str]] = {
-    "linkedin":     ["linkedin"],
-    "indeed":       ["indeed"],
-    "ziprecruiter": ["zip_recruiter"],
+    "linkedin": ["linkedin"],
+    "indeed":   ["indeed"],
 }
 
 
@@ -136,7 +132,7 @@ def resolve_source_names(names: list[str]) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _run_discover(workers: int = 1, sources: list[str] | None = None) -> dict:
-    """Stage: Job discovery — JobSpy, Workday, Greenhouse, smart-extract, and HN scrapers.
+    """Stage: Job discovery — JobSpy, Workday, smart-extract, and HN scrapers.
 
     Args:
         workers: Thread count for sources that support parallelism.
@@ -271,17 +267,6 @@ def _run_discover(workers: int = 1, sources: list[str] | None = None) -> dict:
             console.print(f"  [red]HN error:[/red] {e}")
             stats["hackernews"] = f"error: {e}"
 
-    if "greenhouse" in active:
-        console.print("  [cyan]Greenhouse ATS scraper (AI startups)...[/cyan]")
-        try:
-            from applypilot.discovery.greenhouse import search_all
-            new, existing = search_all("", workers=workers)
-            stats["greenhouse"] = f"ok ({new} new, {existing} existing)"
-        except Exception as e:
-            log.error("Greenhouse scraper failed: %s", e)
-            console.print(f"  [red]Greenhouse error:[/red] {e}")
-            stats["greenhouse"] = f"error: {e}"
-
     return stats
 
 
@@ -289,7 +274,6 @@ def _run_enrich(workers: int = 1) -> dict:
     """Stage: Detail enrichment — scrape full descriptions and apply URLs."""
     try:
         from applypilot.enrichment.detail import run_enrichment
-
         run_enrichment(workers=workers)
         return {"status": "ok"}
     except Exception as e:
@@ -359,20 +343,19 @@ def _run_pdf(doc_format: str = "docx") -> dict:
 
 
 # Map stage names to their runner functions
-_STAGE_RUNNERS: dict[str, Callable] = {
+_STAGE_RUNNERS: dict[str, callable] = {
     "discover": _run_discover,
-    "enrich": _run_enrich,
-    "score": _run_score,
-    "tailor": _run_tailor,
-    "cover": _run_cover,
-    "pdf": _run_pdf,
+    "enrich":   _run_enrich,
+    "score":    _run_score,
+    "tailor":   _run_tailor,
+    "cover":    _run_cover,
+    "pdf":      _run_pdf,
 }
 
 
 # ---------------------------------------------------------------------------
 # Stage resolution
 # ---------------------------------------------------------------------------
-
 
 def _resolve_stages(stage_names: list[str]) -> list[str]:
     """Resolve 'all' and validate/order stage names."""
@@ -382,7 +365,10 @@ def _resolve_stages(stage_names: list[str]) -> list[str]:
     resolved = []
     for name in stage_names:
         if name not in STAGE_META:
-            console.print(f"[red]Unknown stage:[/red] '{name}'. Available: {', '.join(STAGE_ORDER)}, all")
+            console.print(
+                f"[red]Unknown stage:[/red] '{name}'. "
+                f"Available: {', '.join(STAGE_ORDER)}, all"
+            )
             raise SystemExit(1)
         if name not in resolved:
             resolved.append(name)
@@ -395,12 +381,13 @@ def _resolve_stages(stage_names: list[str]) -> list[str]:
 # Streaming pipeline helpers
 # ---------------------------------------------------------------------------
 
-
 class _StageTracker:
     """Thread-safe tracker for which stages have finished producing work."""
 
     def __init__(self):
-        self._events: dict[str, threading.Event] = {stage: threading.Event() for stage in STAGE_ORDER}
+        self._events: dict[str, threading.Event] = {
+            stage: threading.Event() for stage in STAGE_ORDER
+        }
         self._results: dict[str, dict] = {}
         self._lock = threading.Lock()
 
@@ -444,7 +431,10 @@ _PENDING_SQL: dict[str, str] = {
         "AND (cover_letter_path IS NULL OR cover_letter_path = '') "
         "AND COALESCE(cover_attempts, 0) < 5"
     ),
-    "pdf": ("SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL AND tailored_resume_path LIKE '%.txt'"),
+    "pdf": (
+        "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL "
+        "AND tailored_resume_path LIKE '%.txt'"
+    ),
 }
 
 # Stages whose SQL takes a ? for min_score.
@@ -488,7 +478,6 @@ def _run_stage_streaming(
     max_age_days: int | None = None,
     limit: int = 20,
     workers: int = 1,
-    validation_mode: str = "normal",
     sources: list[str] | None = None,
     doc_format: str = "docx",
 ) -> None:
@@ -510,8 +499,7 @@ def _run_stage_streaming(
     if stage in ("tailor", "cover"):
         kwargs["min_score"] = min_score
         kwargs["limit"] = limit
-        kwargs["validation_mode"] = validation_mode
-    if stage in ("discover", "enrich"):
+    if stage in ("discover", "enrich", "score", "tailor", "cover"):
         kwargs["workers"] = workers
     if stage == "discover" and sources is not None:
         kwargs["sources"] = sources
@@ -530,11 +518,12 @@ def _run_stage_streaming(
             tracker.mark_done(stage, {"status": f"error: {e}"})
         return
 
+    # For downstream stages: loop until upstream done + no pending work
     passes = 0
-    successes = 0
-    failures = 0
     while not stop_event.is_set():
+        # Wait for upstream to start producing work (first pass only)
         if passes == 0 and upstream and not tracker.is_done(upstream):
+            # Wait a bit for upstream to produce some work before first run
             tracker.wait(upstream, timeout=_STREAM_POLL_INTERVAL)
 
         pending = _count_pending(stage, min_score, max_age_days)
@@ -545,7 +534,6 @@ def _run_stage_streaming(
                 passes += 1
                 # If runner returned an error status, back off before retry
                 if isinstance(result, dict) and result.get("status", "").startswith("error"):
-                    failures += 1
                     log.warning("Stage '%s' pass %d returned error, backing off %ds",
                                 stage, passes, _STREAM_POLL_INTERVAL)
                     if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
@@ -564,18 +552,19 @@ def _run_stage_streaming(
             except Exception as e:
                 log.error("Stage '%s' error (pass %d): %s", stage, passes, e)
                 passes += 1
-                failures += 1
                 if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
                     break
         else:
+            # No work right now
             upstream_done = upstream is None or tracker.is_done(upstream)
             if upstream_done:
+                # No work and upstream is done — this stage is finished
                 break
+            # Upstream still running, wait and retry
             if stop_event.wait(timeout=_STREAM_POLL_INTERVAL):
-                break
+                break  # Stop requested
 
-    status = "ok" if successes > 0 else ("error" if failures > 0 else "ok")
-    tracker.mark_done(stage, {"status": status, "passes": passes, "successes": successes, "failures": failures})
+    tracker.mark_done(stage, {"status": "ok", "passes": passes})
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +577,6 @@ def _run_sequential(
     max_age_days: int | None = None,
     limit: int = 20,
     workers: int = 1,
-    validation_mode: str = "normal",
     sources: list[str] | None = None,
     doc_format: str = "docx",
 ) -> dict:
@@ -614,8 +602,7 @@ def _run_sequential(
             if name in ("tailor", "cover"):
                 kwargs["min_score"] = min_score
                 kwargs["limit"] = limit
-                kwargs["validation_mode"] = validation_mode
-            if name in ("discover", "enrich"):
+            if name in ("discover", "enrich", "score", "tailor", "cover"):
                 kwargs["workers"] = workers
             if name == "discover" and sources is not None:
                 kwargs["sources"] = sources
@@ -629,7 +616,8 @@ def _run_sequential(
                 status = result.get("status", "ok")
                 if name == "discover":
                     sub_errors = [
-                        f"{k}: {v}" for k, v in result.items() if isinstance(v, str) and v.startswith("error")
+                        f"{k}: {v}" for k, v in result.items()
+                        if isinstance(v, str) and v.startswith("error")
                     ]
                     if sub_errors:
                         status = "partial"
@@ -688,7 +676,9 @@ def _run_streaming(ordered: list[str], min_score: int,
         for name in ordered:
             threads[name].join()
             elapsed = time.time() - start_times[name]
-            console.print(f"  [green]Completed:[/green] {name} ({elapsed:.1f}s)")
+            console.print(
+                f"  [green]Completed:[/green] {name} ({elapsed:.1f}s)"
+            )
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted — stopping stages...[/yellow]")
         stop_event.set()
@@ -722,7 +712,6 @@ def run_pipeline(
     dry_run: bool = False,
     stream: bool = False,
     workers: int = 1,
-    validation_mode: str = "normal",
     sources: list[str] | None = None,
     doc_format: str = "docx",
 ) -> dict:
@@ -758,7 +747,7 @@ def run_pipeline(
     if stages is None:
         stages = ["all"]
     ordered = _resolve_stages(stages)
-    effective_limit = limit if limit is not None else 0
+    effective_limit = limit if limit is not None else 20
 
     # Banner
     mode = "streaming" if stream else "sequential"
@@ -773,7 +762,7 @@ def run_pipeline(
     console.print(f"  Workers:   {workers}")
     console.print(f"  Stages:    {' -> '.join(ordered)}")
     if sources:
-        console.print(f"  Sources:    {', '.join(sources)}")
+        console.print(f"  Sources:   {', '.join(sources)}")
 
     # Pre-run stats
     pre_stats = get_stats()

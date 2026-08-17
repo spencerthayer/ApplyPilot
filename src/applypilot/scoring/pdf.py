@@ -87,7 +87,6 @@ def _split_text_with_links(text: str) -> list[tuple[str, str | None]]:
 
 # ── Resume Parser ────────────────────────────────────────────────────────
 
-
 def parse_resume(text: str) -> dict:
     """Parse a structured text resume into sections.
 
@@ -419,7 +418,6 @@ def parse_education_entries(text: str) -> list[dict]:
 
 
 # ── HTML Template ────────────────────────────────────────────────────────
-
 
 def build_html(resume: dict) -> str:
     """Build professional resume HTML from parsed data.
@@ -1268,7 +1266,10 @@ def batch_convert(limit: int = 50, doc_format: str = "docx") -> int:
     txt_files = sorted(TAILORED_DIR.glob("*.txt"))
     # Exclude _JOB.txt files from resume conversion
     # (they get their own conversion calls)
-    candidates = [f for f in txt_files if not f.name.endswith("_JOB.txt")]
+    candidates = [
+        f for f in txt_files
+        if not f.name.endswith("_JOB.txt")
+    ]
 
     # Filter to those without a corresponding output file
     to_convert: list[Path] = []
@@ -1276,7 +1277,7 @@ def batch_convert(limit: int = 50, doc_format: str = "docx") -> int:
         out_path = f.with_suffix(ext)
         if not out_path.exists():
             to_convert.append(f)
-        if limit > 0 and len(to_convert) >= limit:
+        if len(to_convert) >= limit:
             break
 
     if not to_convert:
@@ -1285,11 +1286,7 @@ def batch_convert(limit: int = 50, doc_format: str = "docx") -> int:
 
     log.info("Converting %d files to %s...", len(to_convert), doc_format.upper())
     converted = 0
-
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+    for f in to_convert:
         try:
             convert_to_pdf(f, doc_format=doc_format)
             converted += 1

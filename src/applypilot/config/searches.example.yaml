@@ -97,7 +97,6 @@ boards:
 defaults:
   results_per_site: 100  # Max results per board per query
   hours_old: 72          # Only jobs posted within this many hours
-  distance: 25           # Radius in miles for supported search sources
 
 # Negative keywords -- skip jobs with these in the title (case-insensitive)
 exclude_titles:

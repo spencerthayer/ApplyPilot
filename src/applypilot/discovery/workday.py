@@ -25,22 +25,6 @@ from applypilot.config import CONFIG_DIR
 from applypilot.database import get_connection, init_db, write_with_retry
 
 log = logging.getLogger(__name__)
-_QUARANTINE_HTTP_STATUSES = {401, 404, 422}
-
-
-def _exception_summary(exc: Exception) -> str:
-    """Return a minimal exception summary safe for logs."""
-    if isinstance(exc, urllib.error.HTTPError):
-        return f"{exc.__class__.__name__}(status={exc.code})"
-    return exc.__class__.__name__
-
-
-class WorkdayEmployerFailure(RuntimeError):
-    """A Workday employer failed in a way that should count as an error."""
-
-    def __init__(self, message: str, *, quarantine: bool = False):
-        super().__init__(message)
-        self.quarantine = quarantine
 
 
 # -- Employer registry from YAML --------------------------------------------
@@ -149,7 +133,7 @@ def setup_proxy(proxy_str: str | None) -> None:
     elif len(parts) == 2:
         proxy_url = f"http://{parts[0]}:{parts[1]}"
     else:
-        log.warning("Proxy format not recognized; expected host:port or host:port:user:pass")
+        log.warning("Proxy format not recognized: %s (expected host:port:user:pass or host:port)", proxy_str)
         _opener = urllib.request.build_opener()
         return
 
@@ -158,7 +142,7 @@ def setup_proxy(proxy_str: str | None) -> None:
         "https": proxy_url,
     })
     _opener = urllib.request.build_opener(proxy_handler)
-    log.info("Proxy configured")
+    log.info("Proxy configured: %s:%s", parts[0], parts[1])
 
 
 def _urlopen(req, timeout=30):
@@ -170,98 +154,23 @@ def _urlopen(req, timeout=30):
 
 # -- Workday API -------------------------------------------------------------
 
-_COMMON_SITE_ID_CANDIDATES = (
-    "External",
-    "careers",
-    "Careers",
-    "jobs",
-    "Jobs",
-    "CorporateCareers",
-    "SearchJobs",
-    "External_Career_Site",
-)
-
-
-def _candidate_site_ids(employer: dict) -> list[str]:
-    site_id = (employer.get("site_id") or "").strip()
-    name = (employer.get("name") or "").strip()
-    normalized_name = re.sub(r"[^A-Za-z0-9]+", "", name)
-    lower_name = normalized_name.lower()
-    base_candidates = [site_id, normalized_name, lower_name, *_COMMON_SITE_ID_CANDIDATES]
-    seen: set[str] = set()
-    candidates: list[str] = []
-    for candidate in base_candidates:
-        if not candidate:
-            continue
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        candidates.append(candidate)
-    return candidates
-
-
-def _site_path_is_live(base_url: str, site_id: str) -> bool:
-    for path in (f"/{site_id}", f"/en-US/{site_id}"):
-        req = urllib.request.Request(
-            f"{base_url}{path}",
-            headers={
-                "Accept": "text/html,application/xhtml+xml",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            },
-        )
-        try:
-            with _urlopen(req, timeout=8):
-                return True
-        except urllib.error.HTTPError:
-            continue
-        except Exception:
-            continue
-    return False
-
-
-def _workday_search_request(employer: dict, search_text: str, limit: int, offset: int, site_id: str) -> dict:
-    url = f"{employer['base_url']}/wday/cxs/{employer['tenant']}/{site_id}/jobs"
+def workday_search(employer: dict, search_text: str, limit: int = 20, offset: int = 0) -> dict:
+    """Search jobs via Workday CXS API. Returns JSON with total + jobPostings."""
+    url = f"{employer['base_url']}/wday/cxs/{employer['tenant']}/{employer['site_id']}/jobs"
     payload = json.dumps({
         "appliedFacets": {},
         "limit": limit,
         "offset": offset,
         "searchText": search_text,
     }).encode()
+
     req = urllib.request.Request(url, data=payload, method="POST")
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
     req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
     with _urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
-
-
-def _try_discover_site_id(employer: dict, search_text: str, limit: int) -> str | None:
-    candidates = _candidate_site_ids(employer)
-    for candidate in candidates:
-        if candidate == employer.get("site_id"):
-            continue
-        if not _site_path_is_live(employer["base_url"], candidate):
-            continue
-        try:
-            _workday_search_request(employer, search_text, limit, 0, candidate)
-            return candidate
-        except urllib.error.HTTPError:
-            continue
-        except Exception:
-            continue
-    return None
-
-def workday_search(employer: dict, search_text: str, limit: int = 20, offset: int = 0) -> dict:
-    """Search jobs via Workday CXS API. Returns JSON with total + jobPostings."""
-    try:
-        return _workday_search_request(employer, search_text, limit, offset, employer["site_id"])
-    except urllib.error.HTTPError as e:
-        if offset == 0 and e.code in _QUARANTINE_HTTP_STATUSES:
-            discovered_site_id = _try_discover_site_id(employer, search_text, limit)
-            if discovered_site_id and discovered_site_id != employer.get("site_id"):
-                employer["site_id"] = discovered_site_id
-                return _workday_search_request(employer, search_text, limit, offset, employer["site_id"])
-        raise
 
 
 def workday_detail(employer: dict, external_path: str) -> dict:
@@ -288,7 +197,7 @@ def search_employer(
     reject_locs: list[str] | None = None,
 ) -> list[dict]:
     """Search an employer, paginate through all results, optionally filter by location."""
-    log.info("%s: starting Workday search", employer["name"])
+    log.info("%s: searching \"%s\"...", employer["name"], search_text)
 
     all_jobs: list[dict] = []
     offset = 0
@@ -331,7 +240,7 @@ def search_employer(
 
         if total is None:
             total = data.get("total", 0)
-            log.info("%s: first Workday page received", employer["name"])
+            log.info("%s: %d total results", employer["name"], total)
 
         postings = data.get("jobPostings", [])
         if not postings:
@@ -357,13 +266,14 @@ def search_employer(
         if offset >= total:
             break
         if page_num >= max_pages:
-            log.info("%s: Workday page cap reached", employer["name"])
+            log.info("%s: capped at %d pages (%d results scanned)", employer["name"], max_pages, offset)
             break
         if max_results and len(all_jobs) >= max_results:
             all_jobs = all_jobs[:max_results]
             break
 
-    log.info("%s: Workday search complete", employer["name"])
+    log.info("%s: %d jobs found%s", employer["name"], len(all_jobs),
+             " (filtered)" if location_filter else "")
     return all_jobs
 
 
@@ -396,10 +306,11 @@ def _fetch_one_detail(employer: dict, job: dict) -> dict:
 
 def fetch_details(employer: dict, jobs: list[dict]) -> list[dict]:
     """Fetch full description + apply URL for each job sequentially."""
-    log.info("%s: fetching Workday details", employer["name"])
+    log.info("%s: fetching details for %d jobs...", employer["name"], len(jobs))
 
     completed = 0
     errors = 0
+    t0 = time.time()
 
     for job in jobs:
         _fetch_one_detail(employer, job)
@@ -408,9 +319,13 @@ def fetch_details(employer: dict, jobs: list[dict]) -> list[dict]:
             errors += 1
 
         if completed % 20 == 0 or completed == len(jobs):
-            log.debug("%s: detail fetch checkpoint", employer["name"])
+            elapsed = time.time() - t0
+            rate = completed / elapsed if elapsed > 0 else 0
+            log.info("%s: %d/%d (%d errors) [%.1f jobs/sec]",
+                     employer["name"], completed, len(jobs), errors, rate)
 
-    log.info("%s: Workday detail fetch complete", employer["name"])
+    elapsed = time.time() - t0
+    log.info("%s: done in %.1fs (%.1f jobs/sec)", employer["name"], elapsed, len(jobs) / elapsed if elapsed > 0 else 0)
     return jobs
 
 
@@ -478,30 +393,10 @@ def _process_one(
             accept_locs=accept_locs,
             reject_locs=reject_locs,
         )
-    except WorkdayEmployerFailure as e:
-        log.error("%s: Workday search failed (%s)", emp["name"], _exception_summary(e))
-        return {
-            "employer": emp["name"],
-            "employer_key": employer_key,
-            "query": search_text,
-            "found": 0,
-            "new": 0,
-            "existing": 0,
-            "error": str(e),
-            "quarantine": e.quarantine,
-        }
     except Exception as e:
-        log.error("%s: Workday search failed (%s)", emp["name"], _exception_summary(e))
-        return {
-            "employer": emp["name"],
-            "employer_key": employer_key,
-            "query": search_text,
-            "found": 0,
-            "new": 0,
-            "existing": 0,
-            "error": str(e),
-            "quarantine": False,
-        }
+        log.error("%s: ERROR searching '%s': %s", emp["name"], search_text, e)
+        return {"employer": emp["name"], "query": search_text,
+                "found": 0, "new": 0, "existing": 0, "error": str(e)}
 
     if not jobs:
         return {"employer": emp["name"], "query": search_text,
@@ -510,11 +405,11 @@ def _process_one(
     try:
         jobs = fetch_details(emp, jobs)
     except Exception as e:
-        log.error("%s: Workday detail fetch failed (%s)", emp["name"], _exception_summary(e))
+        log.error("%s: ERROR fetching details for '%s': %s", emp["name"], search_text, e)
 
     conn = get_connection()
     new, existing = store_results(conn, jobs, employers)
-    log.info("%s: Workday results stored", emp["name"])
+    log.info("%s: %d new, %d already in DB", emp["name"], new, existing)
 
     return {"employer": emp["name"], "query": search_text,
             "found": len(jobs), "new": new, "existing": existing}
@@ -552,7 +447,7 @@ def scrape_employers(
     total_existing = 0
     total_found = 0
     errors = 0
-    quarantined: set[str] = set()
+    t0 = time.time()
 
     valid_keys = [k for k in employer_keys if k in employers]
 
@@ -575,8 +470,11 @@ def scrape_employers(
                 total_found += result["found"]
                 if "error" in result:
                     errors += 1
-                if result.get("quarantine") and result.get("employer_key"):
-                    quarantined.add(result["employer_key"])
+
+                if completed % 10 == 0 or completed == len(valid_keys):
+                    elapsed = time.time() - t0
+                    log.info("[%s] Progress: %d/%d employers (%d new, %d dupes, %d errors) [%.0fs]",
+                             search_text, completed, len(valid_keys), total_new, total_existing, errors, elapsed)
     else:
         # Sequential mode (default)
         completed = 0
@@ -591,16 +489,17 @@ def scrape_employers(
             total_found += result["found"]
             if "error" in result:
                 errors += 1
-            if result.get("quarantine") and result.get("employer_key"):
-                quarantined.add(result["employer_key"])
 
-    return {
-        "found": total_found,
-        "new": total_new,
-        "existing": total_existing,
-        "errors": errors,
-        "quarantined": quarantined,
-    }
+            if completed % 10 == 0 or completed == len(valid_keys):
+                elapsed = time.time() - t0
+                log.info("[%s] Progress: %d/%d employers (%d new, %d dupes, %d errors) [%.0fs]",
+                         search_text, completed, len(valid_keys), total_new, total_existing, errors, elapsed)
+
+    elapsed = time.time() - t0
+    log.info("[%s] Done: %d found, %d new, %d dupes in %.0fs",
+             search_text, total_found, total_new, total_existing, elapsed)
+
+    return {"found": total_found, "new": total_new, "existing": total_existing}
 
 
 # -- Public entry point ------------------------------------------------------
@@ -648,20 +547,14 @@ def run_workday_discovery(employers: dict | None = None, workers: int = 1) -> di
 
     location_filter = search_cfg.get("workday_location_filter", True)
 
-    log.info("Workday crawl starting")
+    log.info("Workday crawl: %d queries x %d employers (workers=%d)", len(queries), len(employers), workers)
 
     grand_new = 0
     grand_existing = 0
     grand_found = 0
-    grand_errors = 0
-    quarantined_employers: set[str] = set()
 
     for i, query in enumerate(queries, 1):
-        log.info("Running Workday query %d/%d", i, len(queries))
-        active_employers = [key for key in employers.keys() if key not in quarantined_employers]
-        if not active_employers:
-            log.warning("All Workday employers are quarantined; stopping remaining queries.")
-            break
+        log.info("Query %d/%d: \"%s\"", i, len(queries), query)
         result = scrape_employers(
             search_text=query,
             employers=employers,
@@ -669,20 +562,17 @@ def run_workday_discovery(employers: dict | None = None, workers: int = 1) -> di
             accept_locs=accept_locs,
             reject_locs=reject_locs,
             workers=workers,
-            employer_keys=active_employers,
         )
         grand_new += result["new"]
         grand_existing += result["existing"]
         grand_found += result["found"]
-        grand_errors += result.get("errors", 0)
-        quarantined_employers.update(result.get("quarantined", set()))
 
-    log.info("Workday crawl complete")
+    log.info("Workday crawl done: %d found, %d new, %d existing across %d queries x %d employers",
+             grand_found, grand_new, grand_existing, len(queries), len(employers))
 
     return {
         "found": grand_found,
         "new": grand_new,
         "existing": grand_existing,
-        "errors": grand_errors,
         "queries": len(queries),
     }

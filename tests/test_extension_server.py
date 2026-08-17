@@ -18,6 +18,8 @@ import unittest.mock as mock
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
+import pytest
+
 # Make sure the src package is importable
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -394,6 +396,7 @@ class TestRaiseX11Window(unittest.TestCase):
 class TestBringToForegroundPid(unittest.TestCase):
     """bring_to_foreground_pid falls back to X11 ctypes when tools are absent."""
 
+    @pytest.mark.skipif(sys.platform != "linux", reason="X11 fallback is Linux-only")
     def test_calls_x11_when_xdotool_missing(self):
         """Falls through xdotool (not found) to _raise_x11_window."""
         with (
